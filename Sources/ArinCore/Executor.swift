@@ -46,12 +46,14 @@ public struct Executor: Sendable {
 
     public func run(_ candidates: [Candidate], progress: (@Sendable (CleanupEvent) -> Void)? = nil) async -> CleanupReport {
         let before = Disk.status(path: guardrails.home).freeBytes
-        let state = await SystemState.capture()
         progress?(.started(total: candidates.count))
 
         var results: [CleanupItemResult] = []
         for (index, candidate) in candidates.enumerated() {
             progress?(.item(index: index, title: candidate.title))
+            // A fresh snapshot per item (~0.3 s): an earlier slow item gives apps time to start
+            // using a later one.
+            let state = await SystemState.capture()
             let result = await clean(candidate, state: state)
             results.append(result)
             progress?(.finished(result))
@@ -85,7 +87,13 @@ public struct Executor: Sendable {
         }
 
         guard candidate.isActionable else { return result(.skipped, "informational only") }
-        do { try guardrails.check(candidate.action) } catch { return result(.skipped, error.description) }
+        do {
+            try guardrails.check(candidate.action)
+            // Native commands act on the candidate's paths too (e.g. a GOMODCACHE moved under ~/Documents).
+            for path in candidate.paths { try guardrails.check(path) }
+        } catch {
+            return result(.skipped, error.description)
+        }
 
         // Re-check right before acting: things change between scan and clean.
         let live = state.blockers(
@@ -94,6 +102,12 @@ public struct Executor: Sendable {
             minIdle: candidate.minIdleSeconds
         )
         if !live.isEmpty { return result(.skipped, live.joined(separator: "; ")) }
+        // The snapshot only sees a path and its children; check the whole tree for recent writes.
+        if let idle = candidate.minIdleSeconds {
+            for path in candidate.paths where await FileInfo.hasRecentWrites(path, within: idle) {
+                return result(.skipped, "\((path as NSString).abbreviatingWithTildeInPath) was written recently (may be in use)")
+            }
+        }
 
         switch candidate.action {
         case .none:
@@ -184,6 +198,13 @@ public struct Executor: Sendable {
         for path in paths {
             do { try guardrails.check(path) } catch { errors.append(error.description); continue }
             guard FileManager.default.fileExists(atPath: path) || FileInfo.resolveSymlink(path) != nil else { continue }
+            if FileInfo.isSymlink(path) {
+                // Remove the link itself; never chmod or rm -rf through it.
+                do { try FileManager.default.removeItem(atPath: path) } catch {
+                    errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(error.localizedDescription)")
+                }
+                continue
+            }
             if (try? FileManager.default.removeItem(atPath: path)) != nil { continue }
             _ = await Shell.run("chmod", ["-R", "u+w", path], timeout: 300)
             do {

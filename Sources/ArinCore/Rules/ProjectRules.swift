@@ -99,12 +99,14 @@ struct ProjectArtifactRule: Rule {
     /// Notes, scratch source, or nested checkouts make it a review item.
     static func binLooksGenerated(_ path: String) -> (Bool, String) {
         var odd: [String] = []
+        if let checkout = nestedCheckout(in: path) {
+            odd.append("\(checkout) (git checkout)")
+        }
         for child in FileInfo.children(path) {
             let name = (child as NSString).lastPathComponent
             if name.hasPrefix(".") { odd.append(name); continue }
             if FileInfo.isDirectory(child) {
                 if ["k8s", "tools", "venv", ".venv"].contains(name) || FileInfo.exists("\(child)/pyvenv.cfg") { continue }
-                if FileInfo.exists("\(child)/.git") { odd.append("\(name)/ (git checkout)"); continue }
                 odd.append("\(name)/")
             } else if !FileManager.default.isExecutableFile(atPath: child) {
                 odd.append(name)
@@ -112,6 +114,19 @@ struct ProjectArtifactRule: Rule {
         }
         if odd.isEmpty { return (true, "") }
         return (false, "Contains non-binary entries worth checking: \(odd.prefix(5).joined(separator: ", "))\(odd.count > 5 ? ", …" : "").")
+    }
+
+    /// First `.git` anywhere under `dir`, relative to it. Tool trees are small; a tree too large
+    /// to finish walking is reported as possibly holding a checkout.
+    static func nestedCheckout(in dir: String) -> String? {
+        guard let walker = FileManager.default.enumerator(atPath: dir) else { return nil }
+        var seen = 0
+        while let relative = walker.nextObject() as? String {
+            if (relative as NSString).lastPathComponent == ".git" { return (relative as NSString).deletingLastPathComponent + "/" }
+            seen += 1
+            if seen > 100_000 { return "contents too large to check" }
+        }
+        return nil
     }
 
     static func detail(_ kind: Kind) -> String {

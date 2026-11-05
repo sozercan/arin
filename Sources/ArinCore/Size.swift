@@ -71,6 +71,19 @@ public enum FileInfo {
         return newest
     }
 
+    public static func isSymlink(_ path: String) -> Bool {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType == .typeSymbolicLink
+    }
+
+    /// Any file under `path` modified within the window. Stops at the first hit; a walk that
+    /// can't finish counts as recently written.
+    public static func hasRecentWrites(_ path: String, within window: TimeInterval) async -> Bool {
+        let minutes = String(max(Int(window / 60), 1))
+        let result = await Shell.run("find", [path, "-mmin", "-\(minutes)", "-print", "-quit"], timeout: 120)
+        if result.timedOut { return true }
+        return !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// The path with each component spelled as it is on disk. APFS is usually case-insensitive,
     /// so `Caches/Yarn` finds `Caches/yarn`; comparisons need the real spelling.
     public static func actualCase(_ path: String) -> String {

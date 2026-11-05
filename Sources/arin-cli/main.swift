@@ -55,7 +55,10 @@ struct Args {
                 let v = try value(arg)
                 guard let a = AgentProvider(rawValue: v) else { throw CLIError("unknown agent \(v)") }
                 agent = a
-            case "--limit": limit = Int(try value(arg)) ?? 150
+            case "--limit":
+                let v = try value(arg)
+                guard let n = Int(v), n > 0 else { throw CLIError("--limit needs a positive integer, got \(v)") }
+                limit = n
             case "--model": model = try value(arg)
             case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }

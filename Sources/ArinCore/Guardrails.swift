@@ -40,10 +40,21 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// Validates a path for deletion or trashing.
+    /// Validates a path for deletion or trashing. Symlinked ancestors are resolved and the real
+    /// location is checked too, so `~/Library/Caches/X -> ~/Documents/X` can't smuggle a delete
+    /// into a protected folder.
     public func check(_ rawPath: String) throws(Violation) {
         guard rawPath.hasPrefix("/") else { throw .notAbsolute(rawPath) }
         let path = Self.canonical((rawPath as NSString).standardizingPath)
+        try checkCanonical(path)
+        let parent = (path as NSString).deletingLastPathComponent
+        let realParent = Self.canonical(URL(fileURLWithPath: parent).resolvingSymlinksInPath().path)
+        if realParent != parent {
+            try checkCanonical((realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent))
+        }
+    }
+
+    private func checkCanonical(_ path: String) throws(Violation) {
         guard let root = allowedRoots.first(where: { path == $0 || path.hasPrefix($0 + "/") }) else {
             throw .outsideAllowedRoots(path)
         }

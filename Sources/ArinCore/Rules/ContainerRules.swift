@@ -55,12 +55,14 @@ struct DockerRule: Rule {
             }
         }
 
-        let builders = Set(await Shell.run("docker", ["buildx", "ls", "--format", "{{.Name}}"], timeout: 15).lines)
+        // `buildx ls` lists builders and their nodes. If it fails, owners are unknown: nothing is an orphan.
+        let listing = await Shell.run("docker", ["buildx", "ls", "--format", "{{.Name}}"], timeout: 15)
+        let builders: Set<String>? = listing.ok ? Set(listing.lines.map { $0.trimmingCharacters(in: .whitespaces) }) : nil
         let dangling = await Shell.run("docker", ["volume", "ls", "-q", "--filter", "dangling=true"], timeout: 20).lines
         guard !dangling.isEmpty else { return result }
         let volumeSizes = await Self.volumeSizes()
         for volume in dangling {
-            let orphanedBuilder = Self.orphanedBuildxVolume(volume, builders: builders)
+            let orphanedBuilder = builders.map { Self.orphanedBuildxVolume(volume, builders: $0) } ?? false
             result.append(Candidate(
                 ruleID: "docker.volume",
                 key: volume,
@@ -137,7 +139,7 @@ struct SQLiteFreePagesRule: Rule {
                 level: .deep,
                 risk: .review,
                 bytes: free,
-                paths: [],
+                paths: [db],
                 action: .commands([CommandSpec("sqlite3", [db, "VACUUM;"])]),
                 blockers: ctx.state.blockers(paths: [db], processes: ["codex", "Codex"], minIdle: nil),
                 blockingProcesses: ["codex", "Codex"]

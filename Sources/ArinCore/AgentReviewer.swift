@@ -109,7 +109,7 @@ public struct AgentReviewer: Sendable {
         self.model = model.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
         self.effort = effort.flatMap { $0.isEmpty ? nil : $0 }
         self.timeout = timeout
-        self.maxCandidates = maxCandidates
+        self.maxCandidates = max(maxCandidates, 0)
     }
 
     /// Credentials and personal data the reviewer must not read. The review never needs them.
@@ -123,7 +123,9 @@ public struct AgentReviewer: Sendable {
 
     /// Commands with no writing flags and that don't print file contents
     /// (no find: -delete; no git branch: -D; no cat/head: they'd bypass the Read deny rules).
-    static let readOnlyBash = ["ls", "du", "stat", "file", "lsof", "git status", "git log --oneline", "git worktree list"]
+    /// `file` (-C writes a magic db) and `git log` (--output=FILE) are excluded: prefix rules
+    /// can't stop write-capable options.
+    static let readOnlyBash = ["ls", "du", "stat", "lsof", "git status", "git worktree list"]
 
     public static let schema: String = """
     {"type":"object","additionalProperties":false,"required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","verdict","reason"],"properties":{"id":{"type":"string"},"verdict":{"type":"string","enum":["safe","review","keep"]},"reason":{"type":"string"}}}}}}
@@ -253,7 +255,7 @@ public struct AgentReviewer: Sendable {
         return """
         You are reviewing disk-cleanup candidates on the user's Mac (home: \(NSHomeDirectory())).
         Do not modify, delete, move, or write anything. Inspect read-only only when it changes your verdict
-        (ls, du, stat, file, git status/log, reading small text files). Never print file contents in your answer.
+        (ls, du, stat, git status, reading small text files). Never print file contents in your answer.
         Never open credentials or personal data: ~/.ssh, ~/.gnupg, ~/.aws, keychains, cookies, tokens, .env files,
         Messages, Mail, Photos, Documents, Desktop. Judge those from names and sizes only.
 

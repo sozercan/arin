@@ -48,7 +48,7 @@ struct TempRule: Rule {
         var blockers: [String] = []
         if busy {
             blockers.append("files are open by a running process")
-        } else if await Self.hasRecentWrites(entry, within: idle) {
+        } else if await FileInfo.hasRecentWrites(entry, within: idle) {
             blockers.append("written in the last 3 hours (may be in use)")
         }
         let name = String(entry.dropFirst(root.count + 1))
@@ -74,23 +74,18 @@ struct TempRule: Rule {
         )]
     }
 
+    /// Whether the tree holds a git checkout outside package-manager layouts. Searches the whole
+    /// tree; a walk that can't finish counts as "yes" so the folder stays Review.
     static func containsGitCheckout(_ path: String) async -> Bool {
-        // Package-manager checkouts (SwiftPM in DerivedData, Go modules, node_modules) are re-downloadable.
+        // Only recognized package-manager output is skipped, by layout, not by a bare folder name:
+        // a real project under scratch/checkouts/ or scratch/pkg/ must still be found.
         let result = await Shell.run("find", [
-            path, "-maxdepth", "4",
-            "(", "-name", "SourcePackages", "-o", "-name", "checkouts", "-o", "-name", ".build",
-            "-o", "-name", "node_modules", "-o", "-name", "pkg", ")", "-prune",
+            path,
+            "(", "-path", "*/SourcePackages/checkouts", "-o", "-path", "*/.build/checkouts",
+            "-o", "-path", "*/pkg/mod", "-o", "-name", "node_modules", ")", "-prune",
             "-o", "-name", ".git", "-print", "-quit",
-        ], timeout: 60)
+        ], timeout: 120)
         return result.timedOut || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Any file under `path` modified within the window. Stops at the first hit.
-    static func hasRecentWrites(_ path: String, within window: TimeInterval) async -> Bool {
-        let minutes = String(Int(window / 60))
-        let result = await Shell.run("find", [path, "-mmin", "-\(minutes)", "-print", "-quit"], timeout: 60)
-        if result.timedOut { return true }
-        return !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

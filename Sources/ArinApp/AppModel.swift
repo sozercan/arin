@@ -102,6 +102,7 @@ final class AppModel {
     private let defaults = UserDefaults.standard
     private var monitor: Task<Void, Never>?
     private var work: Task<Void, Never>?
+    private var editedDuringReview = Set<String>()
     var lastReview: (agent: String, date: Date)?
     private var notifiedLowSpace = false
     private var lastAutoClean: Date?
@@ -218,9 +219,13 @@ final class AppModel {
             phase = .idle
             return
         }
-        // Keep agent verdicts from a previous review for items that still exist.
-        let previous = Dictionary(uniqueKeysWithValues: candidates.compactMap { c in c.agentVerdict.map { (c.id, $0) } })
+        // A verdict judged a folder's contents at review time, and contents change. Carry over only
+        // verdicts that add caution; a stale "safe" must never pre-select new data.
+        let previous = Dictionary(uniqueKeysWithValues: candidates.compactMap { c in
+            c.agentVerdict.flatMap { $0.risk > c.risk ? (c.id, $0) : nil }
+        })
         self.report = report
+        lastReview = nil
         candidates = report.candidates.applying(previous)
         disk = report.disk
         resetSelection()
@@ -237,6 +242,7 @@ final class AppModel {
         guard let agent, !phase.isBusy else { return }
         let items = itemsNeedingReview
         guard !items.isEmpty else { return }
+        editedDuringReview = []
         phase = .reviewing("\(agent.label) is checking \(min(items.count, 150)) items (read-only)…")
         do {
             let reviewer = AgentReviewer(
@@ -247,8 +253,8 @@ final class AppModel {
             let verdicts = try await reviewer.review(items)
             if !Task.isCancelled {
                 candidates = candidates.applying(verdicts)
-                // Only reviewed items change selection; keep what the user ticked meanwhile.
-                for candidate in candidates where verdicts[candidate.id] != nil {
+                // Only reviewed items change selection, and never ones the user changed meanwhile.
+                for candidate in candidates where verdicts[candidate.id] != nil && !editedDuringReview.contains(candidate.id) {
                     if candidate.isDefaultSelected(at: level) {
                         selection.insert(candidate.id)
                     } else {
@@ -269,11 +275,13 @@ final class AppModel {
 
     func toggle(_ candidate: Candidate) {
         if selection.contains(candidate.id) { selection.remove(candidate.id) } else { selection.insert(candidate.id) }
+        if isReviewing { editedDuringReview.insert(candidate.id) }
     }
 
     func setAll(_ items: [Candidate], selected: Bool) {
         for item in items where item.isActionable {
             if selected { selection.insert(item.id) } else { selection.remove(item.id) }
+            if isReviewing { editedDuringReview.insert(item.id) }
         }
     }
 
@@ -325,13 +333,19 @@ final class AppModel {
         }
         if autoMode, !phase.isBusy, lastAutoClean.map({ Date().timeIntervalSince($0) > 3600 }) ?? true {
             lastAutoClean = Date()
-            await scan()
-            // Auto mode only touches caches that refill on their own, never projects or worktrees.
-            let autoCategories: Set<CleanupCategory> = [.devCaches, .temp, .xcode, .toolVersions]
-            let items = candidates.filter {
-                $0.isDefaultSelected(at: .quick) && autoCategories.contains($0.category) && $0.level == .quick
+            // Tracked as `work` so Stop cancels it; cancellation and Auto mode are rechecked before cleaning.
+            let task = Task {
+                await scan()
+                guard !Task.isCancelled, autoMode, isLowOnSpace else { return }
+                // Auto mode only touches caches that refill on their own, never projects or worktrees.
+                let autoCategories: Set<CleanupCategory> = [.devCaches, .temp, .xcode, .toolVersions]
+                let items = candidates.filter {
+                    $0.isDefaultSelected(at: .quick) && autoCategories.contains($0.category) && $0.level == .quick
+                }
+                await clean(items, auto: true)
             }
-            await clean(items, auto: true)
+            work = task
+            await task.value
             return
         }
         if !notifiedLowSpace {

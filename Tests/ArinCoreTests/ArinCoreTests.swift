@@ -472,3 +472,98 @@ struct CLIFailure: Error { var message: String }
         #expect(!(await Executor.targetsMostlyGone(full)))
     }
 }
+
+@Suite struct ReviewFindingRegressionTests {
+    @Test func symlinkedAncestorIntoProtectedFolderIsRefused() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let target = try box.mkdir("Documents/Google/Chrome")
+        _ = try box.mkdir("Library/Caches")
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/Library/Caches/Google", withDestinationPath: "\(box.root)/Documents/Google")
+        #expect(throws: Guardrails.Violation.self) { try box.guardrails.check("\(box.root)/Library/Caches/Google/Chrome") }
+        #expect(FileManager.default.fileExists(atPath: target))
+    }
+
+    @Test func symlinkLeafIsRemovedWithoutTouchingTarget() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let keep = try box.write("projects/real/keep.txt")
+        _ = try box.mkdir("Library/Caches")
+        let link = "\(box.root)/Library/Caches/linked"
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: "\(box.root)/projects/real")
+        let errors = await Executor(guardrails: box.guardrails).delete([link])
+        #expect(errors.isEmpty)
+        #expect(!FileInfo.isSymlink(link))
+        #expect(FileManager.default.fileExists(atPath: keep))
+    }
+
+    @Test func nativeCommandsRespectPathGuardrails() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let modcache = try box.mkdir("Documents/gomod")
+        let candidate = Candidate(ruleID: "t", title: "t", detail: "", category: .devCaches, level: .quick, risk: .safe,
+                                  bytes: 1, paths: [modcache], action: .commands([CommandSpec("go", ["clean", "-modcache"])]))
+        let result = await Executor(guardrails: box.guardrails).clean(candidate, state: .empty)
+        #expect(result.status == .skipped)
+    }
+
+    @Test func deepRecentWriteBlocksCleanup() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let root = try box.mkdir("Library/Caches/scratch")
+        _ = try box.write("Library/Caches/scratch/a/b/c/d/fresh.log")
+        // Make the top levels look old so only a deep check sees the write.
+        let old = Date(timeIntervalSinceNow: -48 * 3600)
+        for rel in ["Library/Caches/scratch/a/b/c/d", "Library/Caches/scratch/a/b/c", "Library/Caches/scratch/a/b", "Library/Caches/scratch/a", "Library/Caches/scratch"] {
+            try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: "\(box.root)/\(rel)")
+        }
+        var candidate = Candidate(ruleID: "t", title: "t", detail: "", category: .temp, level: .quick, risk: .safe,
+                                  bytes: 1, paths: [root], action: .delete([root]))
+        candidate.minIdleSeconds = 3 * 3600
+        let result = await Executor(guardrails: box.guardrails).clean(candidate, state: .empty)
+        #expect(result.status == .skipped)
+        #expect(FileManager.default.fileExists(atPath: root))
+    }
+
+    @Test func checkoutsAreFoundAtAnyDepthAndUnderGenericNames() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.mkdir("deep/a/b/c/d/e/repo/.git")
+        _ = try box.mkdir("named/checkouts/my-project/.git")
+        _ = try box.mkdir("gopkg/pkg/my-project/.git")
+        _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
+        _ = try box.mkdir("gomod/pkg/mod/github.com/x/y/.git")
+        #expect(await TempRule.containsGitCheckout("\(box.root)/deep"))
+        #expect(await TempRule.containsGitCheckout("\(box.root)/named"))
+        #expect(await TempRule.containsGitCheckout("\(box.root)/gopkg"))
+        #expect(!(await TempRule.containsGitCheckout("\(box.root)/dd")))
+        #expect(!(await TempRule.containsGitCheckout("\(box.root)/gomod")))
+    }
+
+    @Test func binToolFolderWithCheckoutNeedsReview() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.mkdir("repo/bin/tools/.git")
+        let (generated, note) = ProjectArtifactRule.binLooksGenerated("\(box.root)/repo/bin")
+        #expect(!generated)
+        #expect(note.contains("git checkout"))
+    }
+
+    @Test func overviewNeverEntersCheckouts() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gb: Int64 = 1024 * 1024 * 1024
+        let top = try box.mkdir(".tools")
+        let repo = try box.mkdir(".tools/src/app")
+        _ = try box.mkdir(".tools/src/app/.git")
+        let sizes: [String: Int64] = [top: 5 * gb, "\(top)/src": 5 * gb, repo: 5 * gb, "\(repo)/.git": 4 * gb]
+        let picked = HomeOverview.pick(top, sizes: sizes, depth: 0, avoid: []) { _ in false }
+        #expect(picked.isEmpty)
+    }
+
+    @Test func reviewerShellAllowlistHasNoWritableOptions() {
+        let bash = AgentReviewer.claudeArguments(model: nil, effort: nil, home: "/h").filter { $0.hasPrefix("Bash(") }
+        #expect(!bash.contains { $0.contains("file") || $0.contains("git log") })
+        #expect(AgentReviewer(provider: .claude, maxCandidates: -1).maxCandidates == 0)
+    }
+}

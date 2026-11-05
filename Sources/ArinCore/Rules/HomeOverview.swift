@@ -83,6 +83,8 @@ enum HomeOverview {
         guard let size = sizes[dir], size >= minimum, !isSkipped(dir) else { return [] }
         // Already handled by a rule (or inside something that is).
         if avoid.contains(where: { dir == $0 || dir.hasPrefix($0 + "/") }) { return [] }
+        // A checkout may hold unpushed work: never report it, and never descend into its folders.
+        if (dir as NSString).lastPathComponent == ".git" || FileInfo.exists("\(dir)/.git") { return [] }
         let prefix = dir + "/"
         let big = sizes.filter { path, bytes in
             bytes >= minimum && path.hasPrefix(prefix) && !path.dropFirst(prefix.count).contains("/")
