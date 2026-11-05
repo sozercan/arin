@@ -456,3 +456,19 @@ struct CLIFailure: Error { var message: String }
         #expect(!(await TempRule.containsGitCheckout("\(box.root)/dd")))
     }
 }
+
+@Suite struct CommandOutcomeTests {
+    @Test func failingCommandThatEmptiedTargetsCountsAsCleaned() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let cache = try box.mkdir("Library/Caches/tool")
+        let emptied = Candidate(ruleID: "t", title: "t", detail: "", category: .devCaches, level: .quick, risk: .safe,
+                                bytes: 100 * 1024 * 1024, paths: [cache], action: .none)
+        #expect(await Executor.targetsMostlyGone(emptied))
+
+        _ = try box.write("Library/Caches/tool/blob", String(repeating: "x", count: 200_000))
+        var full = emptied
+        full.bytes = 100 * 1024
+        #expect(!(await Executor.targetsMostlyGone(full)))
+    }
+}

@@ -112,21 +112,39 @@ public struct Executor: Sendable {
             return errors.isEmpty ? result(.cleaned, "moved to Trash", trashed: true) : result(.failed, errors.joined(separator: "; "))
 
         case let .commands(commands):
+            var warnings: [String] = []
             for command in commands {
                 guard Guardrails.allowedExecutables.contains(command.executable) else {
                     return result(.skipped, "refusing to run \(command.executable)")
                 }
                 let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd, timeout: commandTimeout)
                 if !output.ok {
-                    let tail = (output.stderr.isEmpty ? output.stdout : output.stderr).suffix(400)
-                    return result(.failed, output.timedOut ? "\(command.display) timed out" : "\(command.display): \(tail)")
+                    let tail = String((output.stderr.isEmpty ? output.stdout : output.stderr).suffix(400))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if output.timedOut { return result(.failed, "\(command.display) timed out") }
+                    // Tools like `brew cleanup` exit non-zero over one bad formula after cleaning
+                    // everything else. Judge by what's left on disk, not the exit code.
+                    if await Self.targetsMostlyGone(candidate) {
+                        warnings.append(tail)
+                        continue
+                    }
+                    return result(.failed, "\(command.display): \(tail)")
                 }
             }
-            return result(.cleaned, commands.map(\.display).joined(separator: " && "))
+            let done = commands.map(\.display).joined(separator: " && ")
+            if warnings.isEmpty { return result(.cleaned, done) }
+            return result(.cleaned, "\(done) finished with warnings: \(warnings.joined(separator: "; ").prefix(300))")
 
         case let .removeWorktree(repo, path):
             return await removeWorktree(repo: repo, path: path, result: result)
         }
+    }
+
+    /// True when the candidate's folders now use under a quarter of their scanned size.
+    static func targetsMostlyGone(_ candidate: Candidate) async -> Bool {
+        guard !candidate.paths.isEmpty, candidate.bytes > 0 else { return false }
+        let remaining = await Size.total(candidate.paths)
+        return remaining * 4 < candidate.bytes
     }
 
     func removeWorktree(
