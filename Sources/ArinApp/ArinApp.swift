@@ -17,9 +17,11 @@ struct ArinApp: App {
         .defaultLaunchBehavior(.presented)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("Scan") { Task { await model.scan() } }
-                    .keyboardShortcut("r")
-                    .disabled(model.phase.isBusy)
+                Button(model.isScanning ? "Stop Scan" : "Scan") {
+                    model.isScanning ? model.stopScan() : model.startScan()
+                }
+                .keyboardShortcut("r")
+                .disabled(model.phase.isBusy && !model.isScanning)
             }
         }
 

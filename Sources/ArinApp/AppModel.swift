@@ -92,6 +92,7 @@ final class AppModel {
     let installedAgents = AgentProvider.installed
     private let defaults = UserDefaults.standard
     private var monitor: Task<Void, Never>?
+    private var scanTask: Task<Void, Never>?
     private var notifiedLowSpace = false
     private var lastAutoClean: Date?
 
@@ -116,7 +117,7 @@ final class AppModel {
         startMonitor()
         // `open Arin.app --args -ScanOnLaunch YES` starts a scan right away.
         if defaults.bool(forKey: "ScanOnLaunch") {
-            Task { await scan() }
+            startScan()
         }
     }
 
@@ -160,6 +161,21 @@ final class AppModel {
         disk = Disk.status()
     }
 
+    var isScanning: Bool {
+        if case .scanning = phase { return true }
+        return false
+    }
+
+    func startScan() {
+        guard !phase.isBusy else { return }
+        scanTask = Task { await scan() }
+    }
+
+    /// Cancels the scan and its subprocesses; previous results stay as they were.
+    func stopScan() {
+        scanTask?.cancel()
+    }
+
     func scan() async {
         guard !phase.isBusy else { return }
         phase = .scanning("starting")
@@ -169,6 +185,10 @@ final class AppModel {
             Task { @MainActor in
                 if case .scanning = self?.phase { self?.phase = .scanning(name) }
             }
+        }
+        guard !Task.isCancelled else {
+            phase = .idle
+            return
         }
         // Keep agent verdicts from a previous review for items that still exist.
         let previous = Dictionary(uniqueKeysWithValues: candidates.compactMap { c in c.agentVerdict.map { (c.id, $0) } })

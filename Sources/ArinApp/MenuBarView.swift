@@ -30,11 +30,15 @@ struct MenuBarView: View {
                     openWindow(id: "main")
                     NSApp.activate()
                 }
-                Button("Scan") {
-                    openWindow(id: "main")
-                    Task { await model.scan() }
+                if model.isScanning {
+                    Button("Stop Scan") { model.stopScan() }
+                } else {
+                    Button("Scan") {
+                        openWindow(id: "main")
+                        model.startScan()
+                    }
+                    .disabled(model.phase.isBusy)
                 }
-                .disabled(model.phase.isBusy)
                 Spacer()
                 SettingsLink { Image(systemName: "gearshape") }
                     .help("Settings")

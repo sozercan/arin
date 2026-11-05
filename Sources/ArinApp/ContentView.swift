@@ -94,11 +94,16 @@ private struct Toolbar: ToolbarContent {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
-                Task { await model.scan() }
+                model.isScanning ? model.stopScan() : model.startScan()
             } label: {
-                Label("Scan", systemImage: "arrow.clockwise")
+                if model.isScanning {
+                    Label("Stop Scan", systemImage: "stop.fill")
+                } else {
+                    Label("Scan", systemImage: "arrow.clockwise")
+                }
             }
-            .disabled(model.phase.isBusy)
+            .help(model.isScanning ? "Stop scanning (keeps previous results)" : "Scan again")
+            .disabled(model.phase.isBusy && !model.isScanning)
 
             Menu {
                 if model.installedAgents.isEmpty {
@@ -180,15 +185,27 @@ private struct WelcomeView: View {
                 step("3", "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
             }
             .frame(maxWidth: 720)
-            Button {
-                Task { await model.scan() }
-            } label: {
-                Label("Scan this Mac", systemImage: "magnifyingglass")
-                    .padding(.horizontal, 12)
+            Group {
+                if model.isScanning {
+                    Button(role: .cancel) {
+                        model.stopScan()
+                    } label: {
+                        Label("Stop Scan", systemImage: "stop.fill")
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.bordered)
+                } else {
+                    Button {
+                        model.startScan()
+                    } label: {
+                        Label("Scan this Mac", systemImage: "magnifyingglass")
+                            .padding(.horizontal, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.phase.isBusy)
+                }
             }
-            .buttonStyle(.borderedProminent)
             .controlSize(.extraLarge)
-            .disabled(model.phase.isBusy)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -348,3 +348,24 @@ struct CLIFailure: Error { var message: String }
         #expect(args[args.firstIndex(of: "--sandbox")! + 1] == "read-only")
     }
 }
+
+@Suite struct CancellationTests {
+    @Test func cancellingKillsTheSubprocess() async {
+        let started = Date()
+        let task = Task { await Shell.run("sleep", ["30"], timeout: 60) }
+        try? await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        let result = await task.value
+        #expect(Date().timeIntervalSince(started) < 5)
+        #expect(!result.ok)
+    }
+
+    @Test func cancelledTasksDontStartProcesses() async {
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await Shell.run("sleep", ["30"])
+        }
+        let result = await task.value
+        #expect(result.stderr == "cancelled")
+    }
+}

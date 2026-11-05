@@ -8,6 +8,8 @@ public struct ShellResult: Sendable {
 
     public var ok: Bool { status == 0 && !timedOut }
 
+    static let cancelled = ShellResult(status: -2, stdout: "", stderr: "cancelled", timedOut: false)
+
     public var lines: [String] {
         stdout.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
     }
@@ -60,10 +62,17 @@ public enum Shell {
         guard let exe = which(executable) else {
             return ShellResult(status: 127, stdout: "", stderr: "\(executable): not found", timedOut: false)
         }
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: runBlocking(exe, arguments, cwd: cwd, input: input, timeout: timeout))
+        if Task.isCancelled { return .cancelled }
+        // Cancelling the calling task terminates the subprocess, so a stopped scan stops its du/find/git too.
+        let handle = ProcessHandle()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: runBlocking(exe, arguments, cwd: cwd, input: input, timeout: timeout, handle: handle))
+                }
             }
+        } onCancel: {
+            handle.cancel()
         }
     }
 
@@ -72,7 +81,8 @@ public enum Shell {
         _ arguments: [String],
         cwd: String?,
         input: String?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        handle: ProcessHandle
     ) -> ShellResult {
         // Temp files instead of pipes: no deadlock when a tool writes megabytes (lsof, du).
         let tmp = FileManager.default.temporaryDirectory
@@ -108,6 +118,7 @@ public enum Shell {
         } catch {
             return ShellResult(status: -1, stdout: "", stderr: "\(error)", timedOut: false)
         }
+        if !handle.attach(process) { process.terminate() }
         if let input {
             let data = Data(input.utf8)
             DispatchQueue.global().async {
@@ -130,5 +141,28 @@ public enum Shell {
         let stdout = (try? String(contentsOf: outURL, encoding: .utf8)) ?? ""
         let stderr = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
         return ShellResult(status: process.terminationStatus, stdout: stdout, stderr: stderr, timedOut: timedOut)
+    }
+}
+
+/// Lets a cancellation handler terminate a process that a background thread started.
+final class ProcessHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var cancelled = false
+
+    /// Returns false if cancellation already happened; the caller then terminates the process itself.
+    func attach(_ process: Process) -> Bool {
+        lock.withLock {
+            self.process = process
+            return !cancelled
+        }
+    }
+
+    func cancel() {
+        let running: Process? = lock.withLock {
+            cancelled = true
+            return process
+        }
+        if let running, running.isRunning { running.terminate() }
     }
 }
