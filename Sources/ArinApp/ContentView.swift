@@ -1,0 +1,240 @@
+import ArinCore
+import SwiftUI
+
+struct ContentView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        NavigationSplitView {
+            Sidebar()
+                .navigationSplitViewColumnWidth(min: 220, ideal: 250)
+        } detail: {
+            Group {
+                if model.report == nil {
+                    WelcomeView()
+                } else if model.sidebar == .insights {
+                    InsightsView()
+                } else {
+                    CandidateList(items: model.candidates(for: model.sidebar))
+                }
+            }
+            .safeAreaInset(edge: .bottom) { StatusBar() }
+        }
+        .toolbar { Toolbar() }
+        .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
+        .sheet(isPresented: $model.showingResult) { ResultSheet() }
+        .alert("Something went wrong", isPresented: Binding(
+            get: { model.errorMessage != nil },
+            set: { if !$0 { model.errorMessage = nil } }
+        )) {
+            Button("OK") { model.errorMessage = nil }
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
+    }
+}
+
+private struct Sidebar: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        @Bindable var model = model
+        List(selection: $model.sidebar) {
+            Section {
+                DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold)
+                    .padding(.vertical, 6)
+                    .selectionDisabled()
+            }
+            if model.report != nil {
+                Section("Found") {
+                    row(.all, "All", "square.grid.2x2", model.candidates.dedupedBytes)
+                    ForEach(model.categoriesWithResults, id: \.self) { category in
+                        row(.category(category), category.label, category.symbol, model.bytes(for: category))
+                    }
+                }
+                if let report = model.report, !report.insights.isEmpty || !report.ruleErrors.isEmpty {
+                    Section {
+                        Label("Insights", systemImage: "lightbulb")
+                            .badge(report.insights.count + report.ruleErrors.count)
+                            .tag(AppModel.SidebarItem.insights)
+                    }
+                }
+            }
+        }
+    }
+
+    private func row(_ item: AppModel.SidebarItem, _ title: String, _ symbol: String, _ bytes: Int64) -> some View {
+        Label {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(bytes.formattedBytes)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        } icon: {
+            Image(systemName: symbol)
+        }
+        .tag(item)
+    }
+}
+
+private struct Toolbar: ToolbarContent {
+    @Environment(AppModel.self) private var model
+
+    var body: some ToolbarContent {
+        @Bindable var model = model
+        ToolbarItem(placement: .navigation) {
+            Picker("Level", selection: $model.level) {
+                ForEach(Level.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .help("Quick: caches that refill on their own. Standard: adds build output and merged worktrees. Deep: simulator data, toolchains, app data.")
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                Task { await model.scan() }
+            } label: {
+                Label("Scan", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.phase.isBusy)
+
+            Menu {
+                if model.installedAgents.isEmpty {
+                    Text("Install Claude Code or Codex to enable reviews")
+                }
+                ForEach(model.installedAgents) { agent in
+                    Button {
+                        model.agent = agent
+                        Task { await model.review() }
+                    } label: {
+                        Text("Review with \(agent.label)")
+                    }
+                }
+            } label: {
+                Label("Ask agent", systemImage: "sparkles")
+            } primaryAction: {
+                Task { await model.review() }
+            }
+            .disabled(model.phase.isBusy || model.agent == nil)
+            .help("Your agent inspects each item read-only and marks what's safe. It never deletes anything.")
+
+            Button {
+                model.showingConfirm = true
+            } label: {
+                Text(model.selection.isEmpty ? "Clean" : "Clean \(model.selectedBytes.formattedBytes)")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.phase.isBusy || model.selection.isEmpty)
+        }
+    }
+}
+
+private struct StatusBar: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.phase.isBusy || model.report != nil {
+            HStack(spacing: 8) {
+                if model.phase.isBusy {
+                    ProgressView().controlSize(.small)
+                    Text(model.phase.label).lineLimit(1)
+                } else {
+                    Text("\(model.selection.count) selected · \(model.selectedBytes.formattedBytes) estimated")
+                    Spacer()
+                    if let report = model.report {
+                        Text("Scanned \(report.finishedAt.formatted(.relative(presentation: .named)))")
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.bar)
+        }
+    }
+}
+
+private struct WelcomeView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 28) {
+            VStack(spacing: 8) {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(.tint)
+                Text("Find what's safe to delete")
+                    .font(.largeTitle.weight(.semibold))
+                Text("Arin knows where developer Macs hide space, checks each item before touching it, and lets your own coding agent weigh in.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+            }
+            HStack(alignment: .top, spacing: 18) {
+                step("1", "magnifyingglass", "Scan", "Caches, build output, merged worktrees, simulators, stale temp files. Read-only.")
+                step("2", "sparkles", "Review", "Claude Code or Codex inspects each item read-only and marks it safe, review, or keep.")
+                step("3", "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
+            }
+            .frame(maxWidth: 720)
+            Button {
+                Task { await model.scan() }
+            } label: {
+                Label("Scan this Mac", systemImage: "magnifyingglass")
+                    .padding(.horizontal, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.extraLarge)
+            .disabled(model.phase.isBusy)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func step(_ number: String, _ symbol: String, _ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: symbol)
+                .font(.headline)
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityLabel("Step \(number): \(title). \(text)")
+    }
+}
+
+private struct InsightsView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        List {
+            if let report = model.report {
+                ForEach(report.insights) { insight in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Label(insight.title, systemImage: "lightbulb").font(.headline)
+                            Spacer()
+                            if let bytes = insight.bytes { Text(bytes.formattedBytes).foregroundStyle(.secondary) }
+                        }
+                        Text(insight.detail).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                }
+                ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(name, systemImage: "exclamationmark.triangle").font(.headline)
+                        Text(error).foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+    }
+}
