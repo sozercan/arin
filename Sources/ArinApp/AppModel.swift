@@ -64,6 +64,15 @@ final class AppModel {
         didSet { defaults.set(autoMode, forKey: "autoMode") }
     }
 
+    /// Run the agent review right after each manual scan.
+    var autoReview: Bool {
+        didSet { defaults.set(autoReview, forKey: "autoReview") }
+    }
+
+    var sortOrder: SortOrder {
+        didSet { defaults.set(sortOrder.rawValue, forKey: "sortOrder") }
+    }
+
     var trashInsteadOfDelete: Bool {
         didSet { defaults.set(trashInsteadOfDelete, forKey: "trashInsteadOfDelete") }
     }
@@ -92,7 +101,8 @@ final class AppModel {
     let installedAgents = AgentProvider.installed
     private let defaults = UserDefaults.standard
     private var monitor: Task<Void, Never>?
-    private var scanTask: Task<Void, Never>?
+    private var work: Task<Void, Never>?
+    var lastReview: (agent: String, date: Date)?
     private var notifiedLowSpace = false
     private var lastAutoClean: Date?
 
@@ -101,6 +111,8 @@ final class AppModel {
         agent = (defaults.string(forKey: "agent").flatMap(AgentProvider.init(rawValue:))) ?? AgentProvider.installed.first
         lowSpaceThresholdGB = defaults.object(forKey: "lowSpaceThresholdGB") as? Int ?? 25
         autoMode = defaults.bool(forKey: "autoMode")
+        autoReview = defaults.object(forKey: "autoReview") as? Bool ?? true
+        sortOrder = defaults.string(forKey: "sortOrder").flatMap(SortOrder.init(rawValue:)) ?? .size
         trashInsteadOfDelete = defaults.bool(forKey: "trashInsteadOfDelete")
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
@@ -166,14 +178,30 @@ final class AppModel {
         return false
     }
 
-    func startScan() {
-        guard !phase.isBusy else { return }
-        scanTask = Task { await scan() }
+    var isReviewing: Bool {
+        if case .reviewing = phase { return true }
+        return false
     }
 
-    /// Cancels the scan and its subprocesses; previous results stay as they were.
-    func stopScan() {
-        scanTask?.cancel()
+    /// Scans and reviews can be stopped; cleaning runs to completion.
+    var canStop: Bool { isScanning || isReviewing }
+
+    func startScan() {
+        guard !phase.isBusy else { return }
+        work = Task {
+            await scan()
+            if autoReview, !Task.isCancelled { await review() }
+        }
+    }
+
+    func startReview() {
+        guard !phase.isBusy else { return }
+        work = Task { await review() }
+    }
+
+    /// Cancels the scan or review and its subprocesses; previous results stay as they were.
+    func stop() {
+        work?.cancel()
     }
 
     func scan() async {
@@ -199,21 +227,38 @@ final class AppModel {
         phase = .idle
     }
 
+    /// Items the rules couldn't settle: anything not rule-safe, and everything unclassified.
+    /// Rule-safe caches don't need an agent, which keeps reviews quick and cheap.
+    var itemsNeedingReview: [Candidate] {
+        candidates.filter { $0.isActionable && ($0.risk != .safe || $0.category == .unclassified) }
+    }
+
     func review() async {
         guard let agent, !phase.isBusy else { return }
-        if candidates.isEmpty { await scan() }
-        phase = .reviewing("\(agent.label) is reviewing \(min(candidates.count, 150)) items (read-only)…")
+        let items = itemsNeedingReview
+        guard !items.isEmpty else { return }
+        phase = .reviewing("\(agent.label) is checking \(min(items.count, 150)) items (read-only)…")
         do {
             let reviewer = AgentReviewer(
                 provider: agent,
                 model: reviewModels[agent.rawValue],
                 effort: reviewEfforts[agent.rawValue]
             )
-            let verdicts = try await reviewer.review(candidates)
-            candidates = candidates.applying(verdicts)
-            resetSelection()
+            let verdicts = try await reviewer.review(items)
+            if !Task.isCancelled {
+                candidates = candidates.applying(verdicts)
+                // Only reviewed items change selection; keep what the user ticked meanwhile.
+                for candidate in candidates where verdicts[candidate.id] != nil {
+                    if candidate.isDefaultSelected(at: level) {
+                        selection.insert(candidate.id)
+                    } else {
+                        selection.remove(candidate.id)
+                    }
+                }
+                lastReview = (agent.label, Date())
+            }
         } catch {
-            errorMessage = "\(error)"
+            if !Task.isCancelled { errorMessage = "\(error)" }
         }
         phase = .idle
     }
@@ -312,5 +357,33 @@ final class AppModel {
         content.body = body
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+enum SortOrder: String, CaseIterable, Identifiable {
+    case size, name, safety, modified
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .size: "Size"
+        case .name: "Name"
+        case .safety: "Safety"
+        case .modified: "Last Modified"
+        }
+    }
+
+    func sorted(_ items: [Candidate]) -> [Candidate] {
+        switch self {
+        case .size:
+            items.sorted { $0.bytes > $1.bytes }
+        case .name:
+            items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        case .safety:
+            items.sorted { ($0.effectiveRisk, -$0.bytes) < ($1.effectiveRisk, -$1.bytes) }
+        case .modified:
+            items.sorted { ($0.lastModified ?? .distantPast) > ($1.lastModified ?? .distantPast) }
+        }
     }
 }

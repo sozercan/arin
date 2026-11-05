@@ -63,8 +63,9 @@ public struct KnownPathRule: Rule {
             resolved += Glob.expand(absolute)
         }
         var unique: [String] = []
-        for path in resolved.map({ ($0 as NSString).standardizingPath }) where !unique.contains(path) {
-            if FileInfo.exists(path) { unique.append(path) }
+        for raw in resolved.map({ ($0 as NSString).standardizingPath }) where FileInfo.exists(raw) {
+            let path = FileInfo.actualCase(raw)
+            if !unique.contains(path) { unique.append(path) }
         }
         guard !unique.isEmpty else { return [] }
 

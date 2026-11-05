@@ -27,6 +27,9 @@ struct SettingsView: View {
                         ForEach(model.installedAgents) { Text($0.label).tag(Optional($0)) }
                     }
                 }
+                if model.agent != nil {
+                    Toggle("Review automatically after each scan", isOn: $model.autoReview)
+                }
                 if let agent = model.agent {
                     ReviewSetupRows(agent: agent)
                         .id(agent)

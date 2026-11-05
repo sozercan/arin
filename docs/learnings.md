@@ -36,7 +36,9 @@ Arin's rules come from seven hands-on disk cleanups on a developer Mac (460 GB S
 10. **Docker's CLI can hang.** `docker system df` never returned while Desktop was wedged. Every Docker call has a short timeout, `Docker.raw` is never touched directly, and unattached volumes start as Review because they can hold databases. Orphaned `buildx_buildkit_*_state` volumes for deleted builders are safe.
 11. **Simulator runtime deletion can leave a mounted image.** The space came back only after a reboot.
 12. **Be clear about what isn't officially supported.** Compacting the Codex log DB is generic SQLite maintenance, not a Codex procedure, and it must not run while Codex writes. For Codex sessions, `codex delete` is the supported route because it removes database and index entries too.
-13. **It grows back.** After about 85 GB was freed, the disk was full again two days later, mostly from Go cache, DerivedData, and agent perf artifacts. That's why Arin has low-space alerts and an opt-in Auto mode limited to caches that refill on their own.
+13. **Agent scratch folders can hold real work.** One idle `/tmp/claude-*` folder (8.5 GB, mostly DerivedData) also held a git checkout. Temp folders containing a checkout start as Review. Package-manager checkouts (`SourcePackages/checkouts`, `node_modules`) don't count.
+14. **A fixed list of locations misses the biggest surprises.** 63 GB of agent perf artifacts sat in `~/.t3/userdata/task-artifacts`, outside every known cache path. A one-level-at-a-time size overview of the home folder finds such folders and drills into the subfolder that actually holds the space.
+15. **It grows back.** After about 85 GB was freed, the disk was full again two days later, mostly from Go cache, DerivedData, and agent perf artifacts. That's why Arin has low-space alerts and an opt-in Auto mode limited to caches that refill on their own.
 
 ## Things that stay hands-off
 

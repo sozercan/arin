@@ -59,6 +59,7 @@ public struct UnclassifiedRule: Rule {
                 ))
             }
         }
+        result += await HomeOverview.discover(ctx, claimed: claimed + result.flatMap(\.paths))
         return result
     }
 }

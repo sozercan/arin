@@ -71,6 +71,18 @@ public enum FileInfo {
         return newest
     }
 
+    /// The path with each component spelled as it is on disk. APFS is usually case-insensitive,
+    /// so `Caches/Yarn` finds `Caches/yarn`; comparisons need the real spelling.
+    public static func actualCase(_ path: String) -> String {
+        var result = "/"
+        for component in path.split(separator: "/").map(String.init) {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: result)) ?? []
+            let match = names.first { $0 == component } ?? names.first { $0.caseInsensitiveCompare(component) == .orderedSame }
+            result = (result as NSString).appendingPathComponent(match ?? component)
+        }
+        return result
+    }
+
     public static func resolveSymlink(_ path: String) -> String? {
         guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: path) else { return nil }
         if dest.hasPrefix("/") { return (dest as NSString).standardizingPath }

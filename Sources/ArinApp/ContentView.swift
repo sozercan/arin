@@ -94,38 +94,6 @@ private struct Toolbar: ToolbarContent {
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
-                model.isScanning ? model.stopScan() : model.startScan()
-            } label: {
-                if model.isScanning {
-                    Label("Stop Scan", systemImage: "stop.fill")
-                } else {
-                    Label("Scan", systemImage: "arrow.clockwise")
-                }
-            }
-            .help(model.isScanning ? "Stop scanning (keeps previous results)" : "Scan again")
-            .disabled(model.phase.isBusy && !model.isScanning)
-
-            Menu {
-                if model.installedAgents.isEmpty {
-                    Text("Install Claude Code or Codex to enable reviews")
-                }
-                ForEach(model.installedAgents) { agent in
-                    Button {
-                        model.agent = agent
-                        Task { await model.review() }
-                    } label: {
-                        Text("Review with \(agent.label)")
-                    }
-                }
-            } label: {
-                Label("Ask agent", systemImage: "sparkles")
-            } primaryAction: {
-                Task { await model.review() }
-            }
-            .disabled(model.phase.isBusy || model.agent == nil)
-            .help("Your agent inspects each item read-only and marks what's safe. It never deletes anything.")
-
-            Button {
                 model.showingConfirm = true
             } label: {
                 Text(model.selection.isEmpty ? "Clean" : "Clean \(model.selectedBytes.formattedBytes)")
@@ -141,25 +109,44 @@ private struct StatusBar: View {
 
     var body: some View {
         if model.phase.isBusy || model.report != nil {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 if model.phase.isBusy {
                     ProgressView().controlSize(.small)
-                    Text(model.phase.label).lineLimit(1)
+                    Text(model.phase.label).lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    if model.canStop {
+                        Button("Stop") { model.stop() }
+                            .help("Keeps the previous results")
+                    }
                 } else {
                     Text("\(model.selection.count) selected · \(model.selectedBytes.formattedBytes) estimated")
-                    Spacer()
+                    Spacer(minLength: 8)
                     if let report = model.report {
-                        Text("Scanned \(report.finishedAt.formatted(.relative(presentation: .named)))")
+                        Text(summary(report))
+                            .lineLimit(1)
+                    }
+                    Button("Rescan") { model.startScan() }
+                    if model.agent != nil, !model.itemsNeedingReview.isEmpty {
+                        Button(model.lastReview == nil ? "Review" : "Review again") { model.startReview() }
+                            .help("Ask your agent to check the items the rules couldn't settle")
                     }
                 }
-                Spacer(minLength: 0)
             }
+            .buttonStyle(.link)
             .font(.callout)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(.bar)
         }
+    }
+
+    private func summary(_ report: ScanReport) -> String {
+        var text = "Scanned \(report.finishedAt.formatted(.relative(presentation: .named)))"
+        if let review = model.lastReview {
+            text += " · checked by \(review.agent)"
+        }
+        return text
     }
 }
 
@@ -181,14 +168,14 @@ private struct WelcomeView: View {
             }
             HStack(alignment: .top, spacing: 18) {
                 step("1", "magnifyingglass", "Scan", "Caches, build output, merged worktrees, simulators, stale temp files. Read-only.")
-                step("2", "sparkles", "Review", "Claude Code or Codex inspects each item read-only and marks it safe, review, or keep.")
+                step("2", "sparkles", "Review", "Then Claude Code or Codex checks what the rules can't settle, read-only, and marks it safe, review, or keep.")
                 step("3", "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
             }
             .frame(maxWidth: 720)
             Group {
                 if model.isScanning {
                     Button(role: .cancel) {
-                        model.stopScan()
+                        model.stop()
                     } label: {
                         Label("Stop Scan", systemImage: "stop.fill")
                             .padding(.horizontal, 12)

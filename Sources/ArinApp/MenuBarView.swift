@@ -30,8 +30,8 @@ struct MenuBarView: View {
                     openWindow(id: "main")
                     NSApp.activate()
                 }
-                if model.isScanning {
-                    Button("Stop Scan") { model.stopScan() }
+                if model.canStop {
+                    Button("Stop") { model.stop() }
                 } else {
                     Button("Scan") {
                         openWindow(id: "main")

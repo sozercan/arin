@@ -7,6 +7,8 @@ struct CandidateList: View {
     var items: [Candidate]
 
     var body: some View {
+        @Bindable var model = model
+        let items = model.sortOrder.sorted(items)
         if items.isEmpty {
             ContentUnavailableView("Nothing here", systemImage: "checkmark.circle", description: Text("No candidates in this group."))
         } else {
@@ -21,6 +23,12 @@ struct CandidateList: View {
                     HStack {
                         Text("\(items.count) items · \(items.dedupedBytes.formattedBytes)")
                         Spacer()
+                        Picker("Sort", selection: $model.sortOrder) {
+                            ForEach(SortOrder.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .buttonStyle(.automatic)
                         Button("Select safe") {
                             model.setAll(items, selected: false)
                             model.setAll(items.filter { $0.isDefaultSelected(at: .deep) }, selected: true)

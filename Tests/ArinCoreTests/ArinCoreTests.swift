@@ -383,3 +383,76 @@ struct CLIFailure: Error { var message: String }
         #expect(AgentProvider.tomlTopLevel("[a]\nmodel = \"x\"", key: "model") == nil)
     }
 }
+
+@Suite struct HomeOverviewTests {
+    let gb: Int64 = 1024 * 1024 * 1024
+
+    func pick(_ sizes: [String: Int64], top: String, avoid: [String] = [], skip: [String] = []) -> [String] {
+        HomeOverview.pick(top, sizes: sizes, depth: 0, avoid: avoid) { path in
+            skip.contains { path == $0 || path.hasPrefix($0 + "/") }
+        }.sorted()
+    }
+
+    @Test func drillsIntoTheFolderThatHoldsTheSpace() {
+        let sizes: [String: Int64] = [
+            "/h/.t3": 70 * gb,
+            "/h/.t3/worktrees": 5 * gb,
+            "/h/.t3/userdata": 65 * gb,
+            "/h/.t3/userdata/task-artifacts": 63 * gb,
+            "/h/.t3/userdata/task-artifacts/helio": 63 * gb,
+            "/h/.t3/userdata/task-artifacts/helio/perf": 63 * gb,
+        ]
+        #expect(pick(sizes, top: "/h/.t3", skip: ["/h/.t3/worktrees"]) == ["/h/.t3/userdata/task-artifacts/helio/perf"])
+    }
+
+    @Test func reportsSiblingsSeparately() {
+        let sizes: [String: Int64] = ["/h/.x": 6 * gb, "/h/.x/a": 3 * gb, "/h/.x/b": 2 * gb, "/h/.x/c": gb / 2]
+        #expect(pick(sizes, top: "/h/.x") == ["/h/.x/a", "/h/.x/b"])
+    }
+
+    @Test func neverReportsClaimedPathsOrTheirParents() {
+        let sizes: [String: Int64] = [
+            "/h/.codex": 10 * gb,
+            "/h/.codex/packages": 4 * gb,
+            "/h/.codex/packages/standalone": 4 * gb,
+            "/h/.codex/packages/standalone/releases": 4 * gb,
+            "/h/.codex/reviews": 3 * gb,
+        ]
+        let picked = pick(sizes, top: "/h/.codex", avoid: ["/h/.codex/packages/standalone/releases"])
+        #expect(picked == ["/h/.codex/reviews"])
+    }
+
+    @Test func ignoresSmallFolders() {
+        #expect(pick(["/h/.y": gb / 2], top: "/h/.y").isEmpty)
+    }
+}
+
+@Suite struct CaseTests {
+    @Test func resolvesOnDiskSpelling() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.mkdir("Library/Caches/yarn")
+        let resolved = FileInfo.actualCase("\(box.root)/Library/Caches/Yarn")
+        #expect(resolved.hasSuffix("/Library/Caches/yarn"))
+    }
+}
+
+@Suite struct TempRuleTests {
+    @Test func detectsNestedCheckouts() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.mkdir("scratch/wt-verify/.git")
+        _ = try box.mkdir("plain/dd/Build")
+        #expect(await TempRule.containsGitCheckout("\(box.root)/scratch"))
+        #expect(!(await TempRule.containsGitCheckout("\(box.root)/plain")))
+    }
+}
+
+@Suite struct TempRulePackageTests {
+    @Test func ignoresPackageCheckouts() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
+        #expect(!(await TempRule.containsGitCheckout("\(box.root)/dd")))
+    }
+}
