@@ -322,3 +322,29 @@ struct CLIFailure: Error { var message: String }
         #expect(!state.isBusy("/tmp/z"))
     }
 }
+
+@Suite struct ReviewerArgumentTests {
+    @Test func claudeArgsPinModelEffortAndDenyPrivatePaths() {
+        let args = AgentReviewer.claudeArguments(model: "sonnet", effort: "low", home: "/Users/test")
+        #expect(args.contains("--model") && args[args.firstIndex(of: "--model")! + 1] == "sonnet")
+        #expect(args[args.firstIndex(of: "--effort")! + 1] == "low")
+        #expect(args.contains("Read(~/.ssh/**)"))
+        #expect(args.contains("Read(~/.aws)"))
+        #expect(args.contains("Read(~/Library/Keychains/**)"))
+        // Nothing that can print file contents or write is pre-approved for Bash.
+        let bash = args.filter { $0.hasPrefix("Bash(") }
+        #expect(!bash.contains { $0.contains("head") || $0.contains("cat") || $0.contains("find") || $0.contains("rm") })
+        let deny = args.firstIndex(of: "--disallowedTools")!
+        let allow = args.firstIndex(of: "--allowedTools")!
+        #expect(allow < deny)
+    }
+
+    @Test func defaultsFallBackToCLIConfig() {
+        let reviewer = AgentReviewer(provider: .codex, model: "  ", effort: "")
+        #expect(reviewer.model == nil && reviewer.effort == nil)
+        let args = AgentReviewer.codexArguments(model: nil, effort: "low", cwd: "/t", schemaPath: "/t/s", outPath: "/t/o")
+        #expect(!args.contains("-m"))
+        #expect(args.contains("model_reasoning_effort=\"low\""))
+        #expect(args[args.firstIndex(of: "--sandbox")! + 1] == "read-only")
+    }
+}

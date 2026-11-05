@@ -22,6 +22,19 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
 
     public var isInstalled: Bool { Shell.which(executable) != nil }
 
+    /// Judging caches and build folders needs little reasoning, so reviews default to a cheaper
+    /// setup than a coding session. `nil` model means the CLI's own default.
+    public var defaultModel: String? {
+        switch self {
+        case .claude: "sonnet"
+        case .codex: nil
+        }
+    }
+
+    public var defaultEffort: String { "low" }
+
+    public static let efforts = ["low", "medium", "high", "xhigh"]
+
     public static var installed: [AgentProvider] { allCases.filter(\.isInstalled) }
 }
 
@@ -33,14 +46,39 @@ public struct AgentReviewError: Error, CustomStringConvertible {
 /// verdicts keyed by candidate ID; it cannot add, change, or run cleanup actions.
 public struct AgentReviewer: Sendable {
     public var provider: AgentProvider
+    /// Model alias or name; `nil` uses the CLI's configured default.
+    public var model: String?
+    /// low, medium, high, xhigh; `nil` uses the CLI's configured default.
+    public var effort: String?
     public var timeout: TimeInterval
     public var maxCandidates: Int
 
-    public init(provider: AgentProvider, timeout: TimeInterval = 900, maxCandidates: Int = 150) {
+    public init(
+        provider: AgentProvider,
+        model: String? = nil,
+        effort: String? = nil,
+        timeout: TimeInterval = 900,
+        maxCandidates: Int = 150
+    ) {
         self.provider = provider
+        self.model = model.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        self.effort = effort.flatMap { $0.isEmpty ? nil : $0 }
         self.timeout = timeout
         self.maxCandidates = maxCandidates
     }
+
+    /// Credentials and personal data the reviewer must not read. The review never needs them.
+    public static let privatePaths = [
+        ".ssh", ".gnupg", ".aws", ".azure", ".config/gh", ".config/gcloud", ".docker/config.json",
+        ".kube/config", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".codex/auth.json",
+        ".claude/.credentials.json", ".local/share/keyrings",
+        "Library/Keychains", "Library/Cookies", "Library/Messages", "Library/Mail", "Library/Photos",
+        "Library/Mobile Documents", "Documents", "Desktop",
+    ]
+
+    /// Commands with no writing flags and that don't print file contents
+    /// (no find: -delete; no git branch: -D; no cat/head: they'd bypass the Read deny rules).
+    static let readOnlyBash = ["ls", "du", "stat", "file", "lsof", "git status", "git log --oneline", "git worktree list"]
 
     public static let schema: String = """
     {"type":"object","additionalProperties":false,"required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","verdict","reason"],"properties":{"id":{"type":"string"},"verdict":{"type":"string","enum":["safe","review","keep"]},"reason":{"type":"string"}}}}}}
@@ -69,21 +107,44 @@ public struct AgentReviewer: Sendable {
         return try Self.parseVerdicts(raw, agent: provider.label).filter { known.contains($0.key) }
     }
 
-    func runClaude(prompt: String, cwd: String) async throws -> String {
-        // Prefix rules: only commands that have no writing flags (no find: -delete; no git branch: -D).
-        let readOnlyBash = ["ls", "du", "stat", "file", "head", "wc", "lsof", "git status", "git log", "git worktree list"]
-            .map { "Bash(\($0):*)" }
-        let args = [
+    static func claudeArguments(model: String?, effort: String?, home: String) -> [String] {
+        let deny = privatePaths.flatMap { ["Read(~/\($0))", "Read(~/\($0)/**)"] }
+        var args = [
             "-p",
             "--output-format", "json",
-            "--json-schema", Self.schema,
+            "--json-schema", schema,
             "--tools", "Read,Glob,Grep,Bash",
             "--allowedTools",
-        ] + ["Read", "Glob", "Grep"] + readOnlyBash + [
+        ] + ["Read", "Glob", "Grep"] + readOnlyBash.map { "Bash(\($0):*)" } + [
+            "--disallowedTools",
+        ] + deny + [
             "--permission-mode", "dontAsk",
             "--no-session-persistence",
-            "--add-dir", NSHomeDirectory(),
+            "--add-dir", home,
         ]
+        if let model { args += ["--model", model] }
+        if let effort { args += ["--effort", effort] }
+        return args
+    }
+
+    static func codexArguments(model: String?, effort: String?, cwd: String, schemaPath: String, outPath: String) -> [String] {
+        var args = [
+            "exec",
+            "--sandbox", "read-only",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--color", "never",
+            "-C", cwd,
+            "--output-schema", schemaPath,
+            "-o", outPath,
+        ]
+        if let model { args += ["-m", model] }
+        if let effort { args += ["-c", "model_reasoning_effort=\"\(effort)\""] }
+        return args
+    }
+
+    func runClaude(prompt: String, cwd: String) async throws -> String {
+        let args = Self.claudeArguments(model: model, effort: effort, home: NSHomeDirectory())
         let result = await Shell.run("claude", args, cwd: cwd, input: prompt, timeout: timeout)
         if result.timedOut { throw AgentReviewError(description: "Claude Code timed out") }
         guard result.ok else {
@@ -104,16 +165,7 @@ public struct AgentReviewer: Sendable {
         let schemaURL = URL(fileURLWithPath: cwd).appendingPathComponent("schema.json")
         let outURL = URL(fileURLWithPath: cwd).appendingPathComponent("verdicts.json")
         try Self.schema.write(to: schemaURL, atomically: true, encoding: .utf8)
-        let args = [
-            "exec",
-            "--sandbox", "read-only",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--color", "never",
-            "-C", cwd,
-            "--output-schema", schemaURL.path,
-            "-o", outURL.path,
-        ]
+        let args = Self.codexArguments(model: model, effort: effort, cwd: cwd, schemaPath: schemaURL.path, outPath: outURL.path)
         let result = await Shell.run("codex", args, cwd: cwd, input: prompt, timeout: timeout)
         if result.timedOut { throw AgentReviewError(description: "Codex timed out") }
         guard result.ok, let text = try? String(contentsOf: outURL, encoding: .utf8) else {
@@ -157,6 +209,8 @@ public struct AgentReviewer: Sendable {
         You are reviewing disk-cleanup candidates on the user's Mac (home: \(NSHomeDirectory())).
         Do not modify, delete, move, or write anything. Inspect read-only only when it changes your verdict
         (ls, du, stat, file, git status/log, reading small text files). Never print file contents in your answer.
+        Never open credentials or personal data: ~/.ssh, ~/.gnupg, ~/.aws, keychains, cookies, tokens, .env files,
+        Messages, Mail, Photos, Documents, Desktop. Judge those from names and sizes only.
 
         For every candidate, return exactly one verdict:
         - "safe": regenerable or already-removed work with nothing unique; fine to clean now.

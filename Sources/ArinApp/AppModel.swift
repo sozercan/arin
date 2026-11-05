@@ -80,6 +80,15 @@ final class AppModel {
         didSet { defaults.set(extraProjectRoots, forKey: "extraProjectRoots") }
     }
 
+    /// Per agent; an empty model means the CLI's own default.
+    var reviewModels: [String: String] {
+        didSet { defaults.set(reviewModels, forKey: "reviewModels") }
+    }
+
+    var reviewEfforts: [String: String] {
+        didSet { defaults.set(reviewEfforts, forKey: "reviewEfforts") }
+    }
+
     let installedAgents = AgentProvider.installed
     private let defaults = UserDefaults.standard
     private var monitor: Task<Void, Never>?
@@ -95,6 +104,14 @@ final class AppModel {
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
         extraProjectRoots = defaults.stringArray(forKey: "extraProjectRoots") ?? []
+        var models = defaults.dictionary(forKey: "reviewModels") as? [String: String] ?? [:]
+        var efforts = defaults.dictionary(forKey: "reviewEfforts") as? [String: String] ?? [:]
+        for provider in AgentProvider.allCases {
+            if models[provider.rawValue] == nil { models[provider.rawValue] = provider.defaultModel ?? "" }
+            if efforts[provider.rawValue] == nil { efforts[provider.rawValue] = provider.defaultEffort }
+        }
+        reviewModels = models
+        reviewEfforts = efforts
         requestNotificationPermission()
         startMonitor()
         // `open Arin.app --args -ScanOnLaunch YES` starts a scan right away.
@@ -167,7 +184,12 @@ final class AppModel {
         if candidates.isEmpty { await scan() }
         phase = .reviewing("\(agent.label) is reviewing \(min(candidates.count, 150)) items (read-only)…")
         do {
-            let verdicts = try await AgentReviewer(provider: agent).review(candidates)
+            let reviewer = AgentReviewer(
+                provider: agent,
+                model: reviewModels[agent.rawValue],
+                effort: reviewEfforts[agent.rawValue]
+            )
+            let verdicts = try await reviewer.review(candidates)
             candidates = candidates.applying(verdicts)
             resetSelection()
         } catch {

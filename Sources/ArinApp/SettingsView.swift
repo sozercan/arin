@@ -27,7 +27,30 @@ struct SettingsView: View {
                         ForEach(model.installedAgents) { Text($0.label).tag(Optional($0)) }
                     }
                 }
-                Text("Reviews run read-only (Codex in its read-only sandbox, Claude Code with only read tools). The agent returns verdicts; it never runs cleanup.")
+                ForEach(model.installedAgents) { agent in
+                    LabeledContent(agent.label) {
+                        HStack {
+                            TextField("CLI default", text: Binding(
+                                get: { model.reviewModels[agent.rawValue] ?? "" },
+                                set: { model.reviewModels[agent.rawValue] = $0 }
+                            ))
+                            .frame(width: 140)
+                            Picker("Effort", selection: Binding(
+                                get: { model.reviewEfforts[agent.rawValue] ?? "" },
+                                set: { model.reviewEfforts[agent.rawValue] = $0 }
+                            )) {
+                                Text("CLI default").tag("")
+                                ForEach(AgentProvider.efforts, id: \.self) { Text($0).tag($0) }
+                            }
+                            .labelsHidden()
+                            .frame(width: 120)
+                        }
+                    }
+                }
+                Text("Model and effort for reviews. Judging caches needs little reasoning, so a cheaper setup is enough; signed in with a Claude plan, reviews count toward your plan's usage limits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Reviews run read-only (Codex in its read-only sandbox, Claude Code with only read tools and no access to credentials or personal folders). The agent returns verdicts; it never runs cleanup.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

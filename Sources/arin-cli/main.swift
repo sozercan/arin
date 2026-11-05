@@ -13,6 +13,8 @@ options:
   --level quick|standard|deep   Cleanup depth (default: standard)
   --agent claude|codex          Agent for review (default: first installed)
   --limit N                     Max candidates sent to the agent (default: 150)
+  --model NAME                  Review model (default: sonnet for claude, CLI default for codex; "" = CLI default)
+  --effort low|medium|high|xhigh  Review effort (default: low; "" = CLI default)
   --roots a,b                   Project roots to search (default: ~/projects, ~/go/src, …)
   --ids a,b                     clean: exactly these candidate ids instead of the pre-selection
   --no-pr                       Skip GitHub merged-PR lookups for worktrees
@@ -27,6 +29,8 @@ struct Args {
     var level = Level.standard
     var agent: AgentProvider?
     var limit = 150
+    var model: String?
+    var effort: String?
     var roots: [String]?
     var ids: [String]?
     var checkPRs = true
@@ -52,6 +56,8 @@ struct Args {
                 guard let a = AgentProvider(rawValue: v) else { throw CLIError("unknown agent \(v)") }
                 agent = a
             case "--limit": limit = Int(try value(arg)) ?? 150
+            case "--model": model = try value(arg)
+            case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }
             case "--ids": ids = try value(arg).split(separator: ",").map(String.init)
             case "--no-pr": checkPRs = false
@@ -145,9 +151,18 @@ func main() async -> Int32 {
             return 1
         }
         var report = await scan(args)
-        if !args.json { eprint("Asking \(agent.label) to review up to \(args.limit) candidates (read-only)…") }
+        if !args.json {
+            let setup = [args.model ?? agent.defaultModel, args.effort ?? agent.defaultEffort].compactMap { $0 }.filter { !$0.isEmpty }
+            eprint("Asking \(agent.label)\(setup.isEmpty ? "" : " (\(setup.joined(separator: ", ")))") to review up to \(args.limit) candidates (read-only)…")
+        }
         do {
-            let verdicts = try await AgentReviewer(provider: agent, maxCandidates: args.limit).review(report.candidates)
+            let reviewer = AgentReviewer(
+                provider: agent,
+                model: args.model ?? agent.defaultModel,
+                effort: args.effort ?? agent.defaultEffort,
+                maxCandidates: args.limit
+            )
+            let verdicts = try await reviewer.review(report.candidates)
             report.candidates = report.candidates.applying(verdicts)
             if !args.json { eprint("  \(verdicts.count) verdicts") }
         } catch {
