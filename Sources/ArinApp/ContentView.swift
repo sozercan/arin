@@ -108,11 +108,13 @@ private struct StatusBar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if model.phase.isBusy || model.report != nil {
+        // Before the first scan finishes, the welcome screen shows progress and its own Stop button.
+        if model.report != nil {
             HStack(spacing: 10) {
                 if model.phase.isBusy {
                     ProgressView().controlSize(.small)
                     Text(model.phase.label).lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     if model.canStop {
                         Button("Stop") { model.stop() }
@@ -120,10 +122,12 @@ private struct StatusBar: View {
                     }
                 } else {
                     Text("\(model.selection.count) selected · \(model.selectedBytes.formattedBytes) estimated")
+                        .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     if let report = model.report {
                         Text(summary(report))
                             .lineLimit(1)
+                            .foregroundStyle(.secondary)
                     }
                     Button("Rescan") { model.startScan() }
                     if model.agent != nil, !model.itemsNeedingReview.isEmpty {
@@ -134,7 +138,6 @@ private struct StatusBar: View {
             }
             .buttonStyle(.link)
             .font(.callout)
-            .foregroundStyle(.secondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(.bar)
@@ -193,6 +196,15 @@ private struct WelcomeView: View {
                 }
             }
             .controlSize(.extraLarge)
+
+            if model.phase.isBusy {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(model.phase.label).lineLimit(1)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
