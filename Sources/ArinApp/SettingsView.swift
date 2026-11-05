@@ -27,30 +27,11 @@ struct SettingsView: View {
                         ForEach(model.installedAgents) { Text($0.label).tag(Optional($0)) }
                     }
                 }
-                ForEach(model.installedAgents) { agent in
-                    LabeledContent(agent.label) {
-                        HStack {
-                            TextField("CLI default", text: Binding(
-                                get: { model.reviewModels[agent.rawValue] ?? "" },
-                                set: { model.reviewModels[agent.rawValue] = $0 }
-                            ))
-                            .frame(width: 140)
-                            Picker("Effort", selection: Binding(
-                                get: { model.reviewEfforts[agent.rawValue] ?? "" },
-                                set: { model.reviewEfforts[agent.rawValue] = $0 }
-                            )) {
-                                Text("CLI default").tag("")
-                                ForEach(AgentProvider.efforts, id: \.self) { Text($0).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 120)
-                        }
-                    }
+                if let agent = model.agent {
+                    ReviewSetupRows(agent: agent)
+                        .id(agent)
                 }
-                Text("Model and effort for reviews. Judging caches needs little reasoning, so a cheaper setup is enough; signed in with a Claude plan, reviews count toward your plan's usage limits.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Reviews run read-only (Codex in its read-only sandbox, Claude Code with only read tools and no access to credentials or personal folders). The agent returns verdicts; it never runs cleanup.")
+                Text("Reviews are read-only and only return verdicts. Judging caches needs little reasoning, so the recommended setup keeps them cheap; with a Claude plan they count toward your plan's usage limits.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -94,5 +75,58 @@ struct SettingsView: View {
         guard !root.isEmpty, !model.extraProjectRoots.contains(root) else { return }
         model.extraProjectRoots.append(root)
         newRoot = ""
+    }
+}
+
+/// Model and effort for the selected agent, as two plain pickers.
+private struct ReviewSetupRows: View {
+    @Environment(AppModel.self) private var model
+    var agent: AgentProvider
+    @State private var customModel = false
+
+    private static let useCLI = ""
+    private static let custom = "\u{0}custom"
+
+    var body: some View {
+        let configured = agent.configuredDefaults()
+        let stored = model.reviewModels[agent.rawValue] ?? ""
+        let isPreset = agent.modelPresets.contains { $0.id == stored }
+        let showCustom = customModel || (!stored.isEmpty && !isPreset)
+
+        Picker("Model", selection: Binding(
+            get: { showCustom ? Self.custom : stored },
+            set: { choice in
+                customModel = choice == Self.custom
+                if choice != Self.custom { model.reviewModels[agent.rawValue] = choice }
+            }
+        )) {
+            ForEach(agent.modelPresets, id: \.id) { preset in
+                Text(preset.id == agent.defaultModel ? "\(preset.label) (recommended)" : preset.label).tag(preset.id)
+            }
+            Text(cliLabel(configured.model)).tag(Self.useCLI)
+            Text("Custom…").tag(Self.custom)
+        }
+
+        if showCustom {
+            TextField("Model name", text: Binding(
+                get: { isPreset ? "" : stored },
+                set: { model.reviewModels[agent.rawValue] = $0 }
+            ), prompt: Text("e.g. claude-sonnet-5-5"))
+        }
+
+        Picker("Effort", selection: Binding(
+            get: { model.reviewEfforts[agent.rawValue] ?? "" },
+            set: { model.reviewEfforts[agent.rawValue] = $0 }
+        )) {
+            ForEach(AgentProvider.efforts, id: \.self) { effort in
+                let label = AgentProvider.effortLabel(effort)
+                Text(effort == agent.defaultEffort ? "\(label) (recommended)" : label).tag(effort)
+            }
+            Text(cliLabel(configured.effort.map(AgentProvider.effortLabel))).tag(Self.useCLI)
+        }
+    }
+
+    private func cliLabel(_ value: String?) -> String {
+        "Use \(agent.label)'s setting" + (value.map { " (\($0))" } ?? "")
     }
 }

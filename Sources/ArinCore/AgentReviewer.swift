@@ -35,6 +35,51 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
 
     public static let efforts = ["low", "medium", "high", "xhigh"]
 
+    public static func effortLabel(_ effort: String) -> String {
+        switch effort {
+        case "low": "Low"
+        case "medium": "Medium"
+        case "high": "High"
+        case "xhigh": "Extra high"
+        default: effort
+        }
+    }
+
+    /// Model aliases offered as one-click choices; anything else is a custom name.
+    public var modelPresets: [(id: String, label: String)] {
+        switch self {
+        case .claude: [("sonnet", "Sonnet"), ("haiku", "Haiku"), ("opus", "Opus")]
+        case .codex: []
+        }
+    }
+
+    /// What the CLI uses when Arin passes no model or effort, read from its own config.
+    public func configuredDefaults(home: String = NSHomeDirectory()) -> (model: String?, effort: String?) {
+        switch self {
+        case .claude:
+            let url = URL(fileURLWithPath: "\(home)/.claude/settings.json")
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return (nil, nil) }
+            return (json["model"] as? String, json["effortLevel"] as? String)
+        case .codex:
+            guard let text = try? String(contentsOfFile: "\(home)/.codex/config.toml", encoding: .utf8) else { return (nil, nil) }
+            return (Self.tomlTopLevel(text, key: "model"), Self.tomlTopLevel(text, key: "model_reasoning_effort"))
+        }
+    }
+
+    /// A top-level `key = "value"` from TOML, before the first [table].
+    static func tomlTopLevel(_ text: String, key: String) -> String? {
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { break }
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2, parts[0] == key else { continue }
+            return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }
+        return nil
+    }
+
     public static var installed: [AgentProvider] { allCases.filter(\.isInstalled) }
 }
 

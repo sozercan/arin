@@ -369,3 +369,17 @@ struct CLIFailure: Error { var message: String }
         #expect(result.stderr == "cancelled")
     }
 }
+
+@Suite struct ConfigReadingTests {
+    @Test func readsTopLevelTomlOnly() {
+        let toml = """
+        model = "gpt-x"
+        model_reasoning_effort = 'xhigh'
+        [profiles.fast]
+        model = "other"
+        """
+        #expect(AgentProvider.tomlTopLevel(toml, key: "model") == "gpt-x")
+        #expect(AgentProvider.tomlTopLevel(toml, key: "model_reasoning_effort") == "xhigh")
+        #expect(AgentProvider.tomlTopLevel("[a]\nmodel = \"x\"", key: "model") == nil)
+    }
+}
