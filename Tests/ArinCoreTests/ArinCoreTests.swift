@@ -399,10 +399,10 @@ struct CLIFailure: Error { var message: String }
             "/h/.t3/worktrees": 5 * gb,
             "/h/.t3/userdata": 65 * gb,
             "/h/.t3/userdata/task-artifacts": 63 * gb,
-            "/h/.t3/userdata/task-artifacts/helio": 63 * gb,
-            "/h/.t3/userdata/task-artifacts/helio/perf": 63 * gb,
+            "/h/.t3/userdata/task-artifacts/app": 63 * gb,
+            "/h/.t3/userdata/task-artifacts/app/perf": 63 * gb,
         ]
-        #expect(pick(sizes, top: "/h/.t3", skip: ["/h/.t3/worktrees"]) == ["/h/.t3/userdata/task-artifacts/helio/perf"])
+        #expect(pick(sizes, top: "/h/.t3", skip: ["/h/.t3/worktrees"]) == ["/h/.t3/userdata/task-artifacts/app/perf"])
     }
 
     @Test func reportsSiblingsSeparately() {

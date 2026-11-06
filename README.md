@@ -47,4 +47,4 @@ swift run arin clean --ids 'go.build-cache:go.build-cache' --yes
 - `Sources/ArinCore`: rules (`Rules/`, `Catalog.swift`), scanner, guardrails, executor, and agent reviewer.
 - `Sources/ArinApp`: the SwiftUI app (window, menu bar extra, settings).
 - `Sources/arin-cli`: the `arin` command.
-- `docs/learnings.md`: the real cleanups the rules are based on, and why each guardrail exists.
+- `docs/learnings.md`: what real cleanups showed, and why each rule and guardrail exists.
