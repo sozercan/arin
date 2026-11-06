@@ -176,7 +176,7 @@ struct WorktreeRule: Rule {
             risk: risk,
             bytes: bytes,
             paths: [entry.path],
-            action: .removeWorktree(repo: repo, path: entry.path),
+            action: .removeWorktree(repo: repo, path: entry.path, head: head),
             lastModified: FileInfo.modified(entry.path),
             blockers: blockers
         )

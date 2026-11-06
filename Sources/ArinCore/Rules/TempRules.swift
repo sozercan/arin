@@ -53,7 +53,7 @@ struct TempRule: Rule {
         }
         let name = String(entry.dropFirst(root.count + 1))
         // Agent scratch folders sometimes hold a git checkout with unpushed work, not just build output.
-        let checkout = await Self.containsGitCheckout(entry)
+        let checkout = await FileInfo.containsGitCheckout(entry)
         return [Candidate(
             ruleID: id,
             key: entry,
@@ -61,7 +61,7 @@ struct TempRule: Rule {
             detail: (entry.hasPrefix("/private/tmp")
                 ? "Scratch data in /tmp, idle for 3+ hours. Usually build caches or test output left by tools and agents."
                 : "Scratch data in your per-user temp folder, idle for 3+ hours. macOS rarely cleans this on its own.")
-                + (checkout ? " It contains a git checkout, which may hold work that isn't pushed." : ""),
+                + (checkout ? " It contains a git checkout (or parts couldn't be read), which may hold work that isn't pushed." : ""),
             category: .temp,
             level: .quick,
             risk: checkout ? .review : .safe,
@@ -72,20 +72,6 @@ struct TempRule: Rule {
             blockers: blockers,
             minIdleSeconds: idle
         )]
-    }
-
-    /// Whether the tree holds a git checkout outside package-manager layouts. Searches the whole
-    /// tree; a walk that can't finish counts as "yes" so the folder stays Review.
-    static func containsGitCheckout(_ path: String) async -> Bool {
-        // Only recognized package-manager output is skipped, by layout, not by a bare folder name:
-        // a real project under scratch/checkouts/ or scratch/pkg/ must still be found.
-        let result = await Shell.run("find", [
-            path,
-            "(", "-path", "*/SourcePackages/checkouts", "-o", "-path", "*/.build/checkouts",
-            "-o", "-path", "*/pkg/mod", "-o", "-name", "node_modules", ")", "-prune",
-            "-o", "-name", ".git", "-print", "-quit",
-        ], timeout: 120)
-        return result.timedOut || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 

@@ -100,7 +100,7 @@ struct ProjectArtifactRule: Rule {
     static func binLooksGenerated(_ path: String) -> (Bool, String) {
         var odd: [String] = []
         if let checkout = nestedCheckout(in: path) {
-            odd.append("\(checkout) (git checkout)")
+            odd.append(checkout)
         }
         for child in FileInfo.children(path) {
             let name = (child as NSString).lastPathComponent
@@ -116,15 +116,29 @@ struct ProjectArtifactRule: Rule {
         return (false, "Contains non-binary entries worth checking: \(odd.prefix(5).joined(separator: ", "))\(odd.count > 5 ? ", …" : "").")
     }
 
-    /// First `.git` anywhere under `dir`, relative to it. Tool trees are small; a tree too large
-    /// to finish walking is reported as possibly holding a checkout.
+    /// Describes the first `.git` anywhere under `dir`, relative to it. Tool trees are small; a tree too large
+    /// to finish walking, or one with unreadable parts, is reported as possibly holding a checkout.
     static func nestedCheckout(in dir: String) -> String? {
-        guard let walker = FileManager.default.enumerator(atPath: dir) else { return nil }
+        final class Failure: @unchecked Sendable { var path: String? }
+        let failure = Failure()
+        let root = URL(fileURLWithPath: dir)
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, errorHandler: { url, _ in
+            failure.path = failure.path ?? url.path
+            return true
+        }) else { return "contents could not be read" }
         var seen = 0
-        while let relative = walker.nextObject() as? String {
-            if (relative as NSString).lastPathComponent == ".git" { return (relative as NSString).deletingLastPathComponent + "/" }
+        let prefix = root.standardizedFileURL.path + "/"
+        while let url = walker.nextObject() as? URL {
+            if url.lastPathComponent == ".git" {
+                let parent = url.deletingLastPathComponent().standardizedFileURL.path + "/"
+                let relative = parent.hasPrefix(prefix) ? String(parent.dropFirst(prefix.count)) : parent
+                return "\(relative.isEmpty ? "./" : relative) (git checkout)"
+            }
             seen += 1
             if seen > 100_000 { return "contents too large to check" }
+        }
+        if let path = failure.path {
+            return "\((path as NSString).lastPathComponent) could not be read"
         }
         return nil
     }

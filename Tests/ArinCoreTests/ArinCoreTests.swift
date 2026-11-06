@@ -443,8 +443,8 @@ struct CLIFailure: Error { var message: String }
         defer { box.cleanup() }
         _ = try box.mkdir("scratch/wt-verify/.git")
         _ = try box.mkdir("plain/dd/Build")
-        #expect(await TempRule.containsGitCheckout("\(box.root)/scratch"))
-        #expect(!(await TempRule.containsGitCheckout("\(box.root)/plain")))
+        #expect(await FileInfo.containsGitCheckout("\(box.root)/scratch"))
+        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/plain")))
     }
 }
 
@@ -453,7 +453,7 @@ struct CLIFailure: Error { var message: String }
         let box = try Sandbox()
         defer { box.cleanup() }
         _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
-        #expect(!(await TempRule.containsGitCheckout("\(box.root)/dd")))
+        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/dd")))
     }
 }
 
@@ -533,11 +533,11 @@ struct CLIFailure: Error { var message: String }
         _ = try box.mkdir("gopkg/pkg/my-project/.git")
         _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
         _ = try box.mkdir("gomod/pkg/mod/github.com/x/y/.git")
-        #expect(await TempRule.containsGitCheckout("\(box.root)/deep"))
-        #expect(await TempRule.containsGitCheckout("\(box.root)/named"))
-        #expect(await TempRule.containsGitCheckout("\(box.root)/gopkg"))
-        #expect(!(await TempRule.containsGitCheckout("\(box.root)/dd")))
-        #expect(!(await TempRule.containsGitCheckout("\(box.root)/gomod")))
+        #expect(await FileInfo.containsGitCheckout("\(box.root)/deep"))
+        #expect(await FileInfo.containsGitCheckout("\(box.root)/named"))
+        #expect(await FileInfo.containsGitCheckout("\(box.root)/gopkg"))
+        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/dd")))
+        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/gomod")))
     }
 
     @Test func binToolFolderWithCheckoutNeedsReview() throws {
@@ -559,6 +559,74 @@ struct CLIFailure: Error { var message: String }
         let sizes: [String: Int64] = [top: 5 * gb, "\(top)/src": 5 * gb, repo: 5 * gb, "\(repo)/.git": 4 * gb]
         let picked = HomeOverview.pick(top, sizes: sizes, depth: 0, avoid: []) { _ in false }
         #expect(picked.isEmpty)
+    }
+
+    @Test func protectedPathsIgnoreCase() {
+        let g = Guardrails(home: "/Users/test", tmpDir: "/var/folders/ab/cdef/T/")
+        #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Library/messages") }
+        #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/documents/notes") }
+        #expect(throws: Guardrails.Violation.self) { try g.check("/users/TEST/.SSH/id_ed25519") }
+    }
+
+    @Test func nativeCommandsCheckSymlinkTargets() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let target = try box.write("Documents/logs.sqlite")
+        let link = "\(box.root)/.codex/logs_1.sqlite"
+        _ = try box.mkdir(".codex")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+        let candidate = Candidate(ruleID: "t", title: "t", detail: "", category: .agentData, level: .deep, risk: .review,
+                                  bytes: 1, paths: [link], action: .commands([CommandSpec("sqlite3", [link, "VACUUM;"])]))
+        let result = await Executor(guardrails: box.guardrails).clean(candidate, state: .empty)
+        #expect(result.status == .skipped, "\(result.message)")
+        // Deleting the link itself is still fine: delete unlinks, it never follows.
+        try box.guardrails.check(link)
+    }
+
+    @Test func unreadableSubtreesFailClosed() async throws {
+        let box = try Sandbox()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: "\(box.root)/scratch/locked")
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: "\(box.root)/repo/bin/tools/locked")
+            box.cleanup()
+        }
+        _ = try box.mkdir("scratch/locked/inner")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(box.root)/scratch/locked")
+        #expect(await FileInfo.containsGitCheckout("\(box.root)/scratch"))
+        #expect(await FileInfo.hasRecentWrites("\(box.root)/scratch", within: 60))
+        #expect(!(await FileInfo.hasRecentWrites("\(box.root)/missing", within: 60)))
+
+        _ = try box.mkdir("repo/bin/tools/locked/inner")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(box.root)/repo/bin/tools/locked")
+        let (generated, note) = ProjectArtifactRule.binLooksGenerated("\(box.root)/repo/bin")
+        #expect(!generated)
+        #expect(note.contains("could not be read"), "\(note)")
+    }
+
+    @Test func worktreeWithNewCommitsSinceScanIsKept() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let repo = try box.mkdir("projects/app")
+        try await git(repo, "init", "-q", "-b", "main")
+        _ = try box.write("projects/app/README", "hi")
+        try await git(repo, "add", ".")
+        try await git(repo, "commit", "-q", "-m", "init")
+        let wt = "\(box.root)/projects/app.feature"
+        try await git(repo, "worktree", "add", "-q", "-b", "feature", wt)
+
+        let options = ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: ["\(box.root)/projects"],
+                                  checkPullRequests: false, minimumBytes: 0)
+        let found = await WorktreeRule.scanRepo(repo, ctx: ScanContext(options: options, state: .empty, now: Date()))
+        let candidate = try #require(found.first { (($0.paths.first ?? "") as NSString).lastPathComponent == "app.feature" })
+        #expect(candidate.effectiveRisk == .safe)
+
+        // New, committed (so clean) work after the scan.
+        _ = try box.write("projects/app.feature/feature.txt")
+        try await git(wt, "add", ".")
+        try await git(wt, "commit", "-q", "-m", "feature")
+        let result = await Executor(guardrails: box.guardrails).clean(candidate, state: .empty)
+        #expect(result.status == .skipped, "\(result.message)")
+        #expect(FileManager.default.fileExists(atPath: "\(wt)/feature.txt"))
     }
 
     @Test func reviewerShellAllowlistHasNoWritableOptions() {

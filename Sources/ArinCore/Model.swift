@@ -123,8 +123,9 @@ public enum CleanupAction: Codable, Sendable, Hashable {
     case trash([String])
     /// Run the tool's own cleanup commands, in order.
     case commands([CommandSpec])
-    /// `git worktree remove` (refuses dirty trees), falling back to a permission fix.
-    case removeWorktree(repo: String, path: String)
+    /// `git worktree remove` (refuses dirty trees), falling back to a permission fix. `head` is the
+    /// commit that was judged merged; removal is refused if the worktree has moved since.
+    case removeWorktree(repo: String, path: String, head: String? = nil)
     /// Informational only.
     case none
 
@@ -133,7 +134,7 @@ public enum CleanupAction: Codable, Sendable, Hashable {
         case let .delete(paths): "Delete \(paths.count == 1 ? "1 item" : "\(paths.count) items")"
         case let .trash(paths): "Move \(paths.count == 1 ? "1 item" : "\(paths.count) items") to Trash"
         case let .commands(cmds): cmds.map(\.display).joined(separator: " && ")
-        case let .removeWorktree(repo, path): "git -C \(repo) worktree remove \(path)"
+        case let .removeWorktree(repo, path, _): "git -C \(repo) worktree remove \(path)"
         case .none: "No action"
         }
     }

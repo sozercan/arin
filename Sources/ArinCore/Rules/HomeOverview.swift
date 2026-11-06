@@ -50,10 +50,13 @@ enum HomeOverview {
             pick(top, sizes: sizes, depth: 0, avoid: avoid, isSkipped: isSkipped)
         }
 
-        return picked.compactMap { path -> Candidate? in
+        // A folder holding a git checkout anywhere inside, even one too small to show up in `sizes`,
+        // may hold unpushed work. Worktree rules handle checkouts; the overview leaves them alone.
+        var reportable: [String] = []
+        for path in picked where !(await FileInfo.containsGitCheckout(path)) { reportable.append(path) }
+
+        return reportable.compactMap { path -> Candidate? in
             guard let bytes = sizes[path], (try? guardrails.check(path)) != nil else { return nil }
-            // A git checkout holds work that may not be pushed; worktree rules handle those.
-            if FileInfo.exists("\(path)/.git") { return nil }
             let display = (path as NSString).abbreviatingWithTildeInPath
             return Candidate(
                 ruleID: "unclassified.home",

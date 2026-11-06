@@ -64,7 +64,15 @@ public enum Catalog {
             id: "npm.cache",
             name: "npm cache",
             detail: "Package tarballs npm can re-download.",
-            paths: [".npm/_cacache"],
+            // `npm cache clean` empties npm's configured cache (`cache=` in .npmrc), so that is the
+            // path the guardrails must see. If npm can't say where it is, offer nothing.
+            resolve: { ctx in
+                guard Shell.which("npm") != nil else { return [ctx.path(".npm/_cacache")] }
+                let result = await Shell.run("npm", ["config", "get", "cache"], timeout: 20)
+                guard result.ok, let dir = result.lines.first?.trimmingCharacters(in: .whitespaces), dir.hasPrefix("/")
+                else { return [] }
+                return [(dir as NSString).appendingPathComponent("_cacache")]
+            },
             commands: [CommandSpec("npm", ["cache", "clean", "--force"])],
             blockingProcesses: ["npm"]
         ),

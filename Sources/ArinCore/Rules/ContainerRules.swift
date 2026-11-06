@@ -12,12 +12,19 @@ struct DockerRule: Rule {
 
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("docker") != nil else { return [] }
-        let info = await Shell.run("docker", ["info", "--format", "{{.ServerVersion}}"], timeout: 10)
+        // Pin every call and saved action to the context scanned now, so switching contexts
+        // before cleaning can't aim a prune or `volume rm` at a different daemon.
+        let current = await Shell.run("docker", ["context", "show"], timeout: 10)
+        guard current.ok, let context = current.lines.first?.trimmingCharacters(in: .whitespaces), !context.isEmpty
+        else { return [] }
+        func docker(_ args: [String]) -> [String] { ["--context", context] + args }
+
+        let info = await Shell.run("docker", docker(["info", "--format", "{{.ServerVersion}}"]), timeout: 10)
         if info.timedOut { throw DockerUnavailable() }
         guard info.ok else { return [] } // daemon not running
 
         var result: [Candidate] = []
-        let df = await Shell.run("docker", ["system", "df", "--format", "{{json .}}"], timeout: 60)
+        let df = await Shell.run("docker", docker(["system", "df", "--format", "{{json .}}"]), timeout: 60)
         for line in df.lines {
             guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   let type = row["Type"] as? String,
@@ -29,13 +36,13 @@ struct DockerRule: Rule {
                     ruleID: "docker.build-cache",
                     key: "build-cache",
                     title: "Docker build cache",
-                    detail: "BuildKit layers for the current builder. Builds are slower once. Docker.raw gives space back to macOS gradually.",
+                    detail: "BuildKit layers for the current builder (Docker context \(context)). Builds are slower once. Docker.raw gives space back to macOS gradually.",
                     category: .containers,
                     level: .standard,
                     risk: .safe,
                     bytes: reclaimable,
                     paths: [],
-                    action: .commands([CommandSpec("docker", ["builder", "prune", "-af"])])
+                    action: .commands([CommandSpec("docker", docker(["builder", "prune", "-af"]))])
                 ))
             case "Images":
                 result.append(Candidate(
@@ -48,7 +55,7 @@ struct DockerRule: Rule {
                     risk: .review,
                     bytes: reclaimable,
                     paths: [],
-                    action: .commands([CommandSpec("docker", ["image", "prune", "-af"])])
+                    action: .commands([CommandSpec("docker", docker(["image", "prune", "-af"]))])
                 ))
             default:
                 break
@@ -56,11 +63,11 @@ struct DockerRule: Rule {
         }
 
         // `buildx ls` lists builders and their nodes. If it fails, owners are unknown: nothing is an orphan.
-        let listing = await Shell.run("docker", ["buildx", "ls", "--format", "{{.Name}}"], timeout: 15)
+        let listing = await Shell.run("docker", docker(["buildx", "ls", "--format", "{{.Name}}"]), timeout: 15)
         let builders: Set<String>? = listing.ok ? Set(listing.lines.map { $0.trimmingCharacters(in: .whitespaces) }) : nil
-        let dangling = await Shell.run("docker", ["volume", "ls", "-q", "--filter", "dangling=true"], timeout: 20).lines
+        let dangling = await Shell.run("docker", docker(["volume", "ls", "-q", "--filter", "dangling=true"]), timeout: 20).lines
         guard !dangling.isEmpty else { return result }
-        let volumeSizes = await Self.volumeSizes()
+        let volumeSizes = await Self.volumeSizes(context: context)
         for volume in dangling {
             let orphanedBuilder = builders.map { Self.orphanedBuildxVolume(volume, builders: $0) } ?? false
             result.append(Candidate(
@@ -75,14 +82,14 @@ struct DockerRule: Rule {
                 risk: orphanedBuilder ? .safe : .review,
                 bytes: volumeSizes[volume] ?? 0,
                 paths: [],
-                action: .commands([CommandSpec("docker", ["volume", "rm", volume])])
+                action: .commands([CommandSpec("docker", docker(["volume", "rm", volume]))])
             ))
         }
         return result
     }
 
-    static func volumeSizes() async -> [String: Int64] {
-        let result = await Shell.run("docker", ["system", "df", "-v", "--format", "{{json .Volumes}}"], timeout: 90)
+    static func volumeSizes(context: String) async -> [String: Int64] {
+        let result = await Shell.run("docker", ["--context", context, "system", "df", "-v", "--format", "{{json .Volumes}}"], timeout: 90)
         guard result.ok,
               let rows = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
         else { return [:] }

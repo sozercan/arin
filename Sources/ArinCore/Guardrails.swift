@@ -54,16 +54,28 @@ public struct Guardrails: Sendable {
         }
     }
 
+    /// Validates a path a native command will operate on. Commands follow a symlink at the leaf
+    /// (unlike delete, which only unlinks it), so the fully resolved target must pass too.
+    public func checkTarget(_ rawPath: String) throws(Violation) {
+        try check(rawPath)
+        let resolved = Self.canonical(URL(fileURLWithPath: rawPath).resolvingSymlinksInPath().path)
+        if resolved != Self.canonical((rawPath as NSString).standardizingPath) {
+            try check(resolved)
+        }
+    }
+
     private func checkCanonical(_ path: String) throws(Violation) {
-        guard let root = allowedRoots.first(where: { path == $0 || path.hasPrefix($0 + "/") }) else {
+        // macOS volumes are usually case-insensitive: ~/Library/messages is ~/Library/Messages.
+        let folded = path.lowercased()
+        guard let root = allowedRoots.first(where: { folded == $0.lowercased() || folded.hasPrefix($0.lowercased() + "/") }) else {
             throw .outsideAllowedRoots(path)
         }
         // At least two components below home (no ~/Library, ~/projects); one below temp roots.
         let depth = path.dropFirst(root.count).split(separator: "/").count
         if depth < (root == home ? 2 : 1) { throw .tooShallow(path) }
-        for protected in protectedPaths {
+        for protected in protectedPaths.map({ $0.lowercased() }) {
             // Inside a protected path, or an ancestor of one.
-            if path == protected || path.hasPrefix(protected + "/") || protected.hasPrefix(path + "/") {
+            if folded == protected || folded.hasPrefix(protected + "/") || protected.hasPrefix(folded + "/") {
                 throw .protected(path)
             }
         }
@@ -73,7 +85,7 @@ public struct Guardrails: Sendable {
         switch action {
         case let .delete(paths), let .trash(paths):
             for path in paths { try check(path) }
-        case let .removeWorktree(_, path):
+        case let .removeWorktree(_, path, _):
             try check(path)
         case .commands, .none:
             break

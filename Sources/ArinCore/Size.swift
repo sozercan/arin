@@ -76,12 +76,26 @@ public enum FileInfo {
     }
 
     /// Any file under `path` modified within the window. Stops at the first hit; a walk that
-    /// can't finish counts as recently written.
+    /// can't finish (timeout, unreadable subtree) counts as recently written.
     public static func hasRecentWrites(_ path: String, within window: TimeInterval) async -> Bool {
+        guard exists(path) || isSymlink(path) else { return false }
         let minutes = String(max(Int(window / 60), 1))
         let result = await Shell.run("find", [path, "-mmin", "-\(minutes)", "-print", "-quit"], timeout: 120)
-        if result.timedOut { return true }
-        return !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether the tree holds a git checkout outside package-manager layouts. Searches the whole
+    /// tree; a walk that can't finish (timeout, unreadable subtree) counts as "yes".
+    public static func containsGitCheckout(_ path: String) async -> Bool {
+        // Only recognized package-manager output is skipped, by layout, not by a bare folder name:
+        // a real project under scratch/checkouts/ or scratch/pkg/ must still be found.
+        let result = await Shell.run("find", [
+            path,
+            "(", "-path", "*/SourcePackages/checkouts", "-o", "-path", "*/.build/checkouts",
+            "-o", "-path", "*/pkg/mod", "-o", "-name", "node_modules", ")", "-prune",
+            "-o", "-name", ".git", "-print", "-quit",
+        ], timeout: 120)
+        return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// The path with each component spelled as it is on disk. APFS is usually case-insensitive,

@@ -89,8 +89,11 @@ public struct Executor: Sendable {
         guard candidate.isActionable else { return result(.skipped, "informational only") }
         do {
             try guardrails.check(candidate.action)
-            // Native commands act on the candidate's paths too (e.g. a GOMODCACHE moved under ~/Documents).
-            for path in candidate.paths { try guardrails.check(path) }
+            // Native commands act on the candidate's paths too (e.g. a GOMODCACHE moved under ~/Documents),
+            // and they follow a symlinked leaf, so its target must pass as well.
+            for path in candidate.paths {
+                if case .commands = candidate.action { try guardrails.checkTarget(path) } else { try guardrails.check(path) }
+            }
         } catch {
             return result(.skipped, error.description)
         }
@@ -149,8 +152,8 @@ public struct Executor: Sendable {
             if warnings.isEmpty { return result(.cleaned, done) }
             return result(.cleaned, "\(done) finished with warnings: \(warnings.joined(separator: "; ").prefix(300))")
 
-        case let .removeWorktree(repo, path):
-            return await removeWorktree(repo: repo, path: path, result: result)
+        case let .removeWorktree(repo, path, head):
+            return await removeWorktree(repo: repo, path: path, head: head, result: result)
         }
     }
 
@@ -164,11 +167,20 @@ public struct Executor: Sendable {
     func removeWorktree(
         repo: String,
         path: String,
+        head: String?,
         result: (CleanupItemResult.Status, String, Bool) -> CleanupItemResult
     ) async -> CleanupItemResult {
         guard FileInfo.exists(path) else {
             _ = await Shell.run("git", ["-C", repo, "worktree", "prune"], timeout: 30)
             return result(.cleaned, "already gone; pruned entry", false)
+        }
+        // git only refuses dirty trees. A clean tree with a new commit since the scan may hold
+        // unmerged work, so the commit that was judged merged must still be checked out.
+        if let head {
+            let current = await Shell.run("git", ["-C", path, "rev-parse", "HEAD"], timeout: 20)
+            guard current.ok, current.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == head else {
+                return result(.skipped, "HEAD moved since the scan; rescan to recheck whether it's merged", false)
+            }
         }
         // No --force: git refuses if there are uncommitted or untracked files.
         let remove = await Shell.run("git", ["-C", repo, "worktree", "remove", path], timeout: 600)
