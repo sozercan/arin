@@ -1,0 +1,82 @@
+name: CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "version.env"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Tests/**"
+      - "Scripts/**"
+      - "version.env"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: swift build
+
+      # Tests touch only their own sandbox folders under $TMPDIR; nothing on the runner is cleaned.
+      - name: Test
+        run: swift test
+
+  package:
+    name: Package app
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get short SHA
+        id: slug
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal app
+        env:
+          ARCHES: "arm64 x86_64"
+        run: |
+          echo "MARKETING_VERSION=0.0.0-dev.${{ steps.slug.outputs.sha_short }}" > version.env
+          echo "BUILD_NUMBER=${{ github.run_number }}" >> version.env
+          Scripts/build-app.sh release
+
+      - name: Verify app
+        run: Scripts/verify-app.sh --arches "arm64 x86_64" --version "0.0.0-dev.${{ steps.slug.outputs.sha_short }}"
+
+      - name: Zip app
+        if: github.event_name != 'pull_request'
+        run: ditto -c -k --keepParent build/Arin.app "arin-dev-${{ steps.slug.outputs.sha_short }}.zip"
+
+      - name: Upload dev build
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arin-dev-${{ steps.slug.outputs.sha_short }}
+          path: arin-dev-${{ steps.slug.outputs.sha_short }}.zip
+          retention-days: 30

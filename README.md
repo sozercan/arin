@@ -26,8 +26,11 @@ Requires macOS 26 and Xcode 26 or later. Arin has no third-party dependencies.
 swift build
 swift test
 Scripts/build-app.sh          # builds build/Arin.app (ad-hoc signed)
+Scripts/verify-app.sh         # checks the bundle: ID, binaries, signature, bundled CLI
 open build/Arin.app
 ```
+
+`ARCHES="arm64 x86_64" Scripts/build-app.sh` builds a universal app. The version comes from `version.env`. Debug builds use the bundle ID `com.sertacozercan.Arin.debug`, so they keep their own settings. CI runs the tests and packages a universal app for every change to code or scripts.
 
 ## CLI
 

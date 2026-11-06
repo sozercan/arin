@@ -7,9 +7,14 @@ Arin is a native macOS (SwiftUI, Swift 6, macOS 26+) disk-cleanup app with a CLI
 ```bash
 swift build
 swift test
-Scripts/build-app.sh debug   # build/Arin.app
+Scripts/build-app.sh debug   # build/Arin.app, bundle ID com.sertacozercan.Arin.debug
+Scripts/verify-app.sh --bundle-id com.sertacozercan.Arin.debug
 swift run arin scan          # read-only scan of this Mac
 ```
+
+- `version.env` is the single source for the app version; release builds overwrite it from the tag.
+- Debug builds must keep the `.debug` bundle ID so they never share settings with an installed copy.
+- Pin GitHub Actions to a full commit SHA with the version in a comment.
 
 ## Rules for changes
 
