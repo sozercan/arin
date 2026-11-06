@@ -15,6 +15,8 @@ swift run arin scan          # read-only scan of this Mac
 - `version.env` is the single source for the app version; release builds overwrite it from the tag.
 - Debug builds must keep the `.debug` bundle ID so they never share settings with an installed copy.
 - Pin GitHub Actions to a full commit SHA with the version in a comment.
+- The bundled CLI lives at `Contents/Helpers/arin` (not `MacOS/`, which would collide with `Arin`). Sign it before the app.
+- Releases come only from pushed `v*` tags. A manual run of the release workflow must not publish.
 
 ## Rules for changes
 

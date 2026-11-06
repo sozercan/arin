@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# Builds build/Arin.app (ad-hoc signed) from the SwiftPM ArinApp and arin products.
+# Builds build/Arin.app from the SwiftPM ArinApp and arin products.
 # Usage: Scripts/build-app.sh [debug|release]
-#   ARCHES="arm64 x86_64"  build a universal binary (default: host architecture)
+#   ARCHES="arm64 x86_64"   build a universal binary (default: host architecture)
+#   ARIN_SIGNING=adhoc      ad-hoc signature (default)
+#   ARIN_SIGNING=dev        Apple Development identity, hardened runtime
+#   ARIN_SIGNING=developer-id  Developer ID Application identity, hardened runtime, secure timestamp
+#   APP_IDENTITY=<hash|name>   identity to use; otherwise the first matching one in the keychain
 set -euo pipefail
 
 CONFIG="${1:-release}"
@@ -43,9 +47,11 @@ rm -rf "$APP" "$STAGE"
 build_product ArinApp
 build_product arin
 
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# The CLI goes in Helpers: Contents/MacOS can't hold both Arin and arin on a case-insensitive
+# volume, and Apple expects helper tools there rather than in Resources.
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 install_product ArinApp "$APP/Contents/MacOS/Arin"
-install_product arin "$APP/Contents/Resources/arin"
+install_product arin "$APP/Contents/Helpers/arin"
 rm -rf "$STAGE"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -69,6 +75,31 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-codesign --force --sign - --timestamp=none "$APP/Contents/Resources/arin"
-codesign --force --sign - --timestamp=none "$APP"
-echo "Built $APP ($BUNDLE_ID $MARKETING_VERSION ($BUILD_NUMBER), ${ARCH_LIST[*]})"
+SIGNING="${ARIN_SIGNING:-adhoc}"
+find_identity() {
+  security find-identity -v -p codesigning | awk -v kind="$1" '$0 ~ kind { print $2; exit }'
+}
+case "$SIGNING" in
+  adhoc)
+    CODESIGN_ARGS=(--force --sign - --timestamp=none)
+    ;;
+  dev)
+    IDENTITY="${APP_IDENTITY:-$(find_identity "Apple Development")}"
+    [[ -n "$IDENTITY" ]] || { echo "ERROR: no Apple Development identity found" >&2; exit 1; }
+    CODESIGN_ARGS=(--force --options runtime --timestamp=none --sign "$IDENTITY")
+    ;;
+  developer-id)
+    IDENTITY="${APP_IDENTITY:-$(find_identity "Developer ID Application")}"
+    [[ -n "$IDENTITY" ]] || { echo "ERROR: no Developer ID Application identity found" >&2; exit 1; }
+    # Notarization requires the hardened runtime and a secure timestamp on every binary.
+    CODESIGN_ARGS=(--force --options runtime --timestamp --sign "$IDENTITY")
+    ;;
+  *)
+    echo "ERROR: unknown ARIN_SIGNING '$SIGNING' (expected adhoc, dev, or developer-id)" >&2
+    exit 1
+    ;;
+esac
+# Innermost first: the helper, then the app that seals it.
+codesign "${CODESIGN_ARGS[@]}" --identifier "$BUNDLE_ID.cli" "$APP/Contents/Helpers/arin"
+codesign "${CODESIGN_ARGS[@]}" "$APP"
+echo "Built $APP ($BUNDLE_ID $MARKETING_VERSION ($BUILD_NUMBER), ${ARCH_LIST[*]}, $SIGNING signing)"
