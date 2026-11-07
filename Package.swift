@@ -14,7 +14,12 @@ let package = Package(
     ],
     targets: [
         .target(name: "ArinCore"),
-        .executableTarget(name: "ArinApp", dependencies: ["ArinCore"]),
+        .executableTarget(
+            name: "ArinApp",
+            dependencies: ["ArinCore"],
+            // Compiled into the app bundle by Scripts/build-app.sh with actool.
+            exclude: ["Resources/AppIcon.icon"]
+        ),
         .executableTarget(name: "ArinCLI", dependencies: ["ArinCore"], path: "Sources/arin-cli"),
         .testTarget(name: "ArinCoreTests", dependencies: ["ArinCore"]),
     ]

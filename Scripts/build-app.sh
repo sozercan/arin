@@ -54,6 +54,17 @@ install_product ArinApp "$APP/Contents/MacOS/Arin"
 install_product arin "$APP/Contents/Helpers/arin"
 rm -rf "$STAGE"
 
+# AppIcon.icon is an Icon Composer package. actool turns it into Assets.car (Liquid Glass
+# icon with light, dark, and tinted variants) plus AppIcon.icns for Finder and older APIs.
+xcrun actool --compile "$APP/Contents/Resources" \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$ROOT/build/AppIconInfo.plist" \
+  --platform macosx --target-device mac --minimum-deployment-target 26.0 \
+  --errors --warnings --notices \
+  "$ROOT/Sources/ArinApp/Resources/AppIcon.icon" >/dev/null
+[[ -f "$APP/Contents/Resources/Assets.car" ]] || { echo "ERROR: actool did not produce Assets.car" >&2; exit 1; }
+rm -f "$ROOT/build/AppIconInfo.plist"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -64,6 +75,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>Arin</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>${MARKETING_VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>

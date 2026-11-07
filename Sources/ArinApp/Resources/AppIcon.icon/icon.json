@@ -1,0 +1,108 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.55,0.36,0.98,1.0",
+          "srgb:0.20,0.10,0.52,1.0"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1.0
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.24,0.15,0.50,1.0",
+          "srgb:0.05,0.03,0.12,1.0"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1.0
+          }
+        }
+      }
+    }
+  ],
+  "groups": [
+    {
+      "layers": [
+        {
+          "glass": true,
+          "hidden": false,
+          "name": "spark",
+          "image-name": "spark.svg",
+          "fill-specializations": [
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.0,1.0,1.0,1.0"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "srgb:1.0,1.0,1.0,1.0"
+              }
+            }
+          ]
+        },
+        {
+          "glass": true,
+          "hidden": false,
+          "name": "body",
+          "image-name-specializations": [
+            {
+              "value": "body.svg"
+            },
+            {
+              "appearance": "dark",
+              "value": "body-dark.svg"
+            }
+          ]
+        },
+        {
+          "glass": true,
+          "hidden": false,
+          "name": "pins",
+          "image-name-specializations": [
+            {
+              "value": "pins.svg"
+            },
+            {
+              "appearance": "dark",
+              "value": "pins-dark.svg"
+            }
+          ]
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  }
+}
