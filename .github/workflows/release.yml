@@ -1,0 +1,314 @@
+name: Release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+on:
+  push:
+    tags:
+      - "v*"
+  # A manual run builds, signs, and notarizes, then uploads the DMG as a workflow artifact.
+  # Only a pushed tag publishes a GitHub release and updates the Homebrew cask.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp into the build, e.g. 0.2.0"
+        required: false
+        default: ""
+      require_developer_id:
+        description: "Fail unless a Developer ID Application certificate and notarization secrets are configured"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_REPO_TOKEN != '' }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # full history for release notes
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Run unit tests
+        run: swift test
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = "true" ]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [ -n "$INPUT_VERSION" ]; then
+            TAG="v${INPUT_VERSION#v}"
+          else
+            TAG="v0.0.0-manual.$(git rev-parse --short HEAD)"
+          fi
+          VERSION="${TAG#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$TAG' is not a vMAJOR.MINOR.PATCH[-suffix] version" >&2
+            exit 1
+          fi
+          PRERELEASE=false
+          [[ "$VERSION" =~ -(alpha|beta|rc|dev|manual) ]] && PRERELEASE=true
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "filename=arin-$TAG.dmg"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION (tag $TAG, prerelease $PRERELEASE, publish $PUBLISH)"
+
+      - name: Configure signing
+        id: signing
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_KEYCHAIN_PWD: ${{ secrets.MACOS_KEYCHAIN_PWD }}
+          REQUIRE_DEVELOPER_ID: ${{ inputs.require_developer_id || 'false' }}
+        run: |
+          set -euo pipefail
+
+          # Preferred: Developer ID Application + notarization (paid Apple Developer Program).
+          # Fallbacks: Apple Development, then ad hoc. Both run, but Gatekeeper warns users.
+          fallback() {
+            local mode="$1" identity="$2" reason="$3"
+            if [ "$REQUIRE_DEVELOPER_ID" = "true" ]; then
+              echo "::error::$reason Developer ID signing was required." >&2
+              exit 1
+            fi
+            echo "::warning::$reason Using $mode signing; the release will not be notarized."
+            echo "mode=$mode" >> "$GITHUB_OUTPUT"
+            echo "identity=$identity" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ -z "$MACOS_CERTIFICATE" ] || [ -z "$MACOS_CERTIFICATE_PWD" ] || [ -z "$MACOS_KEYCHAIN_PWD" ]; then
+            fallback adhoc "" "MACOS_CERTIFICATE, MACOS_CERTIFICATE_PWD, or MACOS_KEYCHAIN_PWD is not configured."
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/arin-signing.keychain-db"
+          CERT="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$CERT"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$CERT" || fallback adhoc "" "MACOS_CERTIFICATE is not valid base64."
+
+          security create-keychain -p "$MACOS_KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PWD" "$KEYCHAIN"
+          # Only codesign and security may use the private key (not -A, which allows every app).
+          security import "$CERT" -P "$MACOS_CERTIFICATE_PWD" -t cert -f pkcs12 -k "$KEYCHAIN" \
+            -T /usr/bin/codesign -T /usr/bin/security \
+            || fallback adhoc "" "MACOS_CERTIFICATE could not be imported."
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_KEYCHAIN_PWD" "$KEYCHAIN" >/dev/null
+          # Put the signing keychain first in the search list so codesign finds the identity.
+          read -r -a EXISTING <<< "$(security list-keychains -d user | tr -d '"' | xargs)"
+          security list-keychains -d user -s "$KEYCHAIN" "${EXISTING[@]}"
+
+          find_identity() {
+            security find-identity -v -p codesigning "$KEYCHAIN" | awk -v kind="$1" '$0 ~ kind { print $2; exit }'
+          }
+          ID=$(find_identity "Developer ID Application")
+          if [ -n "$ID" ]; then
+            echo "::add-mask::$ID"
+            echo "mode=developer-id" >> "$GITHUB_OUTPUT"
+            echo "identity=$ID" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ID=$(find_identity "Apple Development")
+          if [ -n "$ID" ]; then
+            echo "::add-mask::$ID"
+            fallback dev "$ID" "The certificate has no Developer ID Application identity."
+          fi
+          fallback adhoc "" "The certificate has no Developer ID Application or Apple Development identity."
+
+      - name: Build universal app
+        env:
+          ARCHES: "arm64 x86_64"
+          ARIN_SIGNING: ${{ steps.signing.outputs.mode }}
+          APP_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: |
+          echo "MARKETING_VERSION=${{ steps.version.outputs.version }}" > version.env
+          echo "BUILD_NUMBER=${{ github.run_number }}" >> version.env
+          Scripts/build-app.sh release
+
+      - name: Verify app
+        run: |
+          ARGS=(--arches "arm64 x86_64" --version "${{ steps.version.outputs.version }}")
+          if [ "${{ steps.signing.outputs.mode }}" = "developer-id" ]; then ARGS+=(--require-developer-id); fi
+          Scripts/verify-app.sh "${ARGS[@]}" build/Arin.app
+
+      - name: Create DMG
+        run: |
+          set -euo pipefail
+          brew install create-dmg
+          create-dmg \
+            --volname "Arin" \
+            --window-pos 200 120 \
+            --window-size 660 400 \
+            --icon-size 100 \
+            --icon "Arin.app" 180 190 \
+            --app-drop-link 480 190 \
+            --hide-extension "Arin.app" \
+            --no-internet-enable \
+            "${{ steps.version.outputs.filename }}" \
+            build/Arin.app
+
+      - name: Sign and notarize DMG
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          APP_IDENTITY: ${{ steps.signing.outputs.identity }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          FILE="${{ steps.version.outputs.filename }}"
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "::error::A Developer ID certificate is configured but APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, or APPLE_TEAM_ID is missing; refusing to ship an unnotarized Developer ID build." >&2
+            exit 1
+          fi
+          codesign --force --timestamp --sign "$APP_IDENTITY" "$FILE"
+          codesign --verify --verbose=2 "$FILE"
+          xcrun notarytool submit "$FILE" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$FILE"
+          xcrun stapler validate "$FILE"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$FILE"
+
+      - name: Checksum
+        id: sha256
+        run: |
+          SHA=$(shasum -a 256 "${{ steps.version.outputs.filename }}" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$SHA  ${{ steps.version.outputs.filename }}"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.version.outputs.filename }}
+          path: ${{ steps.version.outputs.filename }}
+          retention-days: 30
+
+      - name: Write release notes
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          PREV=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## What's new"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --pretty=format:"- %s" --no-merges "$PREV..$TAG" | head -50
+            else
+              echo "- Initial release"
+            fi
+            echo
+            echo
+            echo "SHA-256: \`${{ steps.sha256.outputs.sha256 }}\`"
+            if [ "${{ steps.signing.outputs.mode }}" != "developer-id" ]; then
+              echo
+              echo "This build is not notarized. Install with Homebrew, or right-click Arin and choose Open the first time."
+            fi
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Publish GitHub release
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          FILE="${{ steps.version.outputs.filename }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; replacing its DMG"
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            PRERELEASE_FLAG=""
+            if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then PRERELEASE_FLAG="--prerelease"; fi
+            gh release create "$TAG" "$FILE" --title "$TAG" --notes-file release_notes.md $PRERELEASE_FLAG
+          fi
+
+      # The cask downloads from this repo's releases, which only works once the repo is public.
+      - name: Check Homebrew cask prerequisites
+        id: tap
+        if: env.PUBLISH == 'true'
+        run: |
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            echo "Prerelease; leaving the Homebrew cask on the last stable version."
+          elif [ "${{ github.event.repository.private }}" = "true" ]; then
+            echo "::warning::The repository is private, so Homebrew can't download the DMG; skipping the cask update."
+          elif [ "$HAS_TAP_TOKEN" != "true" ]; then
+            echo "::warning::HOMEBREW_REPO_TOKEN is not configured; skipping the cask update."
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out Homebrew tap
+        if: steps.tap.outputs.update == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sozercan/homebrew-repo
+          token: ${{ secrets.HOMEBREW_REPO_TOKEN }}
+          path: homebrew-repo
+
+      - name: Update Homebrew cask
+        if: steps.tap.outputs.update == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          cd homebrew-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p Casks
+          cat > Casks/arin.rb <<EOF
+          cask "arin" do
+            version "$VERSION"
+            sha256 "${{ steps.sha256.outputs.sha256 }}"
+
+            url "https://github.com/${{ github.repository }}/releases/download/v#{version}/arin-v#{version}.dmg"
+            name "Arin"
+            desc "Finds caches, build output and stale worktrees that are safe to delete"
+            homepage "https://github.com/${{ github.repository }}"
+
+            depends_on macos: :tahoe
+
+            app "Arin.app"
+            binary "#{appdir}/Arin.app/Contents/Helpers/arin"
+
+            postflight_steps do
+              run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/Arin.app"], sudo: false
+            end
+
+            zap trash: [
+              "~/Library/Preferences/com.sertacozercan.Arin.plist",
+              "~/Library/Saved Application State/com.sertacozercan.Arin.savedState",
+            ]
+          end
+          EOF
+          git add Casks/arin.rb
+          git diff --cached --quiet || git commit -m "Update arin to v$VERSION"
+          git push origin HEAD
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/arin-signing.keychain-db" 2>/dev/null || true
