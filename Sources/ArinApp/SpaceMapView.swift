@@ -86,10 +86,15 @@ private struct CategoryBlock: View {
                 .frame(width: inner.width, height: header, alignment: .leading)
             }
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                Tile(candidate: item, color: category.color, isSelected: model.selection.contains(item.id))
-                    .frame(width: max(tiles[index].width - 2, 0), height: max(tiles[index].height - 2, 0))
-                    .offset(x: tiles[index].minX, y: tiles[index].minY)
-                    .onTapGesture { if item.isActionable { model.toggle(item) } }
+                let selected = model.selection.contains(item.id)
+                Button { model.toggle(item) } label: {
+                    Tile(candidate: item, color: category.color, isSelected: selected)
+                }
+                .buttonStyle(.plain)
+                // Same rule as the list's checkbox: kept items can only be deselected.
+                .disabled(!item.isActionable || item.kept && !selected)
+                .frame(width: max(tiles[index].width - 2, 0), height: max(tiles[index].height - 2, 0))
+                .offset(x: tiles[index].minX, y: tiles[index].minY)
             }
         }
         .frame(width: max(frame.width - 2, 0), height: max(frame.height - 2, 0), alignment: .topLeading)
@@ -133,6 +138,6 @@ private struct Tile: View {
         .help("\(candidate.title)\n\(candidate.bytes.formattedBytes) · \(candidate.effectiveRisk.label)\(candidate.kept ? " · always kept" : "")")
         .accessibilityElement()
         .accessibilityLabel("\(candidate.title), \(candidate.bytes.formattedBytes), \(candidate.effectiveRisk.label)")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

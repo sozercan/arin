@@ -300,3 +300,74 @@ private func setModified(_ path: String, daysAgo: Double) throws {
         }
     }
 }
+
+@Suite struct ReviewFixTests {
+    @Test func cleanupsThatWouldRemoveAKeptPathAreRefused() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let worktree = try box.mkdir("projects/wt")
+        let modules = try box.mkdir("projects/wt/node_modules")
+        let url = URL(fileURLWithPath: "\(box.root)/keep.json")
+        try KeepList.update(at: url) { $0.add(id: "projects.artifacts:\(modules)", title: "node_modules · wt", paths: [modules]) }
+
+        let parent = candidate(worktree)
+        let marked = [parent].applying(keep: Result { try KeepList.load(from: url) })
+        #expect(marked[0].blockers == ["contains node_modules · wt, which you chose to keep"])
+        // Applying again replaces its own blockers instead of piling them up.
+        #expect(marked.applying(keep: Result { try KeepList.load(from: url) })[0].blockers.count == 1)
+
+        let report = await Executor(guardrails: box.guardrails, keepListURL: url).run([parent])
+        #expect(report.items.first?.status == .skipped)
+        #expect(FileInfo.exists(modules))
+    }
+
+    @Test func aKeepListThatCantBeReachedBlocksCleaning() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let dir = try box.mkdir("locked")
+        _ = try box.write("locked/keep.json", #"{"entries":[]}"#)
+        #expect(chmod(dir, 0o000) == 0)
+        defer { chmod(dir, 0o755) }
+        #expect(throws: StoreError.self) { try KeepList.load(from: URL(fileURLWithPath: "\(dir)/keep.json")) }
+        #expect(try KeepList.load(from: URL(fileURLWithPath: "\(box.root)/missing/keep.json")).entries.isEmpty)
+    }
+
+    @Test func concurrentKeepUpdatesAreNotLost() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let url = URL(fileURLWithPath: "\(box.root)/keep.json")
+        DispatchQueue.concurrentPerform(iterations: 24) { i in
+            _ = try? KeepList.update(at: url) { $0.add(id: "t:/\(i)", title: "\(i)") }
+        }
+        #expect(try KeepList.load(from: url).entries.count == 24)
+    }
+
+    @Test func putBackOnlyTakesItemsFromTheTrash() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let outside = try box.write("Documents/report", "precious")
+        let forged = TrashedPath(original: "\(box.root)/Library/Caches/x", location: outside)
+        #expect(!forged.canPutBack)
+        #expect(throws: StoreError.self) { try forged.putBack(guardrails: box.guardrails) }
+        #expect(FileInfo.exists(outside))
+        let sneaky = TrashedPath(original: "\(box.root)/Library/Caches/x", location: "\(ArinStore.trashDirectory)/../Documents")
+        #expect(throws: StoreError.self) { try sneaky.checkLocation() }
+    }
+
+    @Test func aTornLineDoesNotSwallowTheNextRecord() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let url = URL(fileURLWithPath: "\(box.root)/history.jsonl")
+        try Data("{\"scan\":".utf8).write(to: url)
+        let cleanup = CleanupReport(items: [], freeBefore: 1, freeAfter: 5, estimatedBytes: 0, explanations: [])
+        try History(url: url).append(.cleanup(CleanupRecord(cleanup, auto: false)))
+        #expect(History.cleanups(History(url: url).load()).map(\.measuredBytes) == [4])
+    }
+
+    @Test func ollamaRemovalIsRefusedWhenLoadedModelsCantBeChecked() async throws {
+        // Without a reachable Ollama, `ollama ps` fails and removal must not run.
+        if await Shell.run("ollama", ["ps"], timeout: 10).ok { return }
+        let reason = await Executor.preflight(CommandSpec("ollama", ["rm", "arin-test-model"]))
+        #expect(reason?.contains("couldn't check") == true)
+    }
+}

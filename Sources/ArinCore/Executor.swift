@@ -58,23 +58,27 @@ public struct Executor: Sendable {
         let before = Disk.status(path: guardrails.home).freeBytes
         progress?(.started(total: candidates.count))
 
-        // Read once, before anything runs: the user's protections apply to every item.
-        let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } } ?? .success(KeepList())
-
         var results: [CleanupItemResult] = []
         for (index, candidate) in candidates.enumerated() {
             progress?(.item(index: index, title: candidate.title))
+            // A fresh snapshot per item (~0.3 s): an earlier slow item gives apps time to start
+            // using a later one.
+            let state = await SystemState.capture()
+            // Re-read per item: the app or the CLI may protect something while an earlier item runs.
+            let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
+                ?? .success(KeepList())
             let result: CleanupItemResult
             switch keep {
             case let .failure(error):
                 result = Self.skipped(candidate, "\(error)")
             case let .success(list) where list.contains(candidate.id) || candidate.kept:
                 result = Self.skipped(candidate, "on your keep list")
-            case .success:
-                // A fresh snapshot per item (~0.3 s): an earlier slow item gives apps time to start
-                // using a later one.
-                let state = await SystemState.capture()
-                result = await clean(candidate, state: state)
+            case let .success(list):
+                if let inside = Self.targets(of: candidate).lazy.compactMap({ list.keptEntry(insideOrAt: $0) }).first {
+                    result = Self.skipped(candidate, "contains \(inside.title), which you chose to keep")
+                } else {
+                    result = await clean(candidate, state: state)
+                }
             }
             results.append(result)
             progress?(.finished(result))
@@ -93,6 +97,27 @@ public struct Executor: Sendable {
         var withNotes = report
         withNotes.explanations = await Self.explain(report, cleaned: candidates.filter { c in cleaned.contains { $0.id == c.id } })
         return withNotes
+    }
+
+    /// Every path the action can remove.
+    static func targets(of candidate: Candidate) -> [String] {
+        switch candidate.action {
+        case let .delete(paths), let .trash(paths): paths
+        case let .removeWorktree(_, path, _): [path] + candidate.paths
+        case .commands, .none: candidate.paths
+        }
+    }
+
+    /// Checks that only make sense at the moment a command runs. Returns why it must not run.
+    static func preflight(_ command: CommandSpec) async -> String? {
+        if command.executable == "ollama", command.arguments.first == "rm", let model = command.arguments.last {
+            let loaded = await Shell.run("ollama", ["ps"], timeout: 20)
+            guard loaded.ok else { return "couldn't check whether \(model) is loaded in Ollama" }
+            if OllamaModelRule.parseTable(loaded.stdout).contains(where: { $0.name == model }) {
+                return "\(model) is loaded in Ollama right now"
+            }
+        }
+        return nil
     }
 
     static func skipped(_ candidate: Candidate, _ message: String) -> CleanupItemResult {
@@ -168,6 +193,7 @@ public struct Executor: Sendable {
                 guard Guardrails.allows(command) else {
                     return result(.skipped, "refusing to run \(command.display)")
                 }
+                if let reason = await Self.preflight(command) { return result(.skipped, reason) }
                 let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd, timeout: commandTimeout)
                 if !output.ok {
                     let tail = String((output.stderr.isEmpty ? output.stdout : output.stderr).suffix(400))

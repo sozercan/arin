@@ -18,7 +18,7 @@ struct CandidateList: View {
                         CandidateRow(candidate: item, isSelected: model.selection.contains(item.id)) {
                             model.toggle(item)
                         } setKept: { kept in
-                            model.setKept(item.id, title: item.title, kept)
+                            model.setKept(item.id, title: item.title, paths: item.paths, kept)
                         }
                     }
                 } header: {

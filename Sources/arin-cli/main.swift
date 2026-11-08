@@ -20,7 +20,8 @@ options:
   --model NAME                  Review model (default: sonnet for claude, CLI default for codex; "" = CLI default)
   --effort low|medium|high|xhigh  Review effort (default: low; "" = CLI default)
   --roots a,b                   Project roots to search (default: ~/projects, ~/go/src, …)
-  --ids a,b                     clean/plan: exactly these candidate ids instead of the pre-selection
+  --ids a,b                     clean/plan: exactly these candidate ids instead of the pre-selection;
+                                with --plan, only these items from the plan
   --plan FILE                   clean: run a saved plan; items that changed since are refused
   --out FILE                    plan: write here instead of stdout
   --remove                      keep: take the IDs off the keep list
@@ -179,21 +180,26 @@ func printHistory(json: Bool) {
 }
 
 func runKeep(_ args: Args) -> Int32 {
-    var list: KeepList
-    do { list = try KeepList.load() } catch {
-        eprint("\(error)")
-        return 1
-    }
     if args.positional.isEmpty {
+        let list: KeepList
+        do { list = try KeepList.load() } catch {
+            eprint("\(error)")
+            return 1
+        }
         if args.json { printJSON(list) } else if list.entries.isEmpty { print("The keep list is empty.") }
         else { for entry in list.entries { print("\(entry.id)\(entry.title == entry.id ? "" : "  (\(entry.title))")") } }
         return 0
     }
-    for id in args.positional {
-        if args.remove { list.remove(id: id) } else { list.add(id: id, title: id) }
-    }
-    do { try list.save() } catch {
-        eprint("Could not save the keep list: \(error.localizedDescription)")
+    do {
+        try KeepList.update { list in
+            for id in args.positional {
+                // Most IDs are `rule:/path`; recording the path also protects it from a parent's cleanup.
+                let key = id.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+                if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : []) }
+            }
+        }
+    } catch {
+        eprint("Could not save the keep list: \(error)")
         return 1
     }
     print(args.remove ? "Removed \(args.positional.count) from the keep list." : "Arin will never clean \(args.positional.count == 1 ? "this item" : "these items").")
@@ -299,8 +305,17 @@ func main() async -> Int32 {
         var picked = chosen(report, args)
         if let plan {
             let resolved = plan.resolve(against: report.candidates)
-            picked = resolved.ready
-            for (item, reason) in resolved.refused { eprint("  refused: \(item.title) — \(reason)") }
+            // --ids narrows a plan to those items; it never adds anything the plan doesn't hold.
+            if let ids = args.ids {
+                let planned = Set(plan.items.map(\.id))
+                for id in ids where !planned.contains(id) { eprint("  not in the plan: \(id)") }
+                picked = resolved.ready.filter { ids.contains($0.id) }
+            } else {
+                picked = resolved.ready
+            }
+            for (item, reason) in resolved.refused where args.ids?.contains(item.id) ?? true {
+                eprint("  refused: \(item.title) — \(reason)")
+            }
         }
         guard !picked.isEmpty else {
             print("Nothing to clean.")

@@ -70,7 +70,7 @@ swift run arin keep 'docker.volume:pgdata'          # never clean this; `arin ke
 swift run arin history                              # past cleanups and what grew since the last scan
 ```
 
-A saved plan lists candidate IDs with the action each one had. Running it rescans and refuses any item that's gone, whose action changed (a worktree with a new commit, a new snapshot), that became more cautious, or that's on the keep list.
+A saved plan lists candidate IDs with the action each one had. Running it rescans and refuses any item that's gone, whose action changed (a worktree with a new commit, a new snapshot), that became more cautious, or that's on the keep list. Add `--ids` to run only some of the plan's items.
 
 ### Using arin from your agent
 

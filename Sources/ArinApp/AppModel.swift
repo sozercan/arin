@@ -333,37 +333,45 @@ final class AppModel {
 
     // MARK: Keep list
 
+    /// Reads the keep list (the CLI may have changed it) and applies it to the current results:
+    /// newly kept items, and items containing one, leave the selection. If it can't be read,
+    /// nothing stays selected.
     func reloadKeepList() {
-        do {
-            keepList = try KeepList.load()
+        let result = Result { try KeepList.load() }
+        apply(result)
+    }
+
+    private func apply(_ result: Result<KeepList, any Error>) {
+        switch result {
+        case let .success(list):
+            keepList = list
             keepListError = nil
-        } catch {
+        case let .failure(error):
             keepList = nil
             keepListError = "\(error)"
+        }
+        candidates = candidates.applying(keep: result)
+        if keepList == nil {
+            selection = []
+        } else {
+            let blocked = Set(candidates.filter { $0.kept || $0.blockers.contains { $0.hasSuffix("which you chose to keep") } }.map(\.id))
+            selection.subtract(blocked)
         }
     }
 
     func isKept(_ id: String) -> Bool { keepList?.contains(id) ?? false }
 
     /// Adds or removes an item from the keep list, and updates the current results to match.
-    func setKept(_ id: String, title: String, _ kept: Bool) {
-        reloadKeepList()
-        guard var list = keepList else {
-            errorMessage = keepListError
-            return
-        }
-        if kept { list.add(id: id, title: title) } else { list.remove(id: id) }
+    func setKept(_ id: String, title: String, paths: [String] = [], _ kept: Bool) {
         do {
-            try list.save()
-            keepList = list
+            let list = try KeepList.update { list in
+                if kept { list.add(id: id, title: title, paths: paths) } else { list.remove(id: id) }
+            }
+            apply(.success(list))
         } catch {
-            errorMessage = "Could not save the keep list: \(error.localizedDescription)"
-            return
+            errorMessage = "Could not save the keep list: \(error)"
+            reloadKeepList()
         }
-        for index in candidates.indices where candidates[index].id == id {
-            candidates[index].kept = kept
-        }
-        if kept { selection.remove(id) }
     }
 
     // MARK: History

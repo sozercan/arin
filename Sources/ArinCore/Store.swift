@@ -21,6 +21,26 @@ public enum ArinStore {
         try data.write(to: url, options: .atomic)
     }
 
+    /// Runs `body` while holding an exclusive lock shared by every Arin process (app and CLI),
+    /// so read-modify-write updates and appends from both can't interleave.
+    static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
+        let lockPath = url.path + ".lock"
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fd = open(lockPath, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw StoreError("can't open \(lockPath): \(String(cString: strerror(errno)))") }
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { throw StoreError("can't lock \(lockPath): \(String(cString: strerror(errno)))") }
+        defer { flock(fd, LOCK_UN) }
+        return try body()
+    }
+
+    /// The Trash that `FileManager.trashItem` uses for items in the home folder and temp folders.
+    static var trashDirectory: String {
+        let url = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash")
+        return url.resolvingSymlinksInPath().path
+    }
+
     static var encoder: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -48,6 +68,9 @@ public struct KeepList: Codable, Sendable, Equatable {
         public var id: String
         public var title: String
         public var added: Date
+        /// What the item covered when it was kept. A cleanup whose target contains one of these is
+        /// refused too, so removing a worktree can't take a kept `node_modules` with it.
+        public var paths: [String]?
     }
 
     public var entries: [Entry]
@@ -60,9 +83,16 @@ public struct KeepList: Codable, Sendable, Equatable {
 
     public func contains(_ id: String) -> Bool { entries.contains { $0.id == id } }
 
-    public mutating func add(id: String, title: String, now: Date = Date()) {
+    /// The first kept item that deleting `target` would take with it.
+    public func keptEntry(insideOrAt target: String) -> Entry? {
+        entries.first { entry in
+            (entry.paths ?? []).contains { $0 == target || $0.hasPrefix(target + "/") }
+        }
+    }
+
+    public mutating func add(id: String, title: String, paths: [String] = [], now: Date = Date()) {
         guard !contains(id) else { return }
-        entries.append(Entry(id: id, title: title, added: now))
+        entries.append(Entry(id: id, title: title, added: now, paths: paths.isEmpty ? nil : paths))
     }
 
     public mutating func remove(id: String) {
@@ -72,31 +102,53 @@ public struct KeepList: Codable, Sendable, Equatable {
     /// A missing file is an empty list. A file that exists but can't be read or parsed throws:
     /// cleaning without the user's protections would be worse than not cleaning.
     public static func load(from url: URL = defaultURL) throws -> KeepList {
-        let path = url.path
-        guard FileManager.default.fileExists(atPath: path) || FileInfo.isSymlink(path) else { return KeepList() }
         do {
             let data = try Data(contentsOf: url)
             return try ArinStore.decoder.decode(KeepList.self, from: data)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            // Only a file that is really absent counts as an empty list; a folder that can't be
+            // searched reports a permission error instead, which blocks cleaning below.
+            return KeepList()
         } catch {
-            throw StoreError("keep list at \((path as NSString).abbreviatingWithTildeInPath) can't be read (\(error.localizedDescription)); fix or delete it")
+            throw StoreError("keep list at \((url.path as NSString).abbreviatingWithTildeInPath) can't be read (\(error.localizedDescription)); fix or delete it")
         }
     }
 
     public func save(to url: URL = defaultURL) throws {
         try ArinStore.write(ArinStore.encoder.encode(self), to: url)
     }
+
+    /// Loads, changes and saves the list under the shared lock, so the app and the CLI can't
+    /// drop each other's additions.
+    @discardableResult
+    public static func update(at url: URL = defaultURL, _ change: (inout KeepList) -> Void) throws -> KeepList {
+        try ArinStore.withLock(url) {
+            var list = try load(from: url)
+            change(&list)
+            try list.save(to: url)
+            return list
+        }
+    }
+
+    static let unreadableBlocker = "keep list can't be read"
+    static let containsBlockerPrefix = "contains "
 }
 
 public extension [Candidate] {
     /// Marks kept items. If the list couldn't be read, nothing may be pre-selected.
+    /// Safe to call again on the same candidates: blockers it added before are replaced.
     func applying(keep: Result<KeepList, any Error>) -> [Candidate] {
         map { candidate in
             var copy = candidate
+            copy.blockers.removeAll { $0 == KeepList.unreadableBlocker || $0.hasPrefix(KeepList.containsBlockerPrefix) && $0.hasSuffix(", which you chose to keep") }
             switch keep {
             case let .success(list):
                 copy.kept = list.contains(candidate.id)
+                if !copy.kept, let inside = candidate.paths.lazy.compactMap({ list.keptEntry(insideOrAt: $0) }).first {
+                    copy.blockers.append("\(KeepList.containsBlockerPrefix)\(inside.title), which you chose to keep")
+                }
             case .failure:
-                copy.blockers.append("keep list can't be read")
+                copy.blockers.append(KeepList.unreadableBlocker)
             }
             return copy
         }
@@ -112,12 +164,24 @@ public struct TrashedPath: Codable, Sendable, Hashable {
 
     /// Still in the Trash, and nothing has taken its old place.
     public var canPutBack: Bool {
-        FileManager.default.fileExists(atPath: location) && !FileManager.default.fileExists(atPath: original)
+        (try? checkLocation()) != nil
+            && FileManager.default.fileExists(atPath: location) && !FileManager.default.fileExists(atPath: original)
+    }
+
+    /// The history file is ordinary user-writable data, so a record can't be trusted to name a
+    /// Trash item: the source must sit directly in the Trash and not be a symlink.
+    func checkLocation(trash: String = ArinStore.trashDirectory) throws {
+        let parent = URL(fileURLWithPath: (location as NSString).deletingLastPathComponent).resolvingSymlinksInPath().path
+        let name = (location as NSString).lastPathComponent
+        guard parent == trash, !["", ".", ".."].contains(name), !FileInfo.isSymlink(location) else {
+            throw StoreError("\((location as NSString).abbreviatingWithTildeInPath) is not an item in the Trash")
+        }
     }
 
     /// Moves the item back to where it was.
     public func putBack(guardrails: Guardrails = Guardrails()) throws {
         try guardrails.check(original)
+        try checkLocation()
         guard FileManager.default.fileExists(atPath: location) else {
             throw StoreError("\((location as NSString).lastPathComponent) is no longer in the Trash")
         }
@@ -218,15 +282,22 @@ public struct History: Sendable {
         encoder.dateEncodingStrategy = .iso8601
         var line = try encoder.encode(entry)
         line.append(0x0A)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: line)
-        } else {
-            try line.write(to: url, options: .atomic)
+        try ArinStore.withLock(url) {
+            if let handle = try? FileHandle(forUpdating: url) {
+                defer { try? handle.close() }
+                let end = try handle.seekToEnd()
+                if end > 0 {
+                    // A torn earlier write leaves no newline; start a fresh line so this record survives.
+                    try handle.seek(toOffset: end - 1)
+                    if try handle.read(upToCount: 1) != Data([0x0A]) { line.insert(0x0A, at: 0) }
+                    try handle.seekToEnd()
+                }
+                try handle.write(contentsOf: line)
+            } else {
+                try line.write(to: url, options: .atomic)
+            }
+            try trimIfNeeded()
         }
-        try trimIfNeeded()
     }
 
     /// Oldest first. Lines that don't parse (a newer format, a torn write) are skipped.
