@@ -39,6 +39,9 @@ public enum Shell {
         env["PATH"] = searchPath.joined(separator: ":")
         env["NO_COLOR"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
+        // `git status` otherwise rewrites the index to refresh it: scans would write to every repo and
+        // make each one look recently worked on.
+        env["GIT_OPTIONAL_LOCKS"] = "0"
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         return env
     }

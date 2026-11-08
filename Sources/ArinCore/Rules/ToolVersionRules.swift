@@ -105,3 +105,46 @@ struct RustToolchainRule: Rule {
         return result
     }
 }
+
+/// Tool versions mise installed that no tracked config or tool stub selects. `mise prune` makes
+/// that call itself at cleanup time and keeps versions a running process uses.
+struct MiseRule: Rule {
+    let id = "tools.mise"
+    let name = "Unused mise tool versions"
+
+    struct Entry: Decodable {
+        var version: String
+        var install_path: String?
+    }
+
+    func discover(_ ctx: ScanContext) async throws -> [Candidate] {
+        guard Shell.which("mise") != nil else { return [] }
+        let result = await Shell.run("mise", ["ls", "--prunable", "--json"], timeout: 30)
+        guard result.ok, let tools = try? JSONDecoder().decode([String: [Entry]].self, from: Data(result.stdout.utf8)) else {
+            return []
+        }
+        let env = ProcessInfo.processInfo.environment
+        let dataDir = env["MISE_DATA_DIR"] ?? env["XDG_DATA_HOME"].map { "\($0)/mise" } ?? ctx.path(".local/share/mise")
+        var found: [Candidate] = []
+        for (tool, entries) in tools.sorted(by: { $0.key < $1.key }) where !entries.isEmpty {
+            let command = CommandSpec("mise", ["prune", "--tools", "--yes", tool])
+            guard Guardrails.allows(command) else { continue }
+            let paths = entries.map { $0.install_path ?? "\(dataDir)/installs/\(tool)/\($0.version)" }.filter(FileInfo.exists)
+            guard !paths.isEmpty else { continue }
+            let versions = entries.map(\.version)
+            found.append(Candidate(
+                ruleID: id,
+                key: tool,
+                title: "Unused \(tool) versions (\(versions.count))",
+                detail: "Installed by mise but selected by no config it tracks. `mise prune` keeps any version a running process uses. Removing: \(versions.prefix(6).joined(separator: ", "))\(versions.count > 6 ? ", …" : "").",
+                category: .toolVersions,
+                level: .standard,
+                risk: .safe,
+                bytes: await Size.total(paths),
+                paths: paths,
+                action: .commands([command])
+            ))
+        }
+        return found
+    }
+}

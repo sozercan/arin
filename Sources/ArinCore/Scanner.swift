@@ -11,6 +11,8 @@ public struct ScanOptions: Sendable {
     public var fetchRemotes: Bool
     /// Ignore candidates smaller than this.
     public var minimumBytes: Int64
+    /// The user's keep list. Nil skips it (tests); an unreadable file blocks every pre-selection.
+    public var keepListURL: URL?
 
     public init(
         home: String = NSHomeDirectory(),
@@ -18,7 +20,8 @@ public struct ScanOptions: Sendable {
         projectRoots: [String]? = nil,
         checkPullRequests: Bool = true,
         fetchRemotes: Bool = false,
-        minimumBytes: Int64 = 20 * 1024 * 1024
+        minimumBytes: Int64 = 20 * 1024 * 1024,
+        keepListURL: URL? = KeepList.defaultURL
     ) {
         self.home = home
         self.tmpDir = (tmpDir as NSString).standardizingPath
@@ -26,6 +29,7 @@ public struct ScanOptions: Sendable {
         self.checkPullRequests = checkPullRequests
         self.fetchRemotes = fetchRemotes
         self.minimumBytes = minimumBytes
+        self.keepListURL = keepListURL
     }
 
     public static func defaultProjectRoots(home: String) -> [String] {
@@ -136,9 +140,13 @@ public struct Scanner: Sendable {
             ))
         }
 
+        let keep: Result<KeepList, any Error> = options.keepListURL.map { url in Result { try KeepList.load(from: url) } }
+            ?? .success(KeepList())
+        if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
         let filtered = Self.dedupe(candidates)
-            .filter { $0.bytes >= options.minimumBytes || $0.ruleID == "git.worktree-prune" }
+            .filter { $0.bytes >= options.minimumBytes || Self.sizeUnknownRules.contains($0.ruleID) }
             .sorted { $0.bytes > $1.bytes }
+            .applying(keep: keep)
         return ScanReport(
             startedAt: started,
             finishedAt: Date(),
@@ -148,6 +156,9 @@ public struct Scanner: Sendable {
             ruleErrors: errors
         )
     }
+
+    /// Rules whose candidates have no measurable size but are still worth listing.
+    static let sizeUnknownRules: Set<String> = ["git.worktree-prune", "snapshots.time-machine"]
 
     /// Drop candidates whose paths are already covered by an earlier (larger) candidate.
     /// Worktrees don't claim their contents: their build output stays listable on its own,

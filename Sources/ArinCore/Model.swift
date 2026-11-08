@@ -66,6 +66,8 @@ public enum CleanupCategory: String, Codable, Sendable, CaseIterable {
     case containers
     case appCaches
     case agentData
+    case models
+    case snapshots
     case unclassified
 
     public var label: String {
@@ -79,6 +81,8 @@ public enum CleanupCategory: String, Codable, Sendable, CaseIterable {
         case .containers: "Containers"
         case .appCaches: "App caches"
         case .agentData: "Agent data"
+        case .models: "Local AI models"
+        case .snapshots: "Local snapshots"
         case .unclassified: "Unclassified"
         }
     }
@@ -94,6 +98,8 @@ public enum CleanupCategory: String, Codable, Sendable, CaseIterable {
         case .containers: "cube"
         case .appCaches: "app.badge"
         case .agentData: "sparkles"
+        case .models: "cpu"
+        case .snapshots: "timemachine"
         case .unclassified: "questionmark.folder"
         }
     }
@@ -178,6 +184,8 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
     /// Skip if anything under the paths was written more recently than this many seconds ago.
     public var minIdleSeconds: TimeInterval?
     public var agentVerdict: AgentVerdict?
+    /// On the user's keep list: never pre-selected, never sent for review, refused by the executor.
+    public var kept: Bool
 
     public init(
         ruleID: String,
@@ -210,11 +218,13 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
         self.blockingProcesses = blockingProcesses
         self.minIdleSeconds = minIdleSeconds
         self.agentVerdict = nil
+        self.kept = false
     }
 
     /// The agent can always raise caution. It can lower it only for items the rules
     /// couldn't classify, and never below what a blocker implies.
     public var effectiveRisk: Risk {
+        if kept { return .keep }
         var result = risk
         if let verdict = agentVerdict {
             if verdict.risk > result {
@@ -231,7 +241,7 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
 
     /// Pre-select only safe, unblocked items at or below the chosen level.
     public func isDefaultSelected(at level: Level) -> Bool {
-        isActionable && blockers.isEmpty && effectiveRisk == .safe && self.level <= level
+        isActionable && !kept && blockers.isEmpty && effectiveRisk == .safe && self.level <= level
     }
 }
 
