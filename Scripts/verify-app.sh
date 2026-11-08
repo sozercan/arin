@@ -32,6 +32,10 @@ plutil -lint "$APP/Contents/Info.plist" >/dev/null || fail "Info.plist is invali
 [[ "$(plist CFBundleExecutable)" == "Arin" ]] || fail "CFBundleExecutable must be Arin"
 [[ -x "$APP/Contents/MacOS/Arin" ]] || fail "app binary Contents/MacOS/Arin is missing"
 [[ -x "$APP/Contents/Helpers/arin" ]] || fail "bundled CLI Contents/Helpers/arin is missing"
+[[ "$(plist CFBundleIconName)" == "AppIcon" ]] || fail "CFBundleIconName must be AppIcon"
+for icon in Assets.car AppIcon.icns; do
+  [[ -s "$APP/Contents/Resources/$icon" ]] || fail "app icon Contents/Resources/$icon is missing"
+done
 if [[ -n "$VERSION" ]]; then
   [[ "$(plist CFBundleShortVersionString)" == "$VERSION" ]] || fail "version is '$(plist CFBundleShortVersionString)', expected $VERSION"
 fi
