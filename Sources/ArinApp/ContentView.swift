@@ -11,10 +11,14 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
             Group {
-                if model.report == nil {
+                if model.sidebar == .history {
+                    HistoryView()
+                } else if model.report == nil {
                     WelcomeView()
                 } else if model.sidebar == .insights {
                     InsightsView()
+                } else if model.sidebar == .map {
+                    SpaceMapView()
                 } else {
                     CandidateList(items: model.candidates(for: model.sidebar))
                 }
@@ -46,9 +50,16 @@ private struct Sidebar: View {
                     .padding(.vertical, 6)
                     .selectionDisabled()
             }
-            if model.report != nil {
+            if model.report == nil {
+                Section {
+                    Label("Scan", systemImage: "magnifyingglass")
+                        .tag(AppModel.SidebarItem.all)
+                }
+            } else {
                 Section("Found") {
                     row(.all, "All", "square.grid.2x2", model.candidates.dedupedBytes)
+                    Label("Space map", systemImage: "square.grid.3x1.below.line.grid.1x2")
+                        .tag(AppModel.SidebarItem.map)
                     ForEach(model.categoriesWithResults, id: \.self) { category in
                         row(.category(category), category.label, category.symbol, model.bytes(for: category))
                     }
@@ -60,6 +71,10 @@ private struct Sidebar: View {
                             .tag(AppModel.SidebarItem.insights)
                     }
                 }
+            }
+            Section {
+                Label("History", systemImage: "clock")
+                    .tag(AppModel.SidebarItem.history)
             }
         }
     }

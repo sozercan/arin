@@ -8,6 +8,18 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var model = model
         Form {
+            Section("General") {
+                Toggle(isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) })) {
+                    Text("Open at login")
+                    Text("Keeps the menu bar gauge, low-space alerts, and Auto mode running after a restart.")
+                }
+                if model.launchAtLoginNeedsApproval {
+                    Text("Allow Arin in System Settings → General → Login Items.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
             Section("Alerts") {
                 Stepper(value: $model.lowSpaceThresholdGB, in: 5 ... 500, step: 5) {
                     Text("Alert when free space drops below \(model.lowSpaceThresholdGB) GB")
@@ -48,6 +60,32 @@ struct SettingsView: View {
                 Toggle("Move to Trash instead of deleting", isOn: $model.trashInsteadOfDelete)
             }
 
+            Section("Always kept") {
+                if let error = model.keepListError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                } else if let entries = model.keepList?.entries, !entries.isEmpty {
+                    ForEach(entries, id: \.id) { entry in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(entry.title).lineLimit(1)
+                                Text(entry.id).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                model.setKept(entry.id, title: entry.title, false)
+                            } label: { Image(systemName: "minus.circle") }
+                                .buttonStyle(.borderless)
+                                .help("Stop keeping")
+                                .accessibilityLabel("Stop keeping \(entry.title)")
+                        }
+                    }
+                } else {
+                    Text("Right-click an item and choose Always Keep to protect it from every cleanup.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Project folders") {
                 ForEach(ScanOptions.defaultProjectRoots(home: NSHomeDirectory()), id: \.self) { root in
                     Text((root as NSString).abbreviatingWithTildeInPath).foregroundStyle(.secondary)
@@ -70,7 +108,11 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 560)
+        .frame(width: 500, height: 620)
+        .onAppear {
+            model.reloadKeepList()
+            model.refreshLaunchAtLogin()
+        }
     }
 
     private func add() {

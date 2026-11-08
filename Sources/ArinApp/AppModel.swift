@@ -1,6 +1,7 @@
 import ArinCore
 import Foundation
 import Observation
+import ServiceManagement
 import UserNotifications
 
 @MainActor
@@ -27,7 +28,9 @@ final class AppModel {
     enum SidebarItem: Hashable {
         case all
         case category(CleanupCategory)
+        case map
         case insights
+        case history
     }
 
     // MARK: State
@@ -42,6 +45,13 @@ final class AppModel {
     var showingConfirm = false
     var showingResult = false
     var errorMessage: String?
+    /// Items the user never wants cleaned. Nil when the file can't be read; see `keepListError`.
+    var keepList: KeepList?
+    var keepListError: String?
+    var historyEntries: [HistoryEntry] = []
+    var launchAtLogin = false
+    var launchAtLoginNeedsApproval = false
+    private let history = History()
 
     // MARK: Settings
 
@@ -126,6 +136,9 @@ final class AppModel {
         }
         reviewModels = models
         reviewEfforts = efforts
+        reloadKeepList()
+        historyEntries = history.load()
+        refreshLaunchAtLogin()
         requestNotificationPermission()
         startMonitor()
         // `open Arin.app --args -ScanOnLaunch YES` starts a scan right away.
@@ -146,7 +159,7 @@ final class AppModel {
         switch item {
         case .all, nil: candidates
         case let .category(category): candidates.filter { $0.category == category }
-        case .insights: []
+        case .map, .insights, .history: []
         }
     }
 
@@ -228,14 +241,16 @@ final class AppModel {
         lastReview = nil
         candidates = report.candidates.applying(previous)
         disk = report.disk
+        reloadKeepList()
         resetSelection()
+        appendHistory(.scan(ScanRecord(report, ruleNames: Catalog.ruleNames)))
         phase = .idle
     }
 
     /// Items the rules couldn't settle: anything not rule-safe, and everything unclassified.
     /// Rule-safe caches don't need an agent, which keeps reviews quick and cheap.
     var itemsNeedingReview: [Candidate] {
-        candidates.filter { $0.isActionable && ($0.risk != .safe || $0.category == .unclassified) }
+        candidates.filter { $0.isActionable && !$0.kept && ($0.risk != .safe || $0.category == .unclassified) }
     }
 
     func review() async {
@@ -274,12 +289,13 @@ final class AppModel {
     }
 
     func toggle(_ candidate: Candidate) {
+        guard !candidate.kept || selection.contains(candidate.id) else { return }
         if selection.contains(candidate.id) { selection.remove(candidate.id) } else { selection.insert(candidate.id) }
         if isReviewing { editedDuringReview.insert(candidate.id) }
     }
 
     func setAll(_ items: [Candidate], selected: Bool) {
-        for item in items where item.isActionable {
+        for item in items where item.isActionable && (!item.kept || !selected) {
             if selected { selection.insert(item.id) } else { selection.remove(item.id) }
             if isReviewing { editedDuringReview.insert(item.id) }
         }
@@ -299,6 +315,7 @@ final class AppModel {
             Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
         }
         lastCleanup = result
+        appendHistory(.cleanup(CleanupRecord(result, auto: auto)))
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
         selection.subtract(cleanedIDs)
@@ -312,6 +329,94 @@ final class AppModel {
         } else {
             showingResult = true
         }
+    }
+
+    // MARK: Keep list
+
+    func reloadKeepList() {
+        do {
+            keepList = try KeepList.load()
+            keepListError = nil
+        } catch {
+            keepList = nil
+            keepListError = "\(error)"
+        }
+    }
+
+    func isKept(_ id: String) -> Bool { keepList?.contains(id) ?? false }
+
+    /// Adds or removes an item from the keep list, and updates the current results to match.
+    func setKept(_ id: String, title: String, _ kept: Bool) {
+        reloadKeepList()
+        guard var list = keepList else {
+            errorMessage = keepListError
+            return
+        }
+        if kept { list.add(id: id, title: title) } else { list.remove(id: id) }
+        do {
+            try list.save()
+            keepList = list
+        } catch {
+            errorMessage = "Could not save the keep list: \(error.localizedDescription)"
+            return
+        }
+        for index in candidates.indices where candidates[index].id == id {
+            candidates[index].kept = kept
+        }
+        if kept { selection.remove(id) }
+    }
+
+    // MARK: History
+
+    private func appendHistory(_ entry: HistoryEntry) {
+        do {
+            try history.append(entry)
+        } catch {
+            // History is a convenience; a write failure never blocks scanning or cleaning.
+        }
+        historyEntries = history.load()
+    }
+
+    var scanRecords: [ScanRecord] { History.scans(historyEntries) }
+    var cleanupRecords: [CleanupRecord] { History.cleanups(historyEntries) }
+
+    /// Growth from the previous scan to the latest one.
+    var growthSinceLastScan: (since: Date, items: [Growth])? {
+        let scans = scanRecords
+        guard scans.count >= 2 else { return nil }
+        return (scans[scans.count - 2].date, History.growth(from: scans[scans.count - 2], to: scans[scans.count - 1]))
+    }
+
+    func putBack(_ item: TrashedPath) {
+        do {
+            try item.putBack()
+        } catch {
+            errorMessage = (error as? StoreError)?.description ?? "Could not put it back: \(error.localizedDescription)"
+        }
+        // Re-render so the button disappears.
+        historyEntries = history.load()
+    }
+
+    // MARK: Launch at login
+
+    func refreshLaunchAtLogin() {
+        guard canNotify else { return }
+        let status = SMAppService.mainApp.status
+        launchAtLogin = status == .enabled
+        launchAtLoginNeedsApproval = status == .requiresApproval
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        guard canNotify else {
+            errorMessage = "Launch at login needs the app bundle. Build it with Scripts/build-app.sh."
+            return
+        }
+        do {
+            if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            errorMessage = "Could not change launch at login: \(error.localizedDescription)"
+        }
+        refreshLaunchAtLogin()
     }
 
     // MARK: Monitoring
