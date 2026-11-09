@@ -365,18 +365,31 @@ struct CLIFailure: Error { var message: String }
         #expect(!bare.contains("--model") && !bare.contains("--reasoning-effort") && !bare.contains("--add-dir"))
     }
 
-    @Test func copilotNeverGetsHomeOrPrivateFolders() {
+    @Test func copilotNeverGetsHomeOrPrivateFolders() throws {
+        let fm = FileManager.default
+        let home = fm.temporaryDirectory.appendingPathComponent("arin-dirs-\(UUID().uuidString)").path
+        defer { try? fm.removeItem(atPath: home) }
+        for dir in ["go/pkg/mod", "Library/Caches/foo", "Library/Keychains/x", "Documents/secret", ".ssh"] {
+            try fm.createDirectory(atPath: "\(home)/\(dir)", withIntermediateDirectories: true)
+        }
+        try fm.createSymbolicLink(atPath: "\(home)/Library/Caches/docs", withDestinationPath: "\(home)/Documents")
+        try fm.createSymbolicLink(atPath: "\(home)/Library/Caches/keys", withDestinationPath: "../../.ssh")
+        try "x".write(toFile: "\(home)/Library/Caches/file.txt", atomically: true, encoding: .utf8)
         func candidate(_ paths: [String]) -> Candidate {
             Candidate(ruleID: "t", key: paths[0], title: "t", detail: "", category: .unclassified, level: .deep,
                       risk: .review, bytes: 1, paths: paths, action: .delete(paths))
         }
         let dirs = AgentReviewer.copilotDirs(for: [
-            candidate(["/h/go/pkg/mod", "/h/go/pkg/mod/"]),
-            candidate(["/h"]),
-            candidate(["/h/.ssh", "/h/Library", "/h/Library/Keychains/x", "/h/Library/Caches/foo"]),
+            candidate(["\(home)/go/pkg/mod", "\(home)/go/pkg/mod/", "\(home)/GO/pkg/mod"]),
+            candidate([home, "\(home)/"]),
+            candidate(["\(home)/.ssh", "\(home)/Library", "\(home)/Library/Keychains/x"]),
+            // Symlinks and case aliases into private folders.
+            candidate(["\(home)/Library/Caches/docs/secret", "\(home)/Library/Caches/keys", "\(home)/documents/secret"]),
+            candidate(["\(home)/Library/Caches/foo", "\(home)/Library/Caches/file.txt", "\(home)/missing"]),
             candidate(["docker-volume-name", "/"]),
-        ], home: "/h")
-        #expect(dirs == ["/h/go/pkg/mod", "/h/Library/Caches/foo"])
+        ], home: home)
+        let real = { (path: String) in URL(fileURLWithPath: path).resolvingSymlinksInPath().path }
+        #expect(dirs.map(real) == ["\(home)/go/pkg/mod", "\(home)/Library/Caches/foo"].map(real))
     }
 }
 

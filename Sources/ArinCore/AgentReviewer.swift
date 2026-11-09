@@ -206,18 +206,32 @@ public struct AgentReviewer: Sendable {
     }
 
     /// Copilot can't deny reads by path, but it only lets tools touch directories it was given.
-    /// It gets the candidates' folders, never home itself or anything holding private data.
+    /// It gets the candidates' existing folders, never home itself or anything holding private data.
+    /// Paths are compared after resolving symlinks and ignoring case (APFS is case-insensitive by
+    /// default), so a link or a different spelling can't reach a private folder.
     static func copilotDirs(for candidates: [Candidate], home: String = NSHomeDirectory()) -> [String] {
-        let home = (home as NSString).standardizingPath
-        let privateRoots = privatePaths.map { "\(home)/\($0)" }
+        func resolved(_ path: String) -> String? {
+            guard path.hasPrefix("/"), let real = realpath(path, nil) else { return nil }
+            defer { free(real) }
+            return String(cString: real)
+        }
+        func key(_ path: String) -> String { path.lowercased() }
+        let home = resolved(home) ?? (home as NSString).standardizingPath
+        let privateRoots = privatePaths.map { key(resolved("\(home)/\($0)") ?? "\(home)/\($0)") }
         func isPrivate(_ path: String) -> Bool {
-            privateRoots.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+            let path = key(path)
+            return privateRoots.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+        }
+        func isDirectory(_ path: String) -> Bool {
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
         }
         var seen = Set<String>()
+        // --add-dir refuses missing paths and files, which would fail the whole review.
         return candidates.flatMap { $0.paths.prefix(5) }
-            .map { ($0 as NSString).standardizingPath }
-            .filter { $0.hasPrefix("/") && $0 != home && $0 != "/" && !isPrivate($0) }
-            .filter { seen.insert($0).inserted }
+            .compactMap(resolved)
+            .filter { key($0) != key(home) && $0 != "/" && !isPrivate($0) && isDirectory($0) }
+            .filter { seen.insert(key($0)).inserted }
     }
 
     static func copilotArguments(model: String?, effort: String?, dirs: [String]) -> [String] {
@@ -270,9 +284,6 @@ public struct AgentReviewer: Sendable {
     }
 
     func runCopilot(prompt: String, cwd: String, dirs: [String]) async throws -> String {
-        var isDir: ObjCBool = false
-        // --add-dir refuses missing paths and files, which would fail the whole review.
-        let dirs = dirs.filter { FileManager.default.fileExists(atPath: $0, isDirectory: &isDir) && isDir.boolValue }
         let args = Self.copilotArguments(model: model, effort: effort, dirs: dirs)
         let result = await Shell.run("copilot", args, cwd: cwd, input: prompt, timeout: timeout)
         if result.timedOut { throw AgentReviewError(description: "GitHub Copilot timed out") }
