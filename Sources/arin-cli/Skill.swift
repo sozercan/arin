@@ -19,7 +19,7 @@ description: Find and free disk space on this Mac with the arin CLI. Use when th
 4. Preview: `arin clean --ids <id>,<id>` (a dry run without `--yes`).
 5. Only after the user approves those exact items: `arin clean --ids <id>,<id> --yes`. Report the measured change in free space from the output.
 
-To hand over a reviewed list for later: `arin plan --ids <id>,<id> --out plan.json`; the user runs `arin clean --plan plan.json --yes`. Running a plan rescans first and refuses any item whose action changed or that became more cautious.
+To hand over a reviewed list for later: `arin plan --ids <id>,<id> --out plan.json`; the user runs `arin clean --plan plan.json --yes`. Running a plan rescans first and refuses any item whose action or folders changed or that became more cautious.
 
 ## Rules
 

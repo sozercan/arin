@@ -193,7 +193,8 @@ func runKeep(_ args: Args) -> Int32 {
     do {
         try KeepList.update { list in
             for id in args.positional {
-                // Most IDs are `rule:/path`; recording the path also protects it from a parent's cleanup.
+                // Most IDs are `rule:/path`; recording the path protects it from a parent's cleanup
+                // right away. The next scan records the paths of any ID, logical ones included.
                 let key = id.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
                 if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : []) }
             }

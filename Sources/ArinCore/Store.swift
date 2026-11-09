@@ -85,9 +85,40 @@ public struct KeepList: Codable, Sendable, Equatable {
 
     /// The first kept item that deleting `target` would take with it.
     public func keptEntry(insideOrAt target: String) -> Entry? {
-        entries.first { entry in
-            (entry.paths ?? []).contains { $0 == target || $0.hasPrefix(target + "/") }
+        KeptPaths(entries).insideOrAt(target)
+    }
+
+    /// Records where kept items are now, from a scan. Entries added by ID alone (the CLI, logical
+    /// IDs like `go.build-cache:go.build-cache`) get the paths they cover, so a parent's cleanup
+    /// can't take them along. Returns whether anything changed.
+    @discardableResult
+    public mutating func recordPaths(_ found: [String: [String]]) -> Bool {
+        var changed = false
+        for index in entries.indices {
+            guard let paths = found[entries[index].id] else { continue }
+            let known = entries[index].paths ?? []
+            let added = paths.filter { !known.contains($0) }
+            guard !added.isEmpty else { continue }
+            entries[index].paths = known + added
+            changed = true
         }
+        return changed
+    }
+
+    /// `path` with symlinks resolved and each name spelled as it is on disk, so a case change or
+    /// a symlinked folder can't hide a kept path. Resolves the longest part that exists.
+    static func canonical(_ path: String) -> String {
+        var head = (path as NSString).standardizingPath
+        var tail: [String] = []
+        while head.count > 1 {
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            if realpath(head, &buffer) != nil {
+                return ([String(cString: buffer)] + tail.reversed()).joined(separator: "/")
+            }
+            tail.append((head as NSString).lastPathComponent)
+            head = (head as NSString).deletingLastPathComponent
+        }
+        return path
     }
 
     public mutating func add(id: String, title: String, paths: [String] = [], now: Date = Date()) {
@@ -131,21 +162,39 @@ public struct KeepList: Codable, Sendable, Equatable {
     }
 
     static let unreadableBlocker = "keep list can't be read"
-    static let containsBlockerPrefix = "contains "
+    static let keptBlockerSuffix = ", which you chose to keep"
+}
+
+/// Kept paths resolved once, for matching many targets.
+struct KeptPaths {
+    private let items: [(path: String, entry: KeepList.Entry)]
+
+    init(_ entries: [KeepList.Entry]) {
+        items = entries.flatMap { entry in (entry.paths ?? []).map { (KeepList.canonical($0), entry) } }
+    }
+
+    /// The kept item at `target` or inside it, compared by real path. A target that is a symlink
+    /// resolves too, which refuses more than deleting the link would need; that errs safe.
+    func insideOrAt(_ target: String) -> KeepList.Entry? {
+        let target = KeepList.canonical(target)
+        let prefix = target.hasSuffix("/") ? target : target + "/"
+        return items.first { $0.path == target || $0.path.hasPrefix(prefix) }?.entry
+    }
 }
 
 public extension [Candidate] {
     /// Marks kept items. If the list couldn't be read, nothing may be pre-selected.
     /// Safe to call again on the same candidates: blockers it added before are replaced.
     func applying(keep: Result<KeepList, any Error>) -> [Candidate] {
-        map { candidate in
+        let kept = (try? keep.get()).map { KeptPaths($0.entries) }
+        return map { candidate in
             var copy = candidate
-            copy.blockers.removeAll { $0 == KeepList.unreadableBlocker || $0.hasPrefix(KeepList.containsBlockerPrefix) && $0.hasSuffix(", which you chose to keep") }
+            copy.blockers.removeAll { $0 == KeepList.unreadableBlocker || $0.hasSuffix(KeepList.keptBlockerSuffix) }
             switch keep {
             case let .success(list):
                 copy.kept = list.contains(candidate.id)
-                if !copy.kept, let inside = candidate.paths.lazy.compactMap({ list.keptEntry(insideOrAt: $0) }).first {
-                    copy.blockers.append("\(KeepList.containsBlockerPrefix)\(inside.title), which you chose to keep")
+                if !copy.kept, let inside = candidate.paths.lazy.compactMap({ kept?.insideOrAt($0) }).first {
+                    copy.blockers.append("contains \(inside.title)\(KeepList.keptBlockerSuffix)")
                 }
             case .failure:
                 copy.blockers.append(KeepList.unreadableBlocker)
@@ -349,6 +398,9 @@ public struct CleanupPlan: Codable, Sendable {
         public var bytes: Int64
         public var risk: Risk
         public var action: CleanupAction
+        /// What the item covered when it was reviewed. A native command can keep its arguments
+        /// while its target moves (a changed npm cache folder), so this is compared too.
+        public var paths: [String]
     }
 
     public var version: Int
@@ -359,7 +411,7 @@ public struct CleanupPlan: Codable, Sendable {
         version = 1
         createdAt = now
         items = candidates.map {
-            Item(id: $0.id, title: $0.title, bytes: $0.bytes, risk: $0.effectiveRisk, action: $0.action)
+            Item(id: $0.id, title: $0.title, bytes: $0.bytes, risk: $0.effectiveRisk, action: $0.action, paths: $0.paths)
         }
     }
 
@@ -389,6 +441,8 @@ public struct CleanupPlan: Codable, Sendable {
                 refused.append((item, "on your keep list"))
             } else if current.action != item.action {
                 refused.append((item, "its action changed since the plan was made; make a new plan"))
+            } else if Set(current.paths) != Set(item.paths) {
+                refused.append((item, "its folders changed since the plan was made; make a new plan"))
             } else if current.effectiveRisk > item.risk {
                 refused.append((item, "now marked \(current.effectiveRisk.label)"))
             } else if !current.blockers.isEmpty {
