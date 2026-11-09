@@ -64,9 +64,12 @@ final class AppModel {
         }
     }
 
+    /// `nil` means reviews are off. Saved as `noAgent` so a relaunch doesn't pick an installed agent again.
     var agent: AgentProvider? {
-        didSet { defaults.set(agent?.rawValue, forKey: "agent") }
+        didSet { defaults.set(agent?.rawValue ?? Self.noAgent, forKey: "agent") }
     }
+
+    private static let noAgent = "none"
 
     var lowSpaceThresholdGB: Int {
         didSet { defaults.set(lowSpaceThresholdGB, forKey: "lowSpaceThresholdGB") }
@@ -130,7 +133,8 @@ final class AppModel {
 
     init() {
         level = Level(rawValue: defaults.object(forKey: "level") as? Int ?? 1) ?? .standard
-        agent = (defaults.string(forKey: "agent").flatMap(AgentProvider.init(rawValue:))) ?? AgentProvider.installed.first
+        let savedAgent = defaults.string(forKey: "agent")
+        agent = savedAgent == Self.noAgent ? nil : savedAgent.flatMap(AgentProvider.init(rawValue:)) ?? AgentProvider.installed.first
         lowSpaceThresholdGB = defaults.object(forKey: "lowSpaceThresholdGB") as? Int ?? 25
         autoMode = defaults.bool(forKey: "autoMode")
         autoReview = defaults.object(forKey: "autoReview") as? Bool ?? true

@@ -41,6 +41,7 @@ struct SettingsView: View {
                 } else {
                     Picker("Review with", selection: $model.agent) {
                         ForEach(model.installedAgents) { Text($0.label).tag(Optional($0)) }
+                        Text("None").tag(AgentProvider?.none)
                     }
                 }
                 if model.agent != nil {
