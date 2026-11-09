@@ -193,7 +193,7 @@ private struct WelcomeView: View {
             }
             HStack(alignment: .top, spacing: 18) {
                 step("1", "magnifyingglass", "Scan", "Caches, build output, merged worktrees, simulators, stale temp files. Read-only.")
-                step("2", "sparkles", "Review", "Then Claude Code or Codex checks what the rules can't settle, read-only, and marks it safe, review, or keep.")
+                step("2", "sparkles", "Review", "Then Claude Code, Codex, or GitHub Copilot checks what the rules can't settle, read-only, and marks it safe, review, or keep.")
                 step("3", "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
             }
             .frame(maxWidth: 720)

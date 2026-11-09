@@ -3,6 +3,7 @@ import Foundation
 public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable {
     case claude
     case codex
+    case copilot
 
     public var id: String { rawValue }
 
@@ -10,6 +11,7 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         switch self {
         case .claude: "Claude Code"
         case .codex: "Codex"
+        case .copilot: "GitHub Copilot"
         }
     }
 
@@ -17,6 +19,7 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         switch self {
         case .claude: "claude"
         case .codex: "codex"
+        case .copilot: "copilot"
         }
     }
 
@@ -27,7 +30,7 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
     public var defaultModel: String? {
         switch self {
         case .claude: "sonnet"
-        case .codex: nil
+        case .codex, .copilot: nil
         }
     }
 
@@ -49,7 +52,7 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
     public var modelPresets: [(id: String, label: String)] {
         switch self {
         case .claude: [("sonnet", "Sonnet"), ("haiku", "Haiku"), ("opus", "Opus")]
-        case .codex: []
+        case .codex, .copilot: []
         }
     }
 
@@ -65,6 +68,12 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         case .codex:
             guard let text = try? String(contentsOfFile: "\(home)/.codex/config.toml", encoding: .utf8) else { return (nil, nil) }
             return (Self.tomlTopLevel(text, key: "model"), Self.tomlTopLevel(text, key: "model_reasoning_effort"))
+        case .copilot:
+            let url = URL(fileURLWithPath: "\(home)/.copilot/settings.json")
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return (nil, nil) }
+            return (json["model"] as? String, json["effortLevel"] as? String)
         }
     }
 
@@ -127,6 +136,10 @@ public struct AgentReviewer: Sendable {
     /// can't stop write-capable options.
     static let readOnlyBash = ["ls", "du", "stat", "lsof", "git status", "git worktree list"]
 
+    /// Copilot matches git rules on the first subcommand only, so `git worktree list` can't be
+    /// allowed without also allowing `git worktree remove`.
+    static let copilotReadOnlyShell = readOnlyBash.filter { $0 != "git worktree list" }
+
     public static let schema: String = """
     {"type":"object","additionalProperties":false,"required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","verdict","reason"],"properties":{"id":{"type":"string"},"verdict":{"type":"string","enum":["safe","review","keep"]},"reason":{"type":"string"}}}}}}
     """
@@ -149,6 +162,8 @@ public struct AgentReviewer: Sendable {
             raw = try await runClaude(prompt: prompt, cwd: workDir.path)
         case .codex:
             raw = try await runCodex(prompt: prompt, cwd: workDir.path)
+        case .copilot:
+            raw = try await runCopilot(prompt: prompt, cwd: workDir.path, dirs: Self.copilotDirs(for: subset))
         }
         let known = Set(subset.map(\.id))
         return try Self.parseVerdicts(raw, agent: provider.label).filter { known.contains($0.key) }
@@ -190,6 +205,53 @@ public struct AgentReviewer: Sendable {
         return args
     }
 
+    /// Copilot can't deny reads by path, but it only lets tools touch directories it was given.
+    /// It gets the candidates' existing folders, never home itself or anything holding private data.
+    /// Paths are compared after resolving symlinks and ignoring case (APFS is case-insensitive by
+    /// default), so a link or a different spelling can't reach a private folder.
+    static func copilotDirs(for candidates: [Candidate], home: String = NSHomeDirectory()) -> [String] {
+        func resolved(_ path: String) -> String? {
+            guard path.hasPrefix("/"), let real = realpath(path, nil) else { return nil }
+            defer { free(real) }
+            return String(cString: real)
+        }
+        func key(_ path: String) -> String { path.lowercased() }
+        let home = resolved(home) ?? (home as NSString).standardizingPath
+        let privateRoots = privatePaths.map { key(resolved("\(home)/\($0)") ?? "\(home)/\($0)") }
+        func isPrivate(_ path: String) -> Bool {
+            let path = key(path)
+            return privateRoots.contains { path == $0 || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+        }
+        func isDirectory(_ path: String) -> Bool {
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+        }
+        var seen = Set<String>()
+        // --add-dir refuses missing paths and files, which would fail the whole review.
+        return candidates.flatMap { $0.paths.prefix(5) }
+            .compactMap(resolved)
+            .filter { key($0) != key(home) && $0 != "/" && !isPrivate($0) && isDirectory($0) }
+            .filter { seen.insert(key($0)).inserted }
+    }
+
+    static func copilotArguments(model: String?, effort: String?, dirs: [String]) -> [String] {
+        var args = [
+            "--silent",
+            "--no-color",
+            "--no-ask-user",
+            "--no-custom-instructions",
+            "--no-auto-update",
+            "--disable-builtin-mcps",
+            // Read and list only: no edit or create tools, no web fetch, no MCP or skills.
+            "--available-tools", "view", "glob", "grep", "bash", "read_bash",
+            "--allow-tool",
+        ] + copilotReadOnlyShell.map { "shell(\($0))" }
+        for dir in dirs { args += ["--add-dir", dir] }
+        if let model { args += ["--model", model] }
+        if let effort { args += ["--reasoning-effort", effort] }
+        return args
+    }
+
     func runClaude(prompt: String, cwd: String) async throws -> String {
         let args = Self.claudeArguments(model: model, effort: effort, home: NSHomeDirectory())
         let result = await Shell.run("claude", args, cwd: cwd, input: prompt, timeout: timeout)
@@ -219,6 +281,16 @@ public struct AgentReviewer: Sendable {
             throw AgentReviewError(description: "Codex failed: \(String((result.stderr + result.stdout).suffix(400)))")
         }
         return text
+    }
+
+    func runCopilot(prompt: String, cwd: String, dirs: [String]) async throws -> String {
+        let args = Self.copilotArguments(model: model, effort: effort, dirs: dirs)
+        let result = await Shell.run("copilot", args, cwd: cwd, input: prompt, timeout: timeout)
+        if result.timedOut { throw AgentReviewError(description: "GitHub Copilot timed out") }
+        guard result.ok else {
+            throw AgentReviewError(description: "GitHub Copilot failed: \(String((result.stderr + result.stdout).suffix(400)))")
+        }
+        return result.stdout
     }
 
     static func prompt(for candidates: [Candidate]) -> String {

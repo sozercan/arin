@@ -36,11 +36,12 @@ struct SettingsView: View {
 
             Section("Agent") {
                 if model.installedAgents.isEmpty {
-                    Text("No supported agent found. Install Claude Code (`claude`) or Codex (`codex`).")
+                    Text("No supported agent found. Install Claude Code (`claude`), Codex (`codex`), or GitHub Copilot (`copilot`).")
                         .foregroundStyle(.secondary)
                 } else {
                     Picker("Review with", selection: $model.agent) {
                         ForEach(model.installedAgents) { Text($0.label).tag(Optional($0)) }
+                        Text("None").tag(AgentProvider?.none)
                     }
                 }
                 if model.agent != nil {
