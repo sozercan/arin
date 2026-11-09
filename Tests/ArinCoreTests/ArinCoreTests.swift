@@ -347,6 +347,37 @@ struct CLIFailure: Error { var message: String }
         #expect(args.contains("model_reasoning_effort=\"low\""))
         #expect(args[args.firstIndex(of: "--sandbox")! + 1] == "read-only")
     }
+
+    @Test func copilotArgsExposeOnlyReadToolsAndGivenDirs() {
+        let args = AgentReviewer.copilotArguments(model: "claude-sonnet-5.5", effort: "low", dirs: ["/h/go/pkg/mod"])
+        #expect(args[args.firstIndex(of: "--model")! + 1] == "claude-sonnet-5.5")
+        #expect(args[args.firstIndex(of: "--reasoning-effort")! + 1] == "low")
+        #expect(args[args.firstIndex(of: "--add-dir")! + 1] == "/h/go/pkg/mod")
+        #expect(!args.contains { $0.hasPrefix("--allow-all") || $0 == "--yolo" })
+        let start = args.firstIndex(of: "--available-tools")! + 1
+        let tools = args[start...].prefix { !$0.hasPrefix("--") }
+        #expect(Set(tools) == ["view", "glob", "grep", "bash", "read_bash"])
+        let shell = args.filter { $0.hasPrefix("shell(") }
+        #expect(shell.contains("shell(git status)"))
+        // Copilot matches git on the first subcommand, so this would also allow `git worktree remove`.
+        #expect(!shell.contains { $0.contains("worktree") || $0.contains("cat") || $0.contains("rm") })
+        let bare = AgentReviewer.copilotArguments(model: nil, effort: nil, dirs: [])
+        #expect(!bare.contains("--model") && !bare.contains("--reasoning-effort") && !bare.contains("--add-dir"))
+    }
+
+    @Test func copilotNeverGetsHomeOrPrivateFolders() {
+        func candidate(_ paths: [String]) -> Candidate {
+            Candidate(ruleID: "t", key: paths[0], title: "t", detail: "", category: .unclassified, level: .deep,
+                      risk: .review, bytes: 1, paths: paths, action: .delete(paths))
+        }
+        let dirs = AgentReviewer.copilotDirs(for: [
+            candidate(["/h/go/pkg/mod", "/h/go/pkg/mod/"]),
+            candidate(["/h"]),
+            candidate(["/h/.ssh", "/h/Library", "/h/Library/Keychains/x", "/h/Library/Caches/foo"]),
+            candidate(["docker-volume-name", "/"]),
+        ], home: "/h")
+        #expect(dirs == ["/h/go/pkg/mod", "/h/Library/Caches/foo"])
+    }
 }
 
 @Suite struct CancellationTests {
@@ -381,6 +412,17 @@ struct CLIFailure: Error { var message: String }
         #expect(AgentProvider.tomlTopLevel(toml, key: "model") == "gpt-x")
         #expect(AgentProvider.tomlTopLevel(toml, key: "model_reasoning_effort") == "xhigh")
         #expect(AgentProvider.tomlTopLevel("[a]\nmodel = \"x\"", key: "model") == nil)
+    }
+
+    @Test func readsCopilotSettings() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("arin-copilot-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".copilot"), withIntermediateDirectories: true)
+        try #"{"model":"gpt-x","effortLevel":"medium"}"#.write(
+            to: home.appendingPathComponent(".copilot/settings.json"), atomically: true, encoding: .utf8
+        )
+        let configured = AgentProvider.copilot.configuredDefaults(home: home.path)
+        #expect(configured.model == "gpt-x" && configured.effort == "medium")
     }
 }
 

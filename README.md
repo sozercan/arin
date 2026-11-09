@@ -12,7 +12,7 @@
 
 </div>
 
-Arin is a native macOS app that finds space that's safe to reclaim: package caches, build output, stale simulators, merged worktrees, idle Docker data, old models. Rules decide what each item is. Claude Code or Codex double-checks anything the rules can't settle. Nothing is removed until you tick it.
+Arin is a native macOS app that finds space that's safe to reclaim: package caches, build output, stale simulators, merged worktrees, idle Docker data, old models. Rules decide what each item is. Claude Code, Codex, or GitHub Copilot double-checks anything the rules can't settle. Nothing is removed until you tick it.
 
 ## Install
 
@@ -33,7 +33,7 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 
 </details>
 
-**Requirements:** macOS 26 or later. For agent reviews, install [Claude Code](https://docs.claude.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex). Arin works without either; it just skips the second opinion.
+**Requirements:** macOS 26 or later. For agent reviews, install [Claude Code](https://docs.claude.com/en/docs/claude-code), [Codex](https://github.com/openai/codex), or [GitHub Copilot CLI](https://github.com/github/copilot-cli). Arin works without any of them; it just skips the second opinion. To turn reviews off while one is installed, set *Review with* to *None* in Settings.
 
 ## How it works
 
@@ -68,7 +68,7 @@ Only items marked **Safe** at or below the chosen level are pre-selected. Build 
 ## Built to be careful
 
 - **The agent can only advise.** It can't run commands that change anything or add actions; Arin's rules and guardrails decide what can be done. Agent verdicts can make an item more cautious, and less cautious only for items no rule recognizes.
-- **Private folders stay private.** Claude Code is denied reads of credentials and personal folders (`~/.ssh`, `~/.aws`, keychains, cookies, Mail, Messages, Documents). Codex's read-only sandbox blocks writes and network access but not reads, so for Codex that rule lives only in the prompt.
+- **Private folders stay private.** Claude Code is denied reads of credentials and personal folders (`~/.ssh`, `~/.aws`, keychains, cookies, Mail, Messages, Documents). Codex's read-only sandbox blocks writes and network access but not reads, so for Codex that rule lives only in the prompt. GitHub Copilot can only list and read the folders under review, and never your home folder as a whole or the private folders above.
 - **Always Keep.** Right-click an item and choose *Always Keep*. Kept items are never pre-selected, never sent for review, and refused by the cleaner, even when reached through another path or a symlink. If the keep list can't be read, Arin cleans nothing.
 - **Honest numbers.** Folder sizes overstate what deleting frees because of APFS clones and snapshots. Arin measures the real change in free space and explains any gap.
 - **Put Back.** Anything moved to the Trash can be restored from History.
@@ -80,7 +80,7 @@ Only items marked **Safe** at or below the chosen level are pre-selected. Build 
 - **Menu bar gauge.** Free space at a glance, with an alert when it drops below your threshold.
 - **Auto mode.** Opt in, and when free space runs low Arin clears only caches that refill on their own. Turn on *Open at login* to keep it running after a restart.
 
-Reviews run automatically after each scan; you can turn them off in Settings. They default to a light setup (Sonnet at low effort for Claude Code, your configured model at low effort for Codex), which you can change there too. With a Claude plan, reviews count toward your plan's usage limits.
+Reviews run automatically after each scan; you can turn them off in Settings. They default to a light setup (Sonnet at low effort for Claude Code, your configured model at low effort for Codex and GitHub Copilot), which you can change there too. With a Claude plan, reviews count toward your plan's usage limits. With GitHub Copilot, they use your plan's AI credits.
 
 ## Command line
 

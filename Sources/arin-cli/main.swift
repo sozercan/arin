@@ -15,9 +15,9 @@ commands:
 
 options:
   --level quick|standard|deep   Cleanup depth (default: standard)
-  --agent claude|codex          Agent for review (default: first installed)
+  --agent claude|codex|copilot  Agent for review (default: first installed)
   --limit N                     Max candidates sent to the agent (default: 150)
-  --model NAME                  Review model (default: sonnet for claude, CLI default for codex; "" = CLI default)
+  --model NAME                  Review model (default: sonnet for claude, CLI default for codex and copilot; "" = CLI default)
   --effort low|medium|high|xhigh  Review effort (default: low; "" = CLI default)
   --roots a,b                   Project roots to search (default: ~/projects, ~/go/src, …)
   --ids a,b                     clean/plan: exactly these candidate ids instead of the pre-selection;
@@ -240,7 +240,7 @@ func main() async -> Int32 {
 
     case "review":
         guard let agent = args.agent ?? AgentProvider.installed.first else {
-            eprint("No supported agent CLI found (claude or codex).")
+            eprint("No supported agent CLI found (claude, codex, or copilot).")
             return 1
         }
         var report = await scan(args)
