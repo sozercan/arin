@@ -45,6 +45,9 @@ final class AppModel {
     var showingConfirm = false
     var showingResult = false
     var errorMessage: String?
+    /// Filters the item list by name, path, or category.
+    var searchText = ""
+    var showingInspector = true
     /// Items the user never wants cleaned. Nil when the file can't be read; see `keepListError`.
     var keepList: KeepList?
     var keepListError: String?
@@ -79,8 +82,12 @@ final class AppModel {
         didSet { defaults.set(autoReview, forKey: "autoReview") }
     }
 
-    var sortOrder: SortOrder {
-        didSet { defaults.set(sortOrder.rawValue, forKey: "sortOrder") }
+    var sortColumn: SortColumn {
+        didSet { defaults.set(sortColumn.rawValue, forKey: "sortOrder") }
+    }
+
+    var sortAscending: Bool {
+        didSet { defaults.set(sortAscending, forKey: "sortAscending") }
     }
 
     var trashInsteadOfDelete: Bool {
@@ -123,7 +130,10 @@ final class AppModel {
         lowSpaceThresholdGB = defaults.object(forKey: "lowSpaceThresholdGB") as? Int ?? 25
         autoMode = defaults.bool(forKey: "autoMode")
         autoReview = defaults.object(forKey: "autoReview") as? Bool ?? true
-        sortOrder = defaults.string(forKey: "sortOrder").flatMap(SortOrder.init(rawValue:)) ?? .size
+        let column = defaults.string(forKey: "sortOrder").flatMap(SortColumn.init(rawValue:)) ?? .size
+        sortColumn = column
+        // Before the direction was saved, names sorted A to Z, safety safest first, and the rest largest or newest first.
+        sortAscending = defaults.object(forKey: "sortAscending") as? Bool ?? [.name, .safety].contains(column)
         trashInsteadOfDelete = defaults.bool(forKey: "trashInsteadOfDelete")
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
@@ -166,6 +176,31 @@ final class AppModel {
     func bytes(for category: CleanupCategory) -> Int64 {
         candidates.filter { $0.category == category }.dedupedBytes
     }
+
+    var sidebarTitle: String {
+        switch sidebar {
+        case .all, nil: "All Items"
+        case let .category(category): category.label
+        case .map: "Space Map"
+        case .insights: "Insights"
+        case .history: "History"
+        }
+    }
+
+    /// What the list or map shows: the sidebar's group (everything on the map), narrowed by search.
+    var visibleCandidates: [Candidate] {
+        let items = sidebar == .map ? candidates : candidates(for: sidebar)
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return items }
+        return items.filter { item in
+            item.title.localizedStandardContains(query)
+                || item.category.label.localizedStandardContains(query)
+                || item.paths.contains { $0.localizedStandardContains(query) }
+        }
+    }
+
+    var canReview: Bool { agent != nil && !phase.isBusy && !itemsNeedingReview.isEmpty }
+    var canClean: Bool { !phase.isBusy && !selection.isEmpty }
 
     var categoriesWithResults: [CleanupCategory] {
         CleanupCategory.allCases.filter { c in candidates.contains { $0.category == c } }
@@ -299,6 +334,12 @@ final class AppModel {
             if selected { selection.insert(item.id) } else { selection.remove(item.id) }
             if isReviewing { editedDuringReview.insert(item.id) }
         }
+    }
+
+    /// Selects every safe item among `items`, at any level, and deselects the rest.
+    func selectSafe(in items: [Candidate]) {
+        setAll(items, selected: false)
+        setAll(items.filter { $0.isDefaultSelected(at: .deep) }, selected: true)
     }
 
     func clean() async {
@@ -486,30 +527,36 @@ final class AppModel {
     }
 }
 
-enum SortOrder: String, CaseIterable, Identifiable {
-    case size, name, safety, modified
+/// The item table's sort column, persisted so the list opens the way it was left.
+enum SortColumn: String, CaseIterable {
+    case size, name, safety, level, modified
 
-    var id: String { rawValue }
-
-    var label: String {
+    /// Ties fall back to size, largest first.
+    func comparators(ascending: Bool) -> [KeyPathComparator<Candidate>] {
+        let order: SortOrder = ascending ? .forward : .reverse
+        let bySize = KeyPathComparator(\Candidate.bytes, order: .reverse)
         switch self {
-        case .size: "Size"
-        case .name: "Name"
-        case .safety: "Safety"
-        case .modified: "Last Modified"
+        case .size: return [KeyPathComparator(\Candidate.bytes, order: order)]
+        case .name: return [KeyPathComparator(\Candidate.title, comparator: .localizedStandard, order: order)]
+        case .safety: return [KeyPathComparator(\Candidate.effectiveRisk, order: order), bySize]
+        case .level: return [KeyPathComparator(\Candidate.level, order: order), bySize]
+        case .modified: return [KeyPathComparator(\Candidate.modifiedSortKey, order: order), bySize]
         }
     }
 
-    func sorted(_ items: [Candidate]) -> [Candidate] {
-        switch self {
-        case .size:
-            items.sorted { $0.bytes > $1.bytes }
-        case .name:
-            items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-        case .safety:
-            items.sorted { ($0.effectiveRisk, -$0.bytes) < ($1.effectiveRisk, -$1.bytes) }
-        case .modified:
-            items.sorted { ($0.lastModified ?? .distantPast) > ($1.lastModified ?? .distantPast) }
+    init?(_ comparator: KeyPathComparator<Candidate>) {
+        switch comparator.keyPath {
+        case \Candidate.bytes: self = .size
+        case \Candidate.title: self = .name
+        case \Candidate.effectiveRisk: self = .safety
+        case \Candidate.level: self = .level
+        case \Candidate.modifiedSortKey: self = .modified
+        default: return nil
         }
     }
+}
+
+extension Candidate {
+    /// Sortable stand-in for `lastModified`; unknown dates sort as oldest.
+    var modifiedSortKey: Date { lastModified ?? .distantPast }
 }

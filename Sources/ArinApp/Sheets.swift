@@ -35,12 +35,15 @@ struct ConfirmSheet: View {
                     Text(item.bytes > 0 ? item.bytes.formattedBytes : "Size unknown").monospacedDigit().foregroundStyle(.secondary)
                 }
             }
-            .frame(minHeight: 220)
+            .frame(minHeight: 180)
 
             if !review.isEmpty {
-                Label("\(review.count) selected item(s) are marked Review or have warnings. Arin re-checks running apps and open files right before each one.", systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                Label {
+                    Text("\(review.count) selected item(s) are marked Review or have warnings. Arin re-checks running apps and open files right before each one.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             Toggle("Move to Trash instead of deleting", isOn: $model.trashInsteadOfDelete)
@@ -60,8 +63,9 @@ struct ConfirmSheet: View {
                 .buttonStyle(.borderedProminent)
             }
         }
-        .padding(22)
-        .frame(width: 600, height: 560)
+        .padding(24)
+        .frame(minWidth: 520, idealWidth: 600, minHeight: 420, idealHeight: 560)
+        .presentationSizing(.fitted)
     }
 }
 
@@ -105,7 +109,7 @@ struct ResultSheet: View {
                         }
                     }
                 }
-                .frame(minHeight: 200)
+                .frame(minHeight: 160)
 
                 HStack {
                     Spacer()
@@ -113,8 +117,9 @@ struct ResultSheet: View {
                         .keyboardShortcut(.defaultAction)
                 }
             }
-            .padding(22)
-            .frame(width: 600, height: 540)
+            .padding(24)
+            .frame(minWidth: 520, idealWidth: 600, minHeight: 400, idealHeight: 540)
+            .presentationSizing(.fitted)
         }
     }
 

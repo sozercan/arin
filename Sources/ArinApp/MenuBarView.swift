@@ -9,9 +9,12 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold, compact: true)
             if model.isLowOnSpace {
-                Label("Below your \(model.lowSpaceThresholdGB) GB alert threshold", systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.red)
+                Label {
+                    Text("Below your \(model.lowSpaceThresholdGB) GB alert threshold")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                }
+                .font(.callout)
             }
             if model.phase.isBusy {
                 HStack {
