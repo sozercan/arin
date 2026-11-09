@@ -13,29 +13,69 @@ struct ArinApp: App {
                 .environment(model)
                 .frame(minWidth: 860, minHeight: 540)
         }
-        .defaultSize(width: 1040, height: 680)
+        .defaultSize(width: 1180, height: 720)
         .defaultLaunchBehavior(.presented)
-        .commands {
-            CommandGroup(after: .newItem) {
-                Button(model.canStop ? "Stop" : "Scan") {
-                    model.canStop ? model.stop() : model.startScan()
-                }
-                .keyboardShortcut("r")
-                .disabled(model.phase.isBusy && !model.canStop)
-            }
-        }
+        .commands { ArinCommands(model: model) }
 
         MenuBarExtra {
             MenuBarView()
                 .environment(model)
         } label: {
-            Label(model.disk.freeBytes.compactBytes, systemImage: model.isLowOnSpace ? "externaldrive.fill.badge.exclamationmark" : "internaldrive")
+            // Same drive in both states; filled when below the alert threshold.
+            Label(model.disk.freeBytes.compactBytes, systemImage: model.isLowOnSpace ? "internaldrive.fill" : "internaldrive")
         }
         .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
                 .environment(model)
+        }
+    }
+}
+
+/// Menu items stay text-only, as macOS 27 menus do.
+private struct ArinCommands: Commands {
+    var model: AppModel
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button(model.canStop ? "Stop" : "Scan") {
+                model.canStop ? model.stop() : model.startScan()
+            }
+            .keyboardShortcut("r")
+            .disabled(model.phase.isBusy && !model.canStop)
+            Button("Review with Agent") { model.startReview() }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(!model.canReview)
+            Divider()
+            Button("Clean…") { model.showingConfirm = true }
+                .disabled(!model.canClean)
+        }
+
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Button("Select Safe Items") { model.selectSafe(in: model.visibleCandidates) }
+                .disabled(model.report == nil || model.visibleCandidates.isEmpty)
+            Button("Select None") { model.setAll(model.visibleCandidates, selected: false) }
+                .keyboardShortcut("a", modifiers: [.command, .option])
+                .disabled(model.report == nil || model.visibleCandidates.isEmpty)
+        }
+
+        CommandGroup(before: .sidebar) {
+            Button("All Items") { model.sidebar = .all }
+                .keyboardShortcut("1")
+            Button("Space Map") { model.sidebar = .map }
+                .keyboardShortcut("2")
+                .disabled(model.report == nil)
+            Button("Insights") { model.sidebar = .insights }
+                .keyboardShortcut("3")
+                .disabled(model.report.map { $0.insights.isEmpty && $0.ruleErrors.isEmpty } ?? true)
+            Button("History") { model.sidebar = .history }
+                .keyboardShortcut("4")
+            Divider()
+            Button(model.showingInspector ? "Hide Inspector" : "Show Inspector") { model.showingInspector.toggle() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+            Divider()
         }
     }
 }

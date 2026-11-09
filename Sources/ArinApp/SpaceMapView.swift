@@ -35,16 +35,7 @@ struct SpaceMapView: View {
 
     var body: some View {
         let groups = groups
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Space map").font(.title3.weight(.semibold))
-                Text("Folder sizes; click a tile to select it.")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("\(model.selection.count) selected")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+        VStack(alignment: .leading, spacing: 12) {
             if groups.isEmpty {
                 ContentUnavailableView("Nothing to map", systemImage: "square.grid.3x3", description: Text("No items with a measured size."))
             } else {
@@ -57,9 +48,35 @@ struct SpaceMapView: View {
                         }
                     }
                 }
+                Legend(groups: groups)
             }
         }
         .padding(16)
+        .navigationTitle("Space Map")
+        .navigationSubtitle("Folder sizes · click a tile to select it")
+    }
+}
+
+/// Small tiles drop their labels, so the colors need a key.
+private struct Legend: View {
+    var groups: [(category: CleanupCategory, items: [Candidate])]
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 12, alignment: .leading)], alignment: .leading, spacing: 6) {
+            ForEach(groups, id: \.category) { group in
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(group.category.color.opacity(0.75))
+                        .frame(width: 12, height: 12)
+                    Text(group.category.label).lineLimit(1)
+                    Text(group.items.dedupedBytes.formattedBytes)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .font(.caption)
+                .accessibilityElement(children: .combine)
+            }
+        }
     }
 }
 
@@ -108,15 +125,16 @@ private struct Tile: View {
     var candidate: Candidate
     var color: Color
     var isSelected: Bool
+    @State private var hovering = false
 
     var body: some View {
         GeometryReader { proxy in
             let roomy = proxy.size.width > 70 && proxy.size.height > 30
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(color.opacity(isSelected ? 0.75 : candidate.kept ? 0.12 : 0.3))
+                    .fill(color.opacity(isSelected ? 0.75 : candidate.kept ? 0.12 : hovering ? 0.45 : 0.3))
                 RoundedRectangle(cornerRadius: 4)
-                    .strokeBorder(isSelected ? color : color.opacity(0.5), lineWidth: isSelected ? 2 : 1)
+                    .strokeBorder(isSelected || hovering ? color : color.opacity(0.5), lineWidth: isSelected || hovering ? 2 : 1)
                 if roomy {
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 3) {
@@ -135,6 +153,8 @@ private struct Tile: View {
             }
         }
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .animation(.snappy(duration: 0.15), value: hovering)
         .help("\(candidate.title)\n\(candidate.bytes.formattedBytes) · \(candidate.effectiveRisk.label)\(candidate.kept ? " · always kept" : "")")
         .accessibilityElement()
         .accessibilityLabel("\(candidate.title), \(candidate.bytes.formattedBytes), \(candidate.effectiveRisk.label)")

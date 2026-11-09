@@ -1,9 +1,10 @@
 import ArinCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @State private var newRoot = ""
+    @State private var choosingFolder = false
 
     var body: some View {
         @Bindable var model = model
@@ -14,9 +15,12 @@ struct SettingsView: View {
                     Text("Keeps the menu bar gauge, low-space alerts, and Auto mode running after a restart.")
                 }
                 if model.launchAtLoginNeedsApproval {
-                    Text("Allow Arin in System Settings → General → Login Items.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                    Label {
+                        Text("Allow Arin in System Settings → General → Login Items.")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                    .font(.callout)
                 }
             }
 
@@ -100,26 +104,27 @@ struct SettingsView: View {
                             .buttonStyle(.borderless)
                     }
                 }
-                HStack {
-                    TextField("Add folder, e.g. ~/work", text: $newRoot)
-                        .onSubmit(add)
-                    Button("Add", action: add).disabled(newRoot.isEmpty)
-                }
+                Button("Add Folder…") { choosingFolder = true }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 620)
+        .frame(minWidth: 480, idealWidth: 520, minHeight: 480, idealHeight: 640)
+        .fileImporter(isPresented: $choosingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: true) { result in
+            guard case let .success(urls) = result else { return }
+            for url in urls { add(url) }
+        }
         .onAppear {
             model.reloadKeepList()
             model.refreshLaunchAtLogin()
         }
     }
 
-    private func add() {
-        let root = newRoot.trimmingCharacters(in: .whitespaces)
-        guard !root.isEmpty, !model.extraProjectRoots.contains(root) else { return }
-        model.extraProjectRoots.append(root)
-        newRoot = ""
+    /// Stored with `~` like the defaults above; the scanner expands it.
+    private func add(_ url: URL) {
+        let root = (url.path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath
+        let trimmed = root.count > 1 && root.hasSuffix("/") ? String(root.dropLast()) : root
+        guard !model.extraProjectRoots.contains(trimmed) else { return }
+        model.extraProjectRoots.append(trimmed)
     }
 }
 

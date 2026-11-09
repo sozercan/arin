@@ -12,18 +12,18 @@ struct ContentView: View {
         } detail: {
             Group {
                 if model.sidebar == .history {
-                    HistoryView()
+                    HistoryView().statusBar(model)
                 } else if model.report == nil {
                     WelcomeView()
                 } else if model.sidebar == .insights {
-                    InsightsView()
+                    InsightsView().statusBar(model)
                 } else if model.sidebar == .map {
-                    SpaceMapView()
+                    SpaceMapView().statusBar(model)
                 } else {
-                    CandidateList(items: model.candidates(for: model.sidebar))
+                    // Adds the status bar itself, so it stops at the inspector.
+                    CandidateList(title: model.sidebarTitle)
                 }
             }
-            .safeAreaInset(edge: .bottom) { StatusBar() }
         }
         .toolbar { Toolbar() }
         .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
@@ -52,13 +52,13 @@ private struct Sidebar: View {
             }
             if model.report == nil {
                 Section {
-                    Label("Scan", systemImage: "magnifyingglass")
+                    Label("All Items", systemImage: "square.grid.2x2")
                         .tag(AppModel.SidebarItem.all)
                 }
             } else {
                 Section("Found") {
-                    row(.all, "All", "square.grid.2x2", model.candidates.dedupedBytes)
-                    Label("Space map", systemImage: "square.grid.3x1.below.line.grid.1x2")
+                    row(.all, "All Items", "square.grid.2x2", model.candidates.dedupedBytes)
+                    Label("Space Map", systemImage: "square.grid.3x1.below.line.grid.1x2")
                         .tag(AppModel.SidebarItem.map)
                     ForEach(model.categoriesWithResults, id: \.self) { category in
                         row(.category(category), category.label, category.symbol, model.bytes(for: category))
@@ -80,18 +80,9 @@ private struct Sidebar: View {
     }
 
     private func row(_ item: AppModel.SidebarItem, _ title: String, _ symbol: String, _ bytes: Int64) -> some View {
-        Label {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(bytes.formattedBytes)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-        } icon: {
-            Image(systemName: symbol)
-        }
-        .tag(item)
+        Label(title, systemImage: symbol)
+            .badge(Text(bytes.formattedBytes).monospacedDigit())
+            .tag(item)
     }
 }
 
@@ -107,55 +98,71 @@ private struct Toolbar: ToolbarContent {
             .pickerStyle(.segmented)
             .help("Quick: caches that refill on their own. Standard: adds build output and merged worktrees. Deep: simulator data, toolchains, app data.")
         }
+
+        // Scan and Review act on the whole scan, so they share one piece of glass; Clean stands apart.
         ToolbarItemGroup(placement: .primaryAction) {
+            if model.canStop {
+                Button { model.stop() } label: { Label("Stop", systemImage: "stop.fill") }
+                    .help(model.report == nil ? "Stop scanning" : "Stop; keeps the previous results")
+            } else {
+                Button { model.startScan() } label: {
+                    Label(model.report == nil ? "Scan" : "Rescan", systemImage: "arrow.clockwise")
+                }
+                .help(model.report == nil ? "Scan this Mac" : "Scan again")
+                .disabled(model.phase.isBusy)
+            }
+            if model.agent != nil {
+                Button { model.startReview() } label: { Label("Review", systemImage: "sparkles") }
+                    .help(model.lastReview == nil ? "Ask your agent to check the items the rules couldn't settle" : "Ask your agent to check again")
+                    .disabled(!model.canReview)
+            }
+        }
+        ToolbarSpacer(.fixed, placement: .primaryAction)
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 model.showingConfirm = true
             } label: {
                 Text(model.selection.isEmpty ? "Clean" : "Clean \(model.selectedBytes.formattedBytes)")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.phase.isBusy || model.selection.isEmpty)
+            .disabled(!model.canClean)
         }
     }
 }
 
+extension View {
+    /// A safe-area bar gets the system scroll edge effect, so it needs no background of its own.
+    /// The bar is hosted apart from the content, so it takes the model rather than the environment.
+    func statusBar(_ model: AppModel) -> some View {
+        safeAreaBar(edge: .bottom) { StatusBar(model: model) }
+    }
+}
+
+/// Status only. Actions live in the toolbar and the menus.
 private struct StatusBar: View {
-    @Environment(AppModel.self) private var model
+    var model: AppModel
 
     var body: some View {
-        // Before the first scan finishes, the welcome screen shows progress and its own Stop button.
+        // Before the first scan finishes, the welcome screen shows progress itself.
         if model.report != nil {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 if model.phase.isBusy {
                     ProgressView().controlSize(.small)
                     Text(model.phase.label).lineLimit(1).truncationMode(.middle)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    if model.canStop {
-                        Button("Stop") { model.stop() }
-                            .help("Keeps the previous results")
-                    }
                 } else {
                     Text("\(model.selection.count) selected · \(model.selectedBytes.formattedBytes) estimated")
-                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                     Spacer(minLength: 8)
                     if let report = model.report {
-                        Text(summary(report))
-                            .lineLimit(1)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Rescan") { model.startScan() }
-                    if model.agent != nil, !model.itemsNeedingReview.isEmpty {
-                        Button(model.lastReview == nil ? "Review" : "Review again") { model.startReview() }
-                            .help("Ask your agent to check the items the rules couldn't settle")
+                        Text(summary(report)).lineLimit(1)
                     }
                 }
             }
-            .buttonStyle(.link)
             .font(.callout)
-            .padding(.horizontal, 14)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(.bar)
         }
     }
 
@@ -223,6 +230,7 @@ private struct WelcomeView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("Arin")
     }
 
     private func step(_ number: String, _ symbol: String, _ title: String, _ text: String) -> some View {
@@ -267,5 +275,6 @@ private struct InsightsView: View {
                 }
             }
         }
+        .navigationTitle("Insights")
     }
 }
