@@ -72,6 +72,8 @@ private struct ArinCommands: Commands {
                 .disabled(model.report.map { $0.insights.isEmpty && $0.ruleErrors.isEmpty } ?? true)
             Button("History") { model.sidebar = .history }
                 .keyboardShortcut("4")
+            Button("Applications") { model.sidebar = .apps }
+                .keyboardShortcut("5")
             Divider()
             Button(model.showingInspector ? "Hide Inspector" : "Show Inspector") { model.showingInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])

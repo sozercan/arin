@@ -252,7 +252,8 @@ public struct TrashedPath: Codable, Sendable, Hashable {
 
     /// Moves the item back to where it was.
     public func putBack(guardrails: Guardrails = Guardrails()) throws {
-        try guardrails.check(original)
+        // An uninstall may have moved it from an Applications folder or ~/Library/Preferences.
+        do { try guardrails.check(original) } catch { try guardrails.checkUninstall(original) }
         try checkLocation()
         guard FileManager.default.fileExists(atPath: location) else {
             throw StoreError("\((location as NSString).lastPathComponent) is no longer in the Trash")
@@ -305,12 +306,15 @@ public struct CleanupRecord: Codable, Sendable, Hashable {
     public var freeAfter: Int64
     public var estimatedBytes: Int64
     public var items: [CleanupItemResult]
+    /// The app's name when this was an uninstall rather than a cleanup.
+    public var uninstalled: String?
 
     public var measuredBytes: Int64 { freeAfter - freeBefore }
 
-    public init(_ report: CleanupReport, auto: Bool, date: Date = Date()) {
+    public init(_ report: CleanupReport, auto: Bool, uninstalled: String? = nil, date: Date = Date()) {
         self.date = date
         self.auto = auto
+        self.uninstalled = uninstalled
         freeBefore = report.freeBefore
         freeAfter = report.freeAfter
         estimatedBytes = report.estimatedBytes

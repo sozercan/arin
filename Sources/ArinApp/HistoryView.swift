@@ -125,7 +125,7 @@ private struct CleanupRecordRow: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(record.date.formatted(date: .abbreviated, time: .shortened))
-                    Text("\(cleaned.count) of \(record.items.count) items\(record.auto ? " · Auto mode" : "") · folder sizes \(record.estimatedBytes.formattedBytes)")
+                    Text("\(record.uninstalled.map { "Uninstalled \($0) · " } ?? "")\(cleaned.count) of \(record.items.count) items\(record.auto ? " · Auto mode" : "") · folder sizes \(record.estimatedBytes.formattedBytes)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
