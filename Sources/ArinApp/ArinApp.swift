@@ -13,7 +13,7 @@ struct ArinApp: App {
                 .environment(model)
                 .frame(minWidth: 860, minHeight: 540)
         }
-        .defaultSize(width: 1040, height: 680)
+        .defaultSize(width: 1180, height: 720)
         .defaultLaunchBehavior(.presented)
         .commands { ArinCommands(model: model) }
 

@@ -47,7 +47,6 @@ final class AppModel {
     var errorMessage: String?
     /// Filters the item list by name, path, or category.
     var searchText = ""
-    var showingInspector = true
     /// Items the user never wants cleaned. Nil when the file can't be read; see `keepListError`.
     var keepList: KeepList?
     var keepListError: String?
@@ -88,6 +87,11 @@ final class AppModel {
 
     var sortAscending: Bool {
         didSet { defaults.set(sortAscending, forKey: "sortAscending") }
+    }
+
+    /// Starts hidden so the table gets the room; remembered once toggled.
+    var showingInspector: Bool {
+        didSet { defaults.set(showingInspector, forKey: "showingInspector") }
     }
 
     var trashInsteadOfDelete: Bool {
@@ -133,6 +137,7 @@ final class AppModel {
         let column = defaults.string(forKey: "sortOrder").flatMap(SortColumn.init(rawValue:)) ?? .size
         sortColumn = column
         // Before the direction was saved, names sorted A to Z, safety safest first, and the rest largest or newest first.
+        showingInspector = defaults.bool(forKey: "showingInspector")
         sortAscending = defaults.object(forKey: "sortAscending") as? Bool ?? [.name, .safety].contains(column)
         trashInsteadOfDelete = defaults.bool(forKey: "trashInsteadOfDelete")
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true

@@ -80,7 +80,7 @@ struct CandidateList: View {
                     .foregroundStyle(item.bytes > 0 ? .primary : .secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .width(min: 70, ideal: 84, max: 110)
+            .width(min: 84, ideal: 92, max: 120)
 
             TableColumn("Safety", value: \.effectiveRisk) { item in
                 RiskBadge(risk: item.effectiveRisk, fromAgent: item.agentVerdict != nil)
