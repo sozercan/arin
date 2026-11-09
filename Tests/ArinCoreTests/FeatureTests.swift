@@ -448,7 +448,9 @@ private struct FixedRule: Rule {
         #expect(report.ruleErrors["Keep list"] != nil)
         let picked = try #require(report.candidates.first { $0.id == parent.id })
         #expect(picked.blockers == [KeepList.unreadableBlocker])
-        #expect(report.keptPaths == [:]) // nothing loaded, so nothing to carry
+        // The report still carries what the kept ID covers, so the app's reload stays blocked.
+        #expect(report.keptPaths == ["go:go": [cache]])
+        #expect(throws: StoreError.self) { try KeepList.load(from: url, recording: report.keptPaths).get() }
 
         // Picked by ID anyway (`arin clean --ids`): the file still reads fine, but the scan's
         // keep-list blocker stops it.

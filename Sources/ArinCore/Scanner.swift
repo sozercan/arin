@@ -146,7 +146,9 @@ public struct Scanner: Sendable {
         let keep: Result<KeepList, any Error> = options.keepListURL.map { KeepList.load(from: $0, recording: found) }
             ?? .success(KeepList())
         if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
-        let keptIDs = Set(((try? keep.get())?.entries ?? []).map(\.id))
+        // From the list as stored, so the report carries the paths even when saving them failed:
+        // the app's reload then records them again and stays blocked instead of clearing.
+        let keptIDs = Set((options.keepListURL.flatMap { try? KeepList.load(from: $0) }?.entries ?? []).map(\.id))
         let filtered = Self.dedupe(candidates)
             .applying(keep: keep)
             .filter { $0.bytes >= options.minimumBytes || Self.sizeUnknownRules.contains($0.ruleID) }
