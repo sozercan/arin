@@ -12,13 +12,13 @@ struct ContentView: View {
         } detail: {
             Group {
                 if model.sidebar == .history {
-                    HistoryView().statusBar()
+                    HistoryView().statusBar(model)
                 } else if model.report == nil {
                     WelcomeView()
                 } else if model.sidebar == .insights {
-                    InsightsView().statusBar()
+                    InsightsView().statusBar(model)
                 } else if model.sidebar == .map {
-                    SpaceMapView().statusBar()
+                    SpaceMapView().statusBar(model)
                 } else {
                     // Adds the status bar itself, so it stops at the inspector.
                     CandidateList(title: model.sidebarTitle)
@@ -132,14 +132,15 @@ private struct Toolbar: ToolbarContent {
 
 extension View {
     /// A safe-area bar gets the system scroll edge effect, so it needs no background of its own.
-    func statusBar() -> some View {
-        safeAreaBar(edge: .bottom) { StatusBar() }
+    /// The bar is hosted apart from the content, so it takes the model rather than the environment.
+    func statusBar(_ model: AppModel) -> some View {
+        safeAreaBar(edge: .bottom) { StatusBar(model: model) }
     }
 }
 
 /// Status only. Actions live in the toolbar and the menus.
 private struct StatusBar: View {
-    @Environment(AppModel.self) private var model
+    var model: AppModel
 
     var body: some View {
         // Before the first scan finishes, the welcome screen shows progress itself.

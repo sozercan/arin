@@ -26,12 +26,12 @@ struct CandidateList: View {
                 table(items, sort: sort)
             }
         }
-        .statusBar()
+        .statusBar(model)
         .navigationTitle(title)
         .navigationSubtitle("\(items.count) items · \(items.dedupedBytes.formattedBytes)")
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search items")
         .inspector(isPresented: $model.showingInspector) {
-            CandidateInspector(items: focused)
+            CandidateInspector(model: model, items: focused)
                 .inspectorColumnWidth(min: 260, ideal: 300, max: 420)
         }
         .toolbar {
@@ -65,7 +65,7 @@ struct CandidateList: View {
             }
         )) {
             TableColumn("") { item in
-                CleanCheckbox(candidate: item)
+                CleanCheckbox(model: model, candidate: item)
             }
             .width(20)
 
@@ -156,8 +156,10 @@ struct CandidateList: View {
 }
 
 /// Whether the item will be cleaned. Kept items can only be turned off, never on.
+/// Takes the model directly: table cells are hosted lazily while scrolling and don't reliably
+/// inherit the environment, so reading `AppModel` from it crashed.
 struct CleanCheckbox: View {
-    @Environment(AppModel.self) private var model
+    var model: AppModel
     var candidate: Candidate
 
     var body: some View {
@@ -198,7 +200,7 @@ private struct NameCell: View {
 
 /// Everything about the focused row: why it's there, what the agent said, and the exact action.
 private struct CandidateInspector: View {
-    @Environment(AppModel.self) private var model
+    var model: AppModel
     var items: [Candidate]
 
     var body: some View {
