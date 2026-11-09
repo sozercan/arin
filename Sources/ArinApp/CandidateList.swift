@@ -115,8 +115,11 @@ struct CandidateList: View {
         .onKeyPress(.space) {
             let picked = items.filter { rows.contains($0.id) }
             guard !picked.isEmpty else { return .ignored }
-            // Like Finder's tag toggle: if any are off, turn them all on; otherwise turn them all off.
-            model.setAll(picked, selected: picked.contains { !model.selection.contains($0.id) })
+            // Like Finder's tag toggle: if any could be turned on, turn them all on; otherwise all off.
+            // Only count rows that can be turned on, so a kept or informational row in the mix
+            // doesn't stop Space from deselecting the rest.
+            let canTurnOn = picked.contains { $0.isActionable && !$0.kept && !model.selection.contains($0.id) }
+            model.setAll(picked, selected: canTurnOn)
             return .handled
         }
     }

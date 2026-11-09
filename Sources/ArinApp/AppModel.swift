@@ -192,9 +192,11 @@ final class AppModel {
         }
     }
 
-    /// What the list or map shows: the sidebar's group (everything on the map), narrowed by search.
+    /// What the list or map shows: the sidebar's group, narrowed by search in the list. The map
+    /// shows everything and has no search field, so a search left over from the list doesn't apply.
     var visibleCandidates: [Candidate] {
-        let items = sidebar == .map ? candidates : candidates(for: sidebar)
+        if sidebar == .map { return candidates }
+        let items = candidates(for: sidebar)
         let query = searchText.trimmingCharacters(in: .whitespaces)
         guard !query.isEmpty else { return items }
         return items.filter { item in
