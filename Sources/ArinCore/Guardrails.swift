@@ -95,7 +95,32 @@ public struct Guardrails: Sendable {
     /// Only these tools may be run by an action.
     public static let allowedExecutables: Set<String> = [
         "go", "npm", "uv", "brew", "yarn", "pnpm", "xcrun", "git", "docker", "rustup", "sqlite3", "podman",
+        "tmutil", "ollama", "mise",
     ]
+
+    /// Whether an action may run this command. Tools whose other subcommands could do real damage
+    /// (turn off backups, delete every model, uninstall runtimes in use) are limited to one exact shape.
+    public static func allows(_ command: CommandSpec) -> Bool {
+        guard allowedExecutables.contains(command.executable) else { return false }
+        let args = command.arguments
+        // A model or tool name such as `llama3.2:latest`, `hf.co/org/model:q4`, `npm:prettier`. Never an option.
+        func isName(_ value: String) -> Bool {
+            value.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._:\/@+-]*/) != nil && !value.contains("..")
+        }
+        switch command.executable {
+        case "tmutil":
+            // One Time Machine snapshot, by date. Never a volume, never update snapshots.
+            return args.count == 2 && args[0] == "deletelocalsnapshots"
+                && args[1].wholeMatch(of: /\d{4}-\d{2}-\d{2}-\d{6}/) != nil
+        case "ollama":
+            return args.count == 2 && args[0] == "rm" && isName(args[1])
+        case "mise":
+            // mise decides what's unused; Arin only names the tool.
+            return args.count == 4 && Array(args.prefix(3)) == ["prune", "--tools", "--yes"] && isName(args[3])
+        default:
+            return true
+        }
+    }
 
     /// /var and /tmp are symlinks into /private; compare canonical forms.
     static func canonical(_ path: String) -> String {

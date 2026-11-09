@@ -17,6 +17,8 @@ struct CandidateList: View {
                     ForEach(items) { item in
                         CandidateRow(candidate: item, isSelected: model.selection.contains(item.id)) {
                             model.toggle(item)
+                        } setKept: { kept in
+                            model.setKept(item.id, title: item.title, paths: item.paths, kept)
                         }
                     }
                 } header: {
@@ -48,6 +50,7 @@ struct CandidateRow: View {
     var candidate: Candidate
     var isSelected: Bool
     var toggle: () -> Void
+    var setKept: (Bool) -> Void
     @State private var expanded = false
 
     var body: some View {
@@ -55,7 +58,7 @@ struct CandidateRow: View {
             Toggle("", isOn: Binding(get: { isSelected }, set: { _ in toggle() }))
                 .toggleStyle(.checkbox)
                 .labelsHidden()
-                .disabled(!candidate.isActionable)
+                .disabled(!candidate.isActionable || candidate.kept && !isSelected)
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -70,6 +73,12 @@ struct CandidateRow: View {
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .overlay(Capsule().strokeBorder(.quaternary))
+                    }
+                    if candidate.kept {
+                        Label("Always kept", systemImage: "lock.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .help("On your keep list. Arin won't pre-select, review, or clean it.")
                     }
                 }
                 if let path = candidate.paths.first {
@@ -106,7 +115,7 @@ struct CandidateRow: View {
             Spacer(minLength: 12)
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(candidate.bytes.formattedBytes)
+                Text(candidate.bytes > 0 ? candidate.bytes.formattedBytes : "Size unknown")
                     .monospacedDigit()
                     .font(.body.weight(.medium))
                 RiskBadge(risk: candidate.effectiveRisk, fromAgent: candidate.agentVerdict != nil)
@@ -116,6 +125,14 @@ struct CandidateRow: View {
         .contentShape(Rectangle())
         .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
         .contextMenu {
+            if candidate.isActionable {
+                if candidate.kept {
+                    Button("Stop Keeping") { setKept(false) }
+                } else {
+                    Button("Always Keep") { setKept(true) }
+                }
+                Divider()
+            }
             if let path = candidate.paths.first {
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
                 Button("Copy Path") {

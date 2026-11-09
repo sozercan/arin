@@ -40,6 +40,19 @@ Arin's rules come from hands-on cleanups of developer Macs that run coding agent
 14. **A fixed list of locations misses the biggest surprises.** Tens of GB of agent perf artifacts can sit in `~/.t3/userdata/task-artifacts`, outside every known cache path. A size overview of the home folder finds such folders and drills into the subfolder that actually holds the space. It never reports a folder containing a git checkout.
 15. **It grows back.** A disk freed by tens of GB can be full again within days, mostly from Go cache, DerivedData, and agent perf artifacts. That's why Arin has low-space alerts and an opt-in Auto mode limited to caches that refill on their own.
 
+## Rules not yet confirmed by a cleanup
+
+These follow from documented tool behavior or from the rules above, not from a cleanup that went wrong. Confirm or revise each one the first time a real cleanup exercises it.
+
+- **Active projects aren't pre-selected.** Deleting the build output of a project in use forces a reinstall or full rebuild in the middle of work, and the open-file check only catches what runs at that moment. Build output in a project whose files or git state (index, HEAD, reflog, following a linked worktree's `.git` file) changed within 7 days is listed but not pre-selected.
+- **The keep list fails closed.** If it exists but can't be read (including a folder that can't be searched), nothing is pre-selected and the executor refuses every item. Running without the user's protections is worse than not running. It's re-read before each item, and it records each kept item's paths, so removing a worktree can't take a kept `node_modules` with it. The app and the CLI update it under a shared lock.
+- **`CACHEDIR.TAG` marks a cache.** A folder holding the standard tag with the exact signature is meant to be deletable (pytest, mypy, ruff and others write one). Arin only accepts cache-named or hidden folders, never a project root, and never one with a checkout inside.
+- **Build folders need their marker.** `.next` needs `package.json` and a `next.config.*`; Gradle `build` needs a Gradle script and Gradle's `build/tmp`; `.dart_tool` needs `pubspec.yaml`; Zig caches need `build.zig`. `.terraform` starts as Review: `terraform init` restores providers and modules, but `.terraform/environment` holds the selected workspace and init may need credentials.
+- **Tool managers decide what's unused.** `mise prune --tools --yes <tool>` re-evaluates at cleanup time and keeps versions a running process uses; Arin only names the tool. Ollama models go through `ollama rm`, because layers are shared between models and deleting blobs directly would leave broken manifests; `ollama ps` is checked again right before, and a model that's loaded (or a check that fails) is skipped. LM Studio model folders are deleted directly, and only while LM Studio isn't running.
+- **Time Machine local snapshots are not update snapshots.** Only names of the form `com.apple.TimeMachine.<date>.local` are offered, deleted one at a time with `tmutil deletelocalsnapshots <date>`. Rule 2 still stands for update snapshots. Their size can't be measured beforehand, so the measured change in free space is the only number reported.
+- **Some tools get one exact command shape.** `tmutil`, `ollama` and `mise` can do far more than clean (turn off backups, delete every model, uninstall runtimes in use), so the guardrails accept only `tmutil deletelocalsnapshots <date>`, `ollama rm <name>`, and `mise prune --tools --yes <tool>`.
+- **Saved plans don't outlive their facts.** A plan stores each item's action; running it rescans and refuses items whose action changed, which catches a worktree with a new commit or a new snapshot.
+
 ## Things that stay hands-off
 
 - Messages, Mail, Photos, iCloud Drive, Documents, Desktop, and Downloads. Point people to System Settings → Storage instead.

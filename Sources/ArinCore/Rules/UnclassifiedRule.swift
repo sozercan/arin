@@ -75,7 +75,7 @@ struct SnapshotInsightRule: InsightRule {
             title: update ? "A macOS update is holding space" : "Local snapshots are holding space",
             detail: update
                 ? "\(snapshots.count) update snapshot(s) exist. Until the update installs and you restart, deleted files can keep using disk space. Don't remove these by hand."
-                : "\(snapshots.count) local Time Machine snapshot(s) exist. Deleted files stay on disk until macOS thins them."
+                : "\(snapshots.count) local snapshot(s) exist. Deleted files stay on disk until macOS thins them. Time Machine's own snapshots are listed at the Deep level."
         )]
     }
 }

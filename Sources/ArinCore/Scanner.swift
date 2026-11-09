@@ -11,6 +11,8 @@ public struct ScanOptions: Sendable {
     public var fetchRemotes: Bool
     /// Ignore candidates smaller than this.
     public var minimumBytes: Int64
+    /// The user's keep list. Nil skips it (tests); an unreadable file blocks every pre-selection.
+    public var keepListURL: URL?
 
     public init(
         home: String = NSHomeDirectory(),
@@ -18,7 +20,8 @@ public struct ScanOptions: Sendable {
         projectRoots: [String]? = nil,
         checkPullRequests: Bool = true,
         fetchRemotes: Bool = false,
-        minimumBytes: Int64 = 20 * 1024 * 1024
+        minimumBytes: Int64 = 20 * 1024 * 1024,
+        keepListURL: URL? = KeepList.defaultURL
     ) {
         self.home = home
         self.tmpDir = (tmpDir as NSString).standardizingPath
@@ -26,6 +29,7 @@ public struct ScanOptions: Sendable {
         self.checkPullRequests = checkPullRequests
         self.fetchRemotes = fetchRemotes
         self.minimumBytes = minimumBytes
+        self.keepListURL = keepListURL
     }
 
     public static func defaultProjectRoots(home: String) -> [String] {
@@ -136,8 +140,18 @@ public struct Scanner: Sendable {
             ))
         }
 
+        // Save what kept items cover now, from every finding (before dedupe and the size filter, so
+        // a small kept cache inside a worktree still protects itself).
+        let found = Dictionary(candidates.map { ($0.id, $0.paths) }, uniquingKeysWith: { first, _ in first })
+        let keep: Result<KeepList, any Error> = options.keepListURL.map { KeepList.load(from: $0, recording: found) }
+            ?? .success(KeepList())
+        if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
+        // From the list as stored, so the report carries the paths even when saving them failed:
+        // the app's reload then records them again and stays blocked instead of clearing.
+        let keptIDs = Set((options.keepListURL.flatMap { try? KeepList.load(from: $0) }?.entries ?? []).map(\.id))
         let filtered = Self.dedupe(candidates)
-            .filter { $0.bytes >= options.minimumBytes || $0.ruleID == "git.worktree-prune" }
+            .applying(keep: keep)
+            .filter { $0.bytes >= options.minimumBytes || Self.sizeUnknownRules.contains($0.ruleID) }
             .sorted { $0.bytes > $1.bytes }
         return ScanReport(
             startedAt: started,
@@ -145,9 +159,13 @@ public struct Scanner: Sendable {
             disk: Disk.status(path: options.home),
             candidates: filtered,
             insights: insights,
-            ruleErrors: errors
+            ruleErrors: errors,
+            keptPaths: found.filter { keptIDs.contains($0.key) }
         )
     }
+
+    /// Rules whose candidates have no measurable size but are still worth listing.
+    static let sizeUnknownRules: Set<String> = ["git.worktree-prune", "snapshots.time-machine"]
 
     /// Drop candidates whose paths are already covered by an earlier (larger) candidate.
     /// Worktrees don't claim their contents: their build output stays listable on its own,

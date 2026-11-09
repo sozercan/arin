@@ -136,7 +136,7 @@ public struct AgentReviewer: Sendable {
         guard provider.isInstalled else {
             throw AgentReviewError(description: "\(provider.label) (`\(provider.executable)`) is not installed")
         }
-        let subset = Array(candidates.filter(\.isActionable).sorted { $0.bytes > $1.bytes }.prefix(maxCandidates))
+        let subset = Array(candidates.filter { $0.isActionable && !$0.kept }.sorted { $0.bytes > $1.bytes }.prefix(maxCandidates))
         guard !subset.isEmpty else { return [:] }
         let prompt = Self.prompt(for: subset)
         let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("arin-review-\(UUID().uuidString)")

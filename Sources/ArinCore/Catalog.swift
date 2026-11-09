@@ -10,12 +10,21 @@ public enum Catalog {
             CodexReleasesRule(),
             ClaudeVersionsRule(),
             RustToolchainRule(),
+            MiseRule(),
+            OllamaModelRule(),
+            LMStudioModelRule(),
+            TimeMachineSnapshotRule(),
             ProjectArtifactRule(),
             WorktreeRule(),
             DockerRule(),
             SQLiteFreePagesRule(),
             UnclassifiedRule(),
         ]
+    }
+
+    /// Display names by rule ID, for history labels.
+    public static var ruleNames: [String: String] {
+        Dictionary(rules.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     }
 
     public static var insightRules: [any InsightRule] {
@@ -186,6 +195,15 @@ public enum Catalog {
                 ".local/share/containers/podman/machine/qemu/cache",
             ],
             blockingProcesses: ["podman", "vfkit", "krunkit", "gvproxy"]
+        ),
+        KnownPathRule(
+            id: "lima.cache",
+            name: "Lima and Colima downloads",
+            detail: "VM images Lima and Colima downloaded. Existing VMs keep their own disks; the images download again when you create a new VM.",
+            category: .containers,
+            level: .standard,
+            paths: ["Library/Caches/lima", "Library/Caches/colima"],
+            blockingProcesses: ["limactl", "colima"]
         ),
         KnownPathRule(
             id: "playwright.browsers",

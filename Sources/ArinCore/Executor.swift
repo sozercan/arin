@@ -1,6 +1,6 @@
 import Foundation
 
-public struct CleanupItemResult: Codable, Sendable, Identifiable {
+public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public enum Status: String, Codable, Sendable {
         case cleaned, skipped, failed
     }
@@ -11,6 +11,8 @@ public struct CleanupItemResult: Codable, Sendable, Identifiable {
     public var message: String
     public var estimatedBytes: Int64
     public var trashed: Bool
+    /// Where trashed paths went, so they can be put back.
+    public var trashedPaths: [TrashedPath]?
 }
 
 public struct CleanupReport: Codable, Sendable {
@@ -37,11 +39,19 @@ public struct Executor: Sendable {
     /// Move deleted paths to the Trash instead. Reversible, but frees nothing until the Trash is emptied.
     public var trashInsteadOfDelete: Bool
     public var commandTimeout: TimeInterval
+    /// Items on this list are refused. If the file exists but can't be read, everything is refused.
+    public var keepListURL: URL?
 
-    public init(guardrails: Guardrails = Guardrails(), trashInsteadOfDelete: Bool = false, commandTimeout: TimeInterval = 1800) {
+    public init(
+        guardrails: Guardrails = Guardrails(),
+        trashInsteadOfDelete: Bool = false,
+        commandTimeout: TimeInterval = 1800,
+        keepListURL: URL? = KeepList.defaultURL
+    ) {
         self.guardrails = guardrails
         self.trashInsteadOfDelete = trashInsteadOfDelete
         self.commandTimeout = commandTimeout
+        self.keepListURL = keepListURL
     }
 
     public func run(_ candidates: [Candidate], progress: (@Sendable (CleanupEvent) -> Void)? = nil) async -> CleanupReport {
@@ -54,7 +64,26 @@ public struct Executor: Sendable {
             // A fresh snapshot per item (~0.3 s): an earlier slow item gives apps time to start
             // using a later one.
             let state = await SystemState.capture()
-            let result = await clean(candidate, state: state)
+            // Re-read per item: the app or the CLI may protect something while an earlier item runs.
+            let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
+                ?? .success(KeepList())
+            let result: CleanupItemResult
+            switch keep {
+            case let .failure(error):
+                result = Self.skipped(candidate, "\(error)")
+            case let .success(list) where list.contains(candidate.id) || candidate.kept:
+                result = Self.skipped(candidate, "on your keep list")
+            case .success where !candidate.keepBlockers.isEmpty:
+                // Picking by ID overrides other blockers, never the keep list's.
+                result = Self.skipped(candidate, candidate.keepBlockers.joined(separator: "; "))
+            case let .success(list):
+                let kept = KeptPaths(list.entries)
+                if let inside = Self.targets(of: candidate).lazy.compactMap({ kept.insideOrAt($0) }).first {
+                    result = Self.skipped(candidate, "contains \(inside.title)\(KeepList.keptBlockerSuffix)")
+                } else {
+                    result = await clean(candidate, state: state)
+                }
+            }
             results.append(result)
             progress?(.finished(result))
         }
@@ -74,6 +103,32 @@ public struct Executor: Sendable {
         return withNotes
     }
 
+    /// Every path the action can remove.
+    static func targets(of candidate: Candidate) -> [String] {
+        switch candidate.action {
+        case let .delete(paths), let .trash(paths): paths
+        case let .removeWorktree(_, path, _): [path] + candidate.paths
+        case .commands, .none: candidate.paths
+        }
+    }
+
+    /// Checks that only make sense at the moment a command runs. Returns why it must not run.
+    static func preflight(_ command: CommandSpec) async -> String? {
+        if command.executable == "ollama", command.arguments.first == "rm", let model = command.arguments.last {
+            let loaded = await Shell.run("ollama", ["ps"], timeout: 20)
+            guard loaded.ok else { return "couldn't check whether \(model) is loaded in Ollama" }
+            if OllamaModelRule.parseTable(loaded.stdout).contains(where: { $0.name == model }) {
+                return "\(model) is loaded in Ollama right now"
+            }
+        }
+        return nil
+    }
+
+    static func skipped(_ candidate: Candidate, _ message: String) -> CleanupItemResult {
+        CleanupItemResult(id: candidate.id, title: candidate.title, status: .skipped, message: message,
+                          estimatedBytes: 0, trashed: false, trashedPaths: nil)
+    }
+
     func clean(_ candidate: Candidate, state: SystemState) async -> CleanupItemResult {
         func result(_ status: CleanupItemResult.Status, _ message: String, trashed: Bool = false) -> CleanupItemResult {
             CleanupItemResult(
@@ -82,8 +137,20 @@ public struct Executor: Sendable {
                 status: status,
                 message: message,
                 estimatedBytes: status == .cleaned ? candidate.bytes : 0,
-                trashed: trashed
+                trashed: trashed,
+                trashedPaths: nil
             )
+        }
+        func trashResult(_ paths: [String]) async -> CleanupItemResult {
+            let (errors, moved) = await trash(paths)
+            guard errors.isEmpty else {
+                var failed = result(.failed, errors.joined(separator: "; "))
+                failed.trashedPaths = moved.isEmpty ? nil : moved
+                return failed
+            }
+            var done = result(.cleaned, "moved to Trash", trashed: true)
+            done.trashedPaths = moved
+            return done
         }
 
         guard candidate.isActionable else { return result(.skipped, "informational only") }
@@ -117,23 +184,20 @@ public struct Executor: Sendable {
             return result(.skipped, "informational only")
 
         case let .delete(paths):
-            if trashInsteadOfDelete {
-                let errors = await trash(paths)
-                return errors.isEmpty ? result(.cleaned, "moved to Trash", trashed: true) : result(.failed, errors.joined(separator: "; "))
-            }
+            if trashInsteadOfDelete { return await trashResult(paths) }
             let errors = await delete(paths)
             return errors.isEmpty ? result(.cleaned, "deleted") : result(.failed, errors.joined(separator: "; "))
 
         case let .trash(paths):
-            let errors = await trash(paths)
-            return errors.isEmpty ? result(.cleaned, "moved to Trash", trashed: true) : result(.failed, errors.joined(separator: "; "))
+            return await trashResult(paths)
 
         case let .commands(commands):
             var warnings: [String] = []
             for command in commands {
-                guard Guardrails.allowedExecutables.contains(command.executable) else {
-                    return result(.skipped, "refusing to run \(command.executable)")
+                guard Guardrails.allows(command) else {
+                    return result(.skipped, "refusing to run \(command.display)")
                 }
+                if let reason = await Self.preflight(command) { return result(.skipped, reason) }
                 let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd, timeout: commandTimeout)
                 if !output.ok {
                     let tail = String((output.stderr.isEmpty ? output.stdout : output.stderr).suffix(400))
@@ -232,18 +296,21 @@ public struct Executor: Sendable {
         return errors
     }
 
-    func trash(_ paths: [String]) async -> [String] {
+    func trash(_ paths: [String]) async -> (errors: [String], moved: [TrashedPath]) {
         var errors: [String] = []
+        var moved: [TrashedPath] = []
         for path in paths {
             do { try guardrails.check(path) } catch { errors.append(error.description); continue }
             guard FileManager.default.fileExists(atPath: path) else { continue }
             do {
-                try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)
+                var location: NSURL?
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &location)
+                if let location = location?.path { moved.append(TrashedPath(original: path, location: location)) }
             } catch {
                 errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(error.localizedDescription)")
             }
         }
-        return errors
+        return (errors, moved)
     }
 
     /// When the measured gain falls short of the estimate, say why instead of reporting the estimate.

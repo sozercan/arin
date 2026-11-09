@@ -2,11 +2,14 @@
 
 Arin is a native macOS app that finds disk space that's safe to reclaim on a developer Mac. Your own coding agent, Claude Code or Codex, double-checks the findings. Nothing is removed until you tick it.
 
-- **Knows where developer Macs hide space.** Go/npm/uv/pnpm/bun/Homebrew caches, Xcode DerivedData, simulators and runtimes, stale temp build folders, old Codex/Claude releases, `node_modules`/`.build`/venvs, merged git worktrees (including squash merges), Docker build cache and orphaned volumes. A quick size overview of the rest of your home folder surfaces any other large folder (agent task output, logs, app data) under Unclassified.
+- **Knows where developer Macs hide space.** Go/npm/uv/pnpm/bun/Homebrew caches, Xcode DerivedData, simulators and runtimes, stale temp build folders, old Codex/Claude releases and unused mise tool versions, project build output (`node_modules`, `.build`, venvs, Cargo `target`, `.next`, Gradle `build`, `.dart_tool`, Zig caches, `.terraform`, and any folder a tool tagged with `CACHEDIR.TAG`), merged git worktrees (including squash merges), Docker build cache and orphaned volumes, Lima/Colima downloads, Ollama and LM Studio models, and Time Machine local snapshots. A quick size overview of the rest of your home folder surfaces any other large folder (agent task output, logs, app data) under Unclassified.
 - **Your agent checks what the rules can't settle.** After each scan, Arin automatically hands the uncertain items (anything not rule-safe, plus everything unclassified) to Claude Code or Codex in a read-only mode. You can turn this off in Settings. The agent returns *safe / review / keep* with a reason per item. It can't run commands that change anything, and it can't add actions. Arin's rules and guardrails decide what can be done. Claude Code is also denied reads of credentials and personal folders (`~/.ssh`, `~/.aws`, keychains, cookies, Mail, Messages, Documents). Codex's read-only sandbox blocks writes and network access but not reads, so for Codex that rule lives only in the prompt. Reviews default to a cheaper setup (Sonnet at low effort for Claude Code, your configured model at low effort for Codex). You can change this in Settings. Signed in with a Claude plan, reviews count toward your plan's usage limits.
-- **You choose, then Arin re-checks.** Right before each item, Arin checks running apps and open files again and refuses protected locations. It uses each tool's own cleanup command where one works.
+- **You choose, then Arin re-checks.** Right before each item, Arin checks running apps and open files again and refuses protected locations. It uses each tool's own cleanup command where one works. Build output in a project you changed in the last 7 days is listed but not pre-selected.
+- **Always keep.** Right-click an item and choose Always Keep (or `arin keep <id>`). Kept items are never pre-selected, never sent for review, and refused by the cleaner, along with any cleanup that would remove a kept folder (matched by its real location, so another spelling or a symlinked path doesn't get around it). If the keep list can't be read, Arin cleans nothing until it's fixed.
+- **History.** Arin remembers each scan and cleanup: what grew back since the previous scan, free space over time, what each cleanup freed, and Put Back for anything it moved to the Trash.
 - **Honest numbers.** Folder sizes overstate what deleting frees, because of APFS clones and snapshots. Arin measures the real change in free space and explains any gap.
-- **Stays out of the way.** A menu bar gauge, an alert when free space drops below your threshold, and an opt-in Auto mode that clears only caches that refill on their own.
+- **Space map.** A treemap of everything the scan found, by category; click a tile to select it.
+- **Stays out of the way.** A menu bar gauge, an alert when free space drops below your threshold, an opt-in Auto mode that clears only caches that refill on their own, and an Open at login setting so they keep running after a restart.
 
 ## Cleanup levels
 
@@ -14,7 +17,7 @@ Arin is a native macOS app that finds disk space that's safe to reclaim on a dev
 |---|---|
 | Quick | Caches that refill on their own: package caches, idle DerivedData, unavailable simulators, stale temp folders, old tool versions |
 | Standard | Adds build output (`node_modules`, `.build`, venvs, `bin/`), merged worktrees, Docker build cache, app caches |
-| Deep | Adds simulator data, old runtimes, extra toolchains, archives, unrecognized app data |
+| Deep | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, unrecognized app data |
 
 Only items marked **Safe** at or below the chosen level are pre-selected. Agent verdicts can make an item more cautious. They can make it less cautious only for items no rule recognizes.
 
@@ -61,11 +64,27 @@ swift run arin review --agent codex --effort medium   # override review model/ef
 swift run arin clean --level quick            # dry run
 swift run arin clean --level quick --yes      # actually clean pre-selected items
 swift run arin clean --ids 'go.build-cache:go.build-cache' --yes
+swift run arin plan --level quick --out plan.json   # save what clean would pick
+swift run arin clean --plan plan.json --yes         # rescan, then run only unchanged items
+swift run arin keep 'docker.volume:pgdata'          # never clean this; `arin keep` lists, --remove undoes
+swift run arin history                              # past cleanups and what grew since the last scan
 ```
+
+A saved plan lists candidate IDs with the action each one had. Running it rescans and refuses any item that's gone, whose action or folders changed (a worktree with a new commit, a new snapshot, a moved npm cache), that became more cautious, or that's on the keep list. Add `--ids` to run only some of the plan's items.
+
+### Using arin from your agent
+
+`arin skill` prints a skill file that teaches Claude Code, Codex, or another agent to scan with `--json`, summarize, and clean only the IDs you approve:
+
+```bash
+mkdir -p ~/.claude/skills/arin && arin skill > ~/.claude/skills/arin/SKILL.md
+```
+
+The agent never gets anything more than the CLI: actions still come from Arin's rules, and the cleaner re-checks everything.
 
 ## How it's put together
 
-- `Sources/ArinCore`: rules (`Rules/`, `Catalog.swift`), scanner, guardrails, executor, and agent reviewer.
+- `Sources/ArinCore`: rules (`Rules/`, `Catalog.swift`), scanner, guardrails, executor, agent reviewer, and the keep list, history and plans (`Store.swift`, kept in `~/Library/Application Support/<bundle ID>`).
 - `Sources/ArinApp`: the SwiftUI app (window, menu bar extra, settings).
 - `Sources/arin-cli`: the `arin` command.
 - `docs/learnings.md`: what real cleanups showed, and why each rule and guardrail exists.

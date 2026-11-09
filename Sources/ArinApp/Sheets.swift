@@ -32,7 +32,7 @@ struct ConfirmSheet: View {
                             .truncationMode(.middle)
                     }
                     Spacer()
-                    Text(item.bytes.formattedBytes).monospacedDigit().foregroundStyle(.secondary)
+                    Text(item.bytes > 0 ? item.bytes.formattedBytes : "Size unknown").monospacedDigit().foregroundStyle(.secondary)
                 }
             }
             .frame(minHeight: 220)
