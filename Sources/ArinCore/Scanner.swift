@@ -140,20 +140,14 @@ public struct Scanner: Sendable {
             ))
         }
 
-        let deduped = Self.dedupe(candidates)
-        var keep: Result<KeepList, any Error> = options.keepListURL.map { url in Result { try KeepList.load(from: url) } }
-            ?? .success(KeepList())
         // Save what kept items cover now, from every finding (before dedupe and the size filter, so
-        // a small kept cache inside a worktree still protects itself). If saving fails, this scan
-        // still uses the paths.
-        if case var .success(list) = keep, let url = options.keepListURL {
-            let found = Dictionary(candidates.map { ($0.id, $0.paths) }, uniquingKeysWith: { first, _ in first })
-            if list.recordPaths(found) {
-                keep = .success((try? KeepList.update(at: url) { $0.recordPaths(found) }) ?? list)
-            }
-        }
+        // a small kept cache inside a worktree still protects itself).
+        let found = Dictionary(candidates.map { ($0.id, $0.paths) }, uniquingKeysWith: { first, _ in first })
+        let keep: Result<KeepList, any Error> = options.keepListURL.map { KeepList.load(from: $0, recording: found) }
+            ?? .success(KeepList())
         if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
-        let filtered = deduped
+        let keptIDs = Set(((try? keep.get())?.entries ?? []).map(\.id))
+        let filtered = Self.dedupe(candidates)
             .applying(keep: keep)
             .filter { $0.bytes >= options.minimumBytes || Self.sizeUnknownRules.contains($0.ruleID) }
             .sorted { $0.bytes > $1.bytes }
@@ -163,7 +157,8 @@ public struct Scanner: Sendable {
             disk: Disk.status(path: options.home),
             candidates: filtered,
             insights: insights,
-            ruleErrors: errors
+            ruleErrors: errors,
+            keptPaths: found.filter { keptIDs.contains($0.key) }
         )
     }
 

@@ -337,8 +337,7 @@ final class AppModel {
     /// newly kept items, and items containing one, leave the selection. If it can't be read,
     /// nothing stays selected.
     func reloadKeepList() {
-        let result = Result { try KeepList.load() }
-        apply(result)
+        apply(KeepList.load(recording: report?.keptPaths ?? [:]))
     }
 
     private func apply(_ result: Result<KeepList, any Error>) {
@@ -364,10 +363,10 @@ final class AppModel {
     /// Adds or removes an item from the keep list, and updates the current results to match.
     func setKept(_ id: String, title: String, paths: [String] = [], _ kept: Bool) {
         do {
-            let list = try KeepList.update { list in
+            try KeepList.update { list in
                 if kept { list.add(id: id, title: title, paths: paths) } else { list.remove(id: id) }
             }
-            apply(.success(list))
+            reloadKeepList()
         } catch {
             errorMessage = "Could not save the keep list: \(error)"
             reloadKeepList()

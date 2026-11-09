@@ -145,6 +145,21 @@ public struct KeepList: Codable, Sendable, Equatable {
         }
     }
 
+    /// Loads the list and saves the paths `found` for kept IDs (see `recordPaths`). Fails if they
+    /// can't be saved: the executor re-reads the file, so protections held only in memory wouldn't
+    /// reach it.
+    public static func load(from url: URL = defaultURL, recording found: [String: [String]]) -> Result<KeepList, any Error> {
+        Result {
+            var list = try load(from: url)
+            guard list.recordPaths(found) else { return list }
+            do {
+                return try update(at: url) { $0.recordPaths(found) }
+            } catch {
+                throw StoreError("the folders that kept items cover couldn't be saved to the keep list (\(error)); nothing can be cleaned until it can be")
+            }
+        }
+    }
+
     public func save(to url: URL = defaultURL) throws {
         try ArinStore.write(ArinStore.encoder.encode(self), to: url)
     }
@@ -182,6 +197,13 @@ struct KeptPaths {
     }
 }
 
+extension Candidate {
+    /// Blockers the keep list added. Unlike the others, nothing overrides these.
+    var keepBlockers: [String] {
+        blockers.filter { $0 == KeepList.unreadableBlocker || $0.hasSuffix(KeepList.keptBlockerSuffix) }
+    }
+}
+
 public extension [Candidate] {
     /// Marks kept items. If the list couldn't be read, nothing may be pre-selected.
     /// Safe to call again on the same candidates: blockers it added before are replaced.
@@ -189,7 +211,8 @@ public extension [Candidate] {
         let kept = (try? keep.get()).map { KeptPaths($0.entries) }
         return map { candidate in
             var copy = candidate
-            copy.blockers.removeAll { $0 == KeepList.unreadableBlocker || $0.hasSuffix(KeepList.keptBlockerSuffix) }
+            let previous = copy.keepBlockers
+            copy.blockers.removeAll { previous.contains($0) }
             switch keep {
             case let .success(list):
                 copy.kept = list.contains(candidate.id)

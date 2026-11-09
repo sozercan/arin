@@ -388,8 +388,11 @@ private struct FixedRule: Rule {
         let url = URL(fileURLWithPath: "\(box.root)/keep.json")
         try KeepList.update(at: url) { $0.add(id: "t:\(modules)", title: "node_modules", paths: [modules]) }
 
-        // Different case, and through a symlinked folder: different IDs, same directory.
-        let aliases = [candidate("\(box.root)/projects/APP/node_modules"), candidate("\(box.root)/link/app"), candidate("\(box.root)/link/app/node_modules/")]
+        // Through a symlinked folder, with a trailing slash, and (on a case-insensitive volume, the
+        // macOS default) in another case: different IDs, same directory.
+        var aliases = [candidate("\(box.root)/link/app"), candidate("\(box.root)/link/app/node_modules/")]
+        let cased = "\(box.root)/projects/APP/node_modules"
+        if FileManager.default.fileExists(atPath: cased) { aliases.append(candidate(cased)) }
         let marked = aliases.applying(keep: Result { try KeepList.load(from: url) })
         #expect(marked.allSatisfy { $0.blockers == ["contains node_modules, which you chose to keep"] })
 
@@ -418,9 +421,38 @@ private struct FixedRule: Rule {
         #expect(report.candidates.map(\.id) == [parent.id])
         #expect(report.candidates[0].blockers == ["contains Go build cache, which you chose to keep"])
         #expect(try KeepList.load(from: url).entries[0].paths == [cache])
+        #expect(report.keptPaths == ["go:go": [cache]])
 
         // The executor re-reads the saved paths, so the worktree is refused there too.
         let result = await Executor(guardrails: box.guardrails, keepListURL: url).run([parent])
+        #expect(result.items.first?.status == .skipped)
+        #expect(FileInfo.exists(cache))
+    }
+
+    @Test func keptPathsThatCantBeSavedBlockCleaningEvenByID() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let worktree = try box.mkdir("projects/wt")
+        let cache = try box.mkdir("projects/wt/.gocache")
+        let dir = try box.mkdir("state")
+        let url = URL(fileURLWithPath: "\(dir)/keep.json")
+        try KeepList.update(at: url) { $0.add(id: "go:go", title: "Go build cache") }
+        #expect(chmod(dir, 0o555) == 0) // readable, but the paths can't be saved
+        defer { chmod(dir, 0o755) }
+
+        var goCache = candidate("go", paths: [cache])
+        goCache.id = "go:go"
+        let parent = candidate(worktree)
+        let options = ScanOptions(home: box.root, tmpDir: box.root, projectRoots: [], minimumBytes: 0, keepListURL: url)
+        let report = await Scanner(options: options, rules: [FixedRule(found: [goCache, parent])], insightRules: []).scan()
+        #expect(report.ruleErrors["Keep list"] != nil)
+        let picked = try #require(report.candidates.first { $0.id == parent.id })
+        #expect(picked.blockers == [KeepList.unreadableBlocker])
+        #expect(report.keptPaths == [:]) // nothing loaded, so nothing to carry
+
+        // Picked by ID anyway (`arin clean --ids`): the file still reads fine, but the scan's
+        // keep-list blocker stops it.
+        let result = await Executor(guardrails: box.guardrails, keepListURL: url).run([picked])
         #expect(result.items.first?.status == .skipped)
         #expect(FileInfo.exists(cache))
     }

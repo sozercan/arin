@@ -73,6 +73,9 @@ public struct Executor: Sendable {
                 result = Self.skipped(candidate, "\(error)")
             case let .success(list) where list.contains(candidate.id) || candidate.kept:
                 result = Self.skipped(candidate, "on your keep list")
+            case .success where !candidate.keepBlockers.isEmpty:
+                // Picking by ID overrides other blockers, never the keep list's.
+                result = Self.skipped(candidate, candidate.keepBlockers.joined(separator: "; "))
             case let .success(list):
                 let kept = KeptPaths(list.entries)
                 if let inside = Self.targets(of: candidate).lazy.compactMap({ kept.insideOrAt($0) }).first {

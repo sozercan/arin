@@ -267,6 +267,9 @@ public struct ScanReport: Codable, Sendable {
     public var candidates: [Candidate]
     public var insights: [Insight]
     public var ruleErrors: [String: String]
+    /// What each kept ID covered in this scan, including items the list doesn't show. Reloading
+    /// the keep list records these again, so a failed save keeps blocking cleanups.
+    public var keptPaths: [String: [String]] = [:]
 
     public var totalBytes: Int64 { candidates.reduce(0) { $0 + $1.bytes } }
 }
