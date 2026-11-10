@@ -5,6 +5,8 @@ public struct Guardrails: Sendable {
     public var home: String
     public var allowedRoots: [String]
     public var protectedPaths: [String]
+    /// Where an uninstall may take an app bundle from. Cleanups never touch these.
+    public var applicationRoots: [String]
 
     public init(home: String = NSHomeDirectory(), tmpDir: String = NSTemporaryDirectory()) {
         let home = Self.canonical((home as NSString).standardizingPath)
@@ -22,6 +24,7 @@ public struct Guardrails: Sendable {
             "Library/Containers/com.docker.docker", "Library/Group Containers",
             ".ssh", ".gnupg", ".aws", ".kube/config", ".config/gh", ".netrc",
         ].map { "\(home)/\($0)" }
+        applicationRoots = ["/Applications", "\(home)/Applications"]
     }
 
     public enum Violation: Error, CustomStringConvertible, Equatable {
@@ -79,6 +82,71 @@ public struct Guardrails: Sendable {
                 throw .protected(path)
             }
         }
+    }
+
+    // MARK: Uninstall
+
+    /// The ~/Library folders an uninstall may take an app's own files from, one item deep.
+    public static let uninstallFolders = [
+        "Application Scripts", "Application Support", "Caches", "Containers", "Cookies", "Group Containers",
+        "HTTPStorages", "LaunchAgents", "Logs", "Logs/DiagnosticReports", "Preferences", "Preferences/ByHost",
+        "Saved Application State", "WebKit",
+    ]
+
+    /// Protected folders an uninstall may take one item from: apps, their preferences and their group
+    /// containers live there. The rest of `protectedPaths` stays off limits to uninstalls too.
+    static let uninstallExceptions = ["Applications", "Library/Preferences", "Library/Group Containers"]
+
+    /// Validates a path an uninstall moves to the Trash, or puts back: an app bundle in an
+    /// Applications folder (or one folder below it), or one item directly inside a per-app folder of
+    /// ~/Library. Whether the item belongs to the app is the uninstaller's check; this is the shape
+    /// every such path must have. Symlinked ancestors are resolved and checked too.
+    public func checkUninstall(_ rawPath: String) throws(Violation) {
+        guard rawPath.hasPrefix("/") else { throw .notAbsolute(rawPath) }
+        let path = Self.canonical((rawPath as NSString).standardizingPath)
+        try checkUninstallCanonical(path)
+        let parent = (path as NSString).deletingLastPathComponent
+        let realParent = Self.canonical(URL(fileURLWithPath: parent).resolvingSymlinksInPath().path)
+        if realParent != parent {
+            try checkUninstallCanonical((realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent))
+        }
+    }
+
+    private func checkUninstallCanonical(_ path: String) throws(Violation) {
+        let folded = path.lowercased()
+        let name = (folded as NSString).lastPathComponent
+        let parent = (folded as NSString).deletingLastPathComponent
+        // Apple's own files and dotfiles (.GlobalPreferences.plist) are never an app's leftovers.
+        guard !name.hasPrefix("."), !name.contains("com.apple.") else { throw .protected(path) }
+
+        if name.hasSuffix(".app"), let root = applicationRoots.first(where: { folded.hasPrefix($0.lowercased() + "/") }) {
+            // `/Applications/Foo.app` or `/Applications/Vendor/Foo.app`, never a bundle inside another.
+            let below = folded.dropFirst(root.count + 1).split(separator: "/")
+            guard below.count <= 2, !below.dropLast().contains(where: { $0.hasSuffix(".app") }) else {
+                throw .protected(path)
+            }
+            // Apple's apps (and Arin) are refused by bundle ID while the bundle is there to read.
+            if FileInfo.exists(path), !AppCatalog.isUninstallable(AppCatalog.bundleID(at: path) ?? "") {
+                throw .protected(path)
+            }
+            return
+        }
+
+        let library = "\(home)/Library/".lowercased()
+        guard Self.uninstallFolders.contains(where: { parent == library + $0.lowercased() }) else {
+            throw .outsideAllowedRoots(path)
+        }
+        let exceptions = Self.uninstallExceptions.map { "\(home)/\($0)".lowercased() }
+        for protected in protectedPaths.map({ $0.lowercased() }) where !exceptions.contains(protected) {
+            if folded == protected || folded.hasPrefix(protected + "/") || protected.hasPrefix(folded + "/") {
+                throw .protected(path)
+            }
+        }
+    }
+
+    /// A Homebrew cask token such as `visual-studio-code` or `ghostty@tip`. Never an option or a path.
+    public static func isCaskToken(_ value: String) -> Bool {
+        value.wholeMatch(of: /[a-z0-9][a-z0-9@._+-]*/) != nil && !value.contains("..")
     }
 
     public func check(_ action: CleanupAction) throws(Violation) {

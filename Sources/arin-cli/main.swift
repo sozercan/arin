@@ -11,6 +11,9 @@ commands:
   plan                 Save the candidates clean would pick to a plan file (read-only)
   keep [ID…]           Never clean these candidates; with no IDs, list the keep list
   history              Past cleanups and what grew since the previous scan
+  apps                 List apps that can be uninstalled (read-only)
+  uninstall APP        Move an app and the files it keeps in ~/Library to the Trash
+                       (dry run unless --yes). APP is a name, bundle ID, or path.
   skill                Print instructions that teach a coding agent to use arin
 
 options:
@@ -28,6 +31,7 @@ options:
   --no-pr                       Skip GitHub merged-PR lookups for worktrees
   --fetch                       git fetch --prune before classifying worktrees
   --trash                       clean: move to Trash instead of deleting
+  --all                         uninstall: also take files matched only by name or shared with other apps
   --yes                         clean: actually do it
   --json                        Machine-readable output
 """
@@ -48,6 +52,7 @@ struct Args {
     var checkPRs = true
     var fetch = false
     var trash = false
+    var all = false
     var yes = false
     var json = false
 
@@ -81,6 +86,7 @@ struct Args {
             case "--no-pr": checkPRs = false
             case "--fetch": fetch = true
             case "--trash": trash = true
+            case "--all": all = true
             case "--yes", "-y": yes = true
             case "--json": json = true
             case "-h", "--help": command = "help"
@@ -207,6 +213,86 @@ func runKeep(_ args: Args) -> Int32 {
     return 0
 }
 
+/// Installed apps, with the Homebrew cask that installed each one.
+func installedApps() async -> [InstalledApp] {
+    let casks = await AppCatalog.caskTokens()
+    return AppCatalog.installed().map { app in
+        var app = app
+        app.caskToken = casks[app.path.lowercased()]
+        return app
+    }
+}
+
+/// Apps matching a path, bundle ID, or name (with or without `.app`), ignoring case.
+func findApps(_ query: String, in apps: [InstalledApp]) -> [InstalledApp] {
+    if query.contains("/") {
+        let path = ((query as NSString).expandingTildeInPath as NSString).standardizingPath.lowercased()
+        return apps.filter { ($0.path as NSString).standardizingPath.lowercased() == path }
+    }
+    let query = query.lowercased()
+    let bare = query.hasSuffix(".app") ? String(query.dropLast(4)) : query
+    return apps.filter { app in
+        let file = (((app.path as NSString).lastPathComponent as NSString).deletingPathExtension).lowercased()
+        return app.bundleID.lowercased() == query || app.name.lowercased() == bare || file == bare
+    }
+}
+
+func runUninstall(_ args: Args) async -> Int32 {
+    guard let query = args.positional.first else {
+        eprint("uninstall needs an app: a name, bundle ID, or path\n\n\(usage)")
+        return 2
+    }
+    let apps = await installedApps()
+    let matches = findApps(query, in: apps)
+    guard matches.count == 1, let app = matches.first else {
+        if matches.isEmpty {
+            eprint("No app matching \(query) in /Applications or ~/Applications. Apple's apps can't be uninstalled with Arin. Run arin apps to list the rest.")
+        } else {
+            eprint("\(query) matches \(matches.count) apps; name one by path:")
+            for match in matches { eprint("  \(match.path)") }
+        }
+        return 1
+    }
+    let files = await AppFiles.find(for: app, others: apps.filter { $0.path != app.path })
+    let picked = files.filter { args.all || !$0.needsReview }
+    let uninstaller = Uninstaller()
+
+    guard args.yes else {
+        if args.json {
+            struct Output: Encodable {
+                var app: InstalledApp
+                var files: [AppFile]
+            }
+            printJSON(Output(app: app, files: files))
+            return 0
+        }
+        print("\(app.name) \(app.version ?? "") (\(app.bundleID))\(app.caskToken.map { " — Homebrew cask \($0)" } ?? "")")
+        for file in files {
+            let mark = picked.contains(file) ? "[x]" : "[ ]"
+            print("  \(mark) \(pad(file.bytes.formattedBytes, 10)) \(pad(file.kind.label, 20)) \((file.path as NSString).abbreviatingWithTildeInPath)")
+            if let note = file.note { print("        \(note)") }
+        }
+        if let refusal = await uninstaller.refusal(for: app) { print("\n⚠︎ \(refusal)") }
+        print("\nDry run. Would move \(picked.count) items (\(picked.reduce(0) { $0 + $1.bytes }.formattedBytes)) to the Trash.")
+        print("Re-run with --yes to uninstall\(picked.count < files.count ? ", or add --all to include the unchecked items" : "").")
+        return 0
+    }
+
+    let result = await uninstaller.run(app, files: picked) { event in
+        guard !args.json, case let .finished(item) = event else { return }
+        eprint("  \(item.status.rawValue): \(item.title) — \(item.message)")
+    }
+    record(.cleanup(CleanupRecord(result, auto: false, uninstalled: app.name)))
+    if args.json {
+        printJSON(result)
+    } else {
+        print("\nRemoved \(result.cleanedCount)/\(result.items.count) items of \(app.name). Free space changed by \(result.measuredBytes.formattedBytes).")
+        for note in result.explanations { print("  • \(note)") }
+        if result.items.contains(where: { $0.trashedPaths != nil }) { print("  • Put them back from the Trash, or from History in the app.") }
+    }
+    return result.items.contains { $0.status == .failed } ? 1 : 0
+}
+
 func summarize(_ report: ScanReport, level: Level) {
     let disk = report.disk
     print("Disk: \(disk.freeBytes.formattedBytes) free of \(disk.totalBytes.formattedBytes) (\(Int(disk.usedFraction * 100))% used)")
@@ -228,7 +314,7 @@ func main() async -> Int32 {
         eprint("\(error)\n\n\(usage)")
         return 2
     }
-    if args.command != "keep", let extra = args.positional.first {
+    if args.command != "keep", let extra = args.positional.dropFirst(args.command == "uninstall" ? 1 : 0).first {
         eprint("unknown argument \(extra)\n\n\(usage)")
         return 2
     }
@@ -293,6 +379,22 @@ func main() async -> Int32 {
     case "skill":
         print(agentSkill)
         return 0
+
+    case "apps":
+        let apps = await installedApps()
+        if args.json {
+            printJSON(apps)
+        } else {
+            for app in apps {
+                let source = app.caskToken.map { "brew: \($0)" } ?? (app.fromAppStore ? "App Store" : "")
+                print("\(pad(app.name, 32)) \(pad(app.version ?? "", 14)) \(pad(source, 22)) \(app.bundleID)")
+            }
+            print("\n\(apps.count) apps. Apple's apps aren't listed. Uninstall one with: arin uninstall NAME")
+        }
+        return 0
+
+    case "uninstall":
+        return await runUninstall(args)
 
     case "clean":
         var plan: CleanupPlan?
