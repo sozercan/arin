@@ -472,12 +472,17 @@ final class AppModel {
         return true
     }
 
-    func uninstall() async {
-        guard let app = uninstallApp, let files = uninstallFiles, !phase.isBusy else { return }
+    /// Takes the sheet's app and checked files now, before the sheet closes and clears them.
+    func uninstall(_ app: InstalledApp) {
+        guard uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
         let picked = files.filter { uninstallSelection.contains($0.id) }
         uninstallApp = nil
         guard !picked.isEmpty else { return }
         phase = .uninstalling(app.name)
+        Task { await uninstall(app, files: picked) }
+    }
+
+    private func uninstall(_ app: InstalledApp, files picked: [AppFile]) async {
         let result = await Uninstaller().run(app, files: picked)
         lastCleanup = result
         let removed = result.items.contains { $0.id == app.path && $0.status == .cleaned }

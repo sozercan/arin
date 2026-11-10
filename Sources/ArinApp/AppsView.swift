@@ -191,8 +191,8 @@ struct UninstallSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Move to Trash", role: .destructive) {
-                    dismiss()
-                    Task { await model.uninstall() }
+                    // Closes the sheet by clearing `uninstallApp`, after taking what it needs.
+                    model.uninstall(app)
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
