@@ -13,6 +13,8 @@ struct ContentView: View {
             Group {
                 if model.sidebar == .history {
                     HistoryView().statusBar(model)
+                } else if model.sidebar == .apps {
+                    AppsView()
                 } else if model.report == nil {
                     WelcomeView()
                 } else if model.sidebar == .insights {
@@ -28,6 +30,7 @@ struct ContentView: View {
         .toolbar { Toolbar() }
         .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
         .sheet(isPresented: $model.showingResult) { ResultSheet() }
+        .sheet(item: $model.uninstallApp) { app in UninstallSheet(app: app) }
         .alert("Something went wrong", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -75,6 +78,8 @@ private struct Sidebar: View {
             Section {
                 Label("History", systemImage: "clock")
                     .tag(AppModel.SidebarItem.history)
+                Label("Applications", systemImage: "xmark.app")
+                    .tag(AppModel.SidebarItem.apps)
             }
         }
     }

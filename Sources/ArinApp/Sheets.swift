@@ -78,7 +78,7 @@ struct ResultSheet: View {
             let problems = report.items.filter { $0.status != .cleaned }
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(report.measuredBytes > 0 ? "Freed \(report.measuredBytes.formattedBytes)" : "Cleanup finished")
+                    Text(model.lastCleanupTitle ?? (report.measuredBytes > 0 ? "Freed \(report.measuredBytes.formattedBytes)" : "Cleanup finished"))
                         .font(.title2.weight(.semibold))
                     Text("Free space went from \(report.freeBefore.formattedBytes) to \(report.freeAfter.formattedBytes). Folder sizes of what was cleaned added up to \(report.estimatedBytes.formattedBytes).")
                         .foregroundStyle(.secondary)

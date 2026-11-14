@@ -78,6 +78,7 @@ Only items marked **Safe** at or below the chosen level are pre-selected. Build 
 - **Space map.** A treemap of everything the scan found, by category. Click a tile to select it.
 - **History.** Each scan and cleanup: what grew back, free space over time, and what each cleanup freed.
 - **Menu bar gauge.** Free space at a glance, with an alert when it drops below your threshold.
+- **Uninstall apps.** *Applications* lists your apps by size. Double-click one, or drop it on the window, to see the preferences, caches, containers and other files it keeps in `~/Library`, then move them to the Trash with it. Files matched only by name, or shared with the developer's other apps, start unchecked. Homebrew apps are removed with `brew uninstall --cask`, and Apple's apps aren't offered.
 - **Auto mode.** Opt in, and when free space runs low Arin clears only caches that refill on their own. Turn on *Open at login* to keep it running after a restart.
 
 Reviews run automatically after each scan; you can turn them off in Settings. They default to a light setup (Sonnet at low effort for Claude Code, your configured model at low effort for Codex and GitHub Copilot), which you can change there too. With a Claude plan, reviews count toward your plan's usage limits. With GitHub Copilot, they use your plan's AI credits.
@@ -96,6 +97,9 @@ arin plan --level quick --out plan.json    # save what clean would pick
 arin clean --plan plan.json --yes          # rescan, then run only unchanged items
 arin keep 'docker.volume:pgdata'           # never clean this (--remove undoes)
 arin history                               # past cleanups and what grew back
+arin apps                                  # apps you can uninstall
+arin uninstall Slack                       # dry run: the app and the files it keeps
+arin uninstall Slack --yes                 # move them to the Trash
 ```
 
 A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Run `arin --help` for every option.

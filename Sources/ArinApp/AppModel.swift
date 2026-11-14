@@ -12,6 +12,7 @@ final class AppModel {
         case scanning(String)
         case reviewing(String)
         case cleaning(done: Int, total: Int, current: String)
+        case uninstalling(String)
 
         var isBusy: Bool { self != .idle }
 
@@ -21,6 +22,7 @@ final class AppModel {
             case let .scanning(s): "Scanning… \(s)"
             case let .reviewing(s): s
             case let .cleaning(done, total, current): "Cleaning \(done + 1) of \(total): \(current)"
+            case let .uninstalling(name): "Uninstalling \(name)…"
             }
         }
     }
@@ -31,6 +33,7 @@ final class AppModel {
         case map
         case insights
         case history
+        case apps
     }
 
     // MARK: State
@@ -42,6 +45,8 @@ final class AppModel {
     var phase = Phase.idle
     var sidebar: SidebarItem? = .all
     var lastCleanup: CleanupReport?
+    /// Replaces the result sheet's title, for uninstalls.
+    var lastCleanupTitle: String?
     var showingConfirm = false
     var showingResult = false
     var errorMessage: String?
@@ -178,7 +183,7 @@ final class AppModel {
         switch item {
         case .all, nil: candidates
         case let .category(category): candidates.filter { $0.category == category }
-        case .map, .insights, .history: []
+        case .map, .insights, .history, .apps: []
         }
     }
 
@@ -193,6 +198,7 @@ final class AppModel {
         case .map: "Space Map"
         case .insights: "Insights"
         case .history: "History"
+        case .apps: "Applications"
         }
     }
 
@@ -367,6 +373,7 @@ final class AppModel {
             Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
         }
         lastCleanup = result
+        lastCleanupTitle = nil
         appendHistory(.cleanup(CleanupRecord(result, auto: auto)))
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
@@ -381,6 +388,124 @@ final class AppModel {
         } else {
             showingResult = true
         }
+    }
+
+    // MARK: Uninstall
+
+    var apps: [InstalledApp] = []
+    /// Measured in the background after the list loads; missing until then.
+    var appSizes: [String: Int64] = [:]
+    var loadingApps = false
+    private var sizeTask: Task<Void, Never>?
+    /// The app whose uninstall sheet is open.
+    var uninstallApp: InstalledApp?
+    /// Nil while the app's files are being found.
+    var uninstallFiles: [AppFile]?
+    var uninstallSelection = Set<String>()
+    /// Why the app can't be uninstalled right now (it's running).
+    var uninstallRefusal: String?
+    /// Only the latest `prepareUninstall` may fill the sheet.
+    private var uninstallRequest = UUID()
+
+    func loadApps() async {
+        guard !loadingApps else { return }
+        loadingApps = true
+        // Measured again: an app updated at the same path has a new size.
+        sizeTask?.cancel()
+        appSizes = [:]
+        let found = await Task.detached { AppCatalog.installed() }.value
+        // Published with their casks, so an app picked early still shows it's Homebrew's.
+        let casks = await AppCatalog.caskTokens()
+        apps = found.map { app in
+            var app = app
+            app.caskToken = casks[app.path.lowercased()]
+            return app
+        }
+        loadingApps = false
+        measureApps()
+    }
+
+    /// `du` over every app can take minutes (Xcode-sized bundles), so sizes fill in as they finish.
+    private func measureApps() {
+        sizeTask?.cancel()
+        let pending = apps.map(\.path).filter { appSizes[$0] == nil }
+        sizeTask = Task { [weak self] in
+            await withTaskGroup(of: (String, Int64).self) { group in
+                var queue = pending.makeIterator()
+                for _ in 0 ..< 4 {
+                    guard let path = queue.next() else { break }
+                    group.addTask { (path, await Size.allocated(path, timeout: 600)) }
+                }
+                for await (path, bytes) in group {
+                    // A reload replaced this task; its cut-short measurements read as zero.
+                    if Task.isCancelled { group.cancelAll(); return }
+                    self?.appSizes[path] = bytes
+                    if let next = queue.next() { group.addTask { (next, await Size.allocated(next, timeout: 600)) } }
+                }
+            }
+        }
+    }
+
+    /// Opens the uninstall sheet and finds the app's files.
+    func prepareUninstall(_ app: InstalledApp) {
+        guard !phase.isBusy else { return }
+        uninstallApp = app
+        uninstallFiles = nil
+        uninstallSelection = []
+        uninstallRefusal = nil
+        let request = UUID()
+        uninstallRequest = request
+        let casks = Dictionary(apps.compactMap { app in app.caskToken.map { (app.path.lowercased(), $0) } }) { first, _ in first }
+        Task {
+            async let refusal = Uninstaller().refusal(for: app)
+            // A fresh catalog, not the list on screen: it may still be loading, or another copy of
+            // the app may have arrived since, and either decides which files start checked.
+            let path = (app.path as NSString).standardizingPath
+            let others = await Task.detached { AppCatalog.installed() }.value
+                .filter { ($0.path as NSString).standardizingPath != path }
+            let files = await AppFiles.find(for: app, others: others)
+            let reason = await refusal
+            guard uninstallRequest == request else { return }
+            uninstallFiles = files
+            uninstallSelection = Set(files.filter { !$0.needsReview }.map(\.id))
+            uninstallRefusal = reason ?? Uninstaller.caskRefusal(for: app, casks: casks)
+        }
+    }
+
+    /// For an app dropped on the window. Returns whether it's one Arin can uninstall.
+    @discardableResult
+    func prepareUninstall(url: URL) -> Bool {
+        let path = (url.path as NSString).standardizingPath
+        let app = apps.first { ($0.path as NSString).standardizingPath == path }
+            ?? (Guardrails().applicationRoots.contains { path.lowercased().hasPrefix($0.lowercased() + "/") } ? AppCatalog.app(at: path) : nil)
+        guard let app else {
+            errorMessage = "Arin can uninstall apps in /Applications or ~/Applications, except Apple's own apps."
+            return false
+        }
+        prepareUninstall(app)
+        return true
+    }
+
+    /// Takes the sheet's app and checked files now, before the sheet closes and clears them.
+    func uninstall(_ app: InstalledApp) {
+        guard uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
+        let picked = files.filter { uninstallSelection.contains($0.id) }
+        uninstallApp = nil
+        guard !picked.isEmpty else { return }
+        phase = .uninstalling(app.name)
+        Task { await uninstall(app, files: picked) }
+    }
+
+    private func uninstall(_ app: InstalledApp, files picked: [AppFile]) async {
+        let result = await Uninstaller().run(app, files: picked)
+        lastCleanup = result
+        let removed = result.items.contains { $0.id == app.path && $0.status == .cleaned }
+        lastCleanupTitle = removed ? "Uninstalled \(app.name)" : "\(app.name) wasn't uninstalled"
+        appendHistory(.cleanup(CleanupRecord(result, auto: false, uninstalled: app.name)))
+        if removed { apps.removeAll { $0.path == app.path } }
+        refreshDisk()
+        phase = .idle
+        showingResult = true
     }
 
     // MARK: Keep list
