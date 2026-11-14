@@ -299,6 +299,15 @@ extension Sandbox {
         let kept = await uninstaller(box, keep: url).run(app, files: [file])
         #expect(kept.items.first?.status == .skipped && FileInfo.exists(support))
 
+        // A kept folder keeps the app's items inside it too.
+        let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
+        var folder = KeepList()
+        folder.add(id: "t:prefs", title: "Preferences", paths: ["\(box.root)/Library/Preferences"])
+        try folder.save(to: url)
+        let inside = await uninstaller(box, keep: url).run(app, files: [AppFile(path: prefs, kind: .preferences, bytes: 0, needsReview: false)])
+        #expect(inside.items.first?.status == .skipped && inside.items.first?.message.hasPrefix("inside Preferences") == true)
+        #expect(FileInfo.exists(prefs))
+
         try "{ not json".write(to: url, atomically: true, encoding: .utf8)
         let unreadable = await uninstaller(box, keep: url).run(app, files: [file])
         #expect(unreadable.items.first?.status == .skipped && FileInfo.exists(support))

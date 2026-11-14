@@ -419,8 +419,13 @@ public struct Uninstaller: Sendable {
         case let .failure(error):
             return result(.skipped, "\(error)")
         case let .success(list):
-            if let kept = KeptPaths(list.entries).insideOrAt(file.path) {
-                return result(.skipped, "contains \(kept.title)\(KeepList.keptBlockerSuffix)")
+            let kept = KeptPaths(list.entries)
+            if let entry = kept.insideOrAt(file.path) {
+                return result(.skipped, "contains \(entry.title)\(KeepList.keptBlockerSuffix)")
+            }
+            // Stricter than a cleanup: an app's item inside a kept folder stays with the folder.
+            if let entry = kept.around(file.path) {
+                return result(.skipped, "inside \(entry.title)\(KeepList.keptBlockerSuffix)")
             }
         }
         guard FileInfo.exists(file.path) || FileInfo.isSymlink(file.path) else { return result(.skipped, "already gone") }

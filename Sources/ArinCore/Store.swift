@@ -195,6 +195,12 @@ struct KeptPaths {
         let prefix = target.hasSuffix("/") ? target : target + "/"
         return items.first { $0.path == target || $0.path.hasPrefix(prefix) }?.entry
     }
+
+    /// The kept folder `target` is inside, compared by real path.
+    func around(_ target: String) -> KeepList.Entry? {
+        let target = KeepList.canonical(target)
+        return items.first { target.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }?.entry
+    }
 }
 
 extension Candidate {
