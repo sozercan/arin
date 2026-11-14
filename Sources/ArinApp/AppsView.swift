@@ -208,12 +208,12 @@ struct UninstallSheet: View {
         @Bindable var model = model
         return List(files) { file in
             HStack(alignment: .top) {
-                Toggle(isOn: Binding(
+                Toggle(Uninstaller.title(file, app: app), isOn: Binding(
                     get: { model.uninstallSelection.contains(file.id) },
                     set: { on in
                         if on { model.uninstallSelection.insert(file.id) } else { model.uninstallSelection.remove(file.id) }
                     }
-                )) { EmptyView() }
+                ))
                     .toggleStyle(.checkbox)
                     .labelsHidden()
                 VStack(alignment: .leading, spacing: 2) {

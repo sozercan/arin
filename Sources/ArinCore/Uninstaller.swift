@@ -79,9 +79,14 @@ public enum AppCatalog {
 
     /// The Homebrew cask that installed each app, keyed by the app's lowercased path.
     public static func caskTokens() async -> [String: String] {
+        await installedCasks() ?? [:]
+    }
+
+    /// Like `caskTokens`, but nil when Homebrew is installed and couldn't be asked.
+    public static func installedCasks() async -> [String: String]? {
         guard Shell.which("brew") != nil else { return [:] }
         let result = await Shell.run("brew", ["info", "--cask", "--json=v2", "--installed"], timeout: 60)
-        guard result.ok else { return [:] }
+        guard result.ok else { return nil }
         return parseCasks(Data(result.stdout.utf8))
     }
 
@@ -261,15 +266,39 @@ public struct Uninstaller: Sendable {
     /// Kept paths are refused here too. If the file exists but can't be read, nothing is removed.
     public var keepListURL: URL?
     public var captureState: @Sendable () async -> SystemState
+    /// Homebrew's casks by app path (see `AppCatalog.installedCasks`), asked again for every
+    /// uninstall: whether the bundle is removed with `brew` never depends on the caller's list.
+    public var casks: @Sendable () async -> [String: String]?
 
     public init(
         guardrails: Guardrails = Guardrails(),
         keepListURL: URL? = KeepList.defaultURL,
+        casks: @escaping @Sendable () async -> [String: String]? = { await AppCatalog.installedCasks() },
         captureState: @escaping @Sendable () async -> SystemState = { await SystemState.capture(includeOpenFiles: false) }
     ) {
         self.guardrails = guardrails
         self.keepListURL = keepListURL
+        self.casks = casks
         self.captureState = captureState
+    }
+
+    /// Why the app's cask can't be uninstalled here: `brew uninstall --cask` would also remove other
+    /// apps the cask installed, which weren't picked or checked.
+    public static func caskRefusal(for app: InstalledApp, casks: [String: String]) -> String? {
+        guard let token = app.caskToken else { return nil }
+        let own = app.path.lowercased()
+        let siblings = casks.filter { $0.value == token && $0.key != own && FileInfo.exists($0.key) }.keys.sorted()
+        guard !siblings.isEmpty else { return nil }
+        let names = siblings.map { displayName($0) }.joined(separator: ", ")
+        return "Homebrew's \(token) cask also installs \(names). Run brew uninstall --cask \(token) to remove them together."
+    }
+
+    /// The name as it's spelled on disk, for a lowercased path.
+    private static func displayName(_ path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return FileInfo.children((path as NSString).deletingLastPathComponent)
+            .map { ($0 as NSString).lastPathComponent }
+            .first { $0.lowercased() == name } ?? name
     }
 
     /// Why the app can't be uninstalled right now, or nil.
@@ -288,19 +317,33 @@ public struct Uninstaller: Sendable {
         // The bundle goes first: if it can't be removed, the app stays usable with its files.
         let ordered = files.filter { $0.kind == .app } + files.filter { $0.kind != .app }
         progress?(.started(total: ordered.count))
-        let state = await captureState()
         let others = AppCatalog.installed(roots: guardrails.applicationRoots).filter { Self.canonical($0.path) != Self.canonical(app.path) }
-        let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
-            ?? .success(KeepList())
-        var stop = await refusal(for: app, state: state)
+        // Homebrew's answer now, not the caller's: a cask's bundle must go through `brew`, and only
+        // when that removes nothing else.
+        var app = app
+        var stop: String?
+        if ordered.first?.kind == .app {
+            if let casks = await casks() {
+                app.caskToken = casks[app.path.lowercased()]
+                stop = Self.caskRefusal(for: app, casks: casks)
+            } else if let token = app.caskToken {
+                stop = "Homebrew didn't answer, so Arin can't tell what brew uninstall --cask \(token) would remove. Try again."
+            }
+        }
 
         var results: [CleanupItemResult] = []
         for (index, file) in ordered.enumerated() {
             progress?(.item(index: index, title: Self.title(file, app: app)))
-            let result = if let stop { Self.result(file, app: app, .skipped, stop) }
+            // Fresh for every item, as the executor does: an earlier item (`brew`) can take minutes,
+            // and the app may start or something may be kept meanwhile.
+            let state = await captureState()
+            let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
+                ?? .success(KeepList())
+            let refused = if let stop { stop } else { await refusal(for: app, state: state) }
+            let result = if let refused { Self.result(file, app: app, .skipped, refused) }
                 else { await remove(file, app: app, others: others, keep: keep, state: state) }
             if file.kind == .app, result.status != .cleaned, stop == nil {
-                stop = "left in place because \(app.name) itself wasn't removed"
+                stop = refused ?? "left in place because \(app.name) itself wasn't removed"
             }
             results.append(result)
             progress?(.finished(result))
@@ -380,7 +423,7 @@ public struct Uninstaller: Sendable {
         Guardrails.canonical((path as NSString).standardizingPath)
     }
 
-    static func title(_ file: AppFile, app: InstalledApp) -> String {
+    public static func title(_ file: AppFile, app: InstalledApp) -> String {
         file.kind == .app ? "\(app.name) app" : "\(file.kind.label): \(file.name)"
     }
 

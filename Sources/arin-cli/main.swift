@@ -272,7 +272,10 @@ func runUninstall(_ args: Args) async -> Int32 {
             print("  \(mark) \(pad(file.bytes.formattedBytes, 10)) \(pad(file.kind.label, 20)) \((file.path as NSString).abbreviatingWithTildeInPath)")
             if let note = file.note { print("        \(note)") }
         }
-        if let refusal = await uninstaller.refusal(for: app) { print("\n⚠︎ \(refusal)") }
+        let casks = Dictionary(apps.compactMap { app in app.caskToken.map { (app.path.lowercased(), $0) } }) { first, _ in first }
+        if let refusal = await uninstaller.refusal(for: app) ?? Uninstaller.caskRefusal(for: app, casks: casks) {
+            print("\n⚠︎ \(refusal)")
+        }
         print("\nDry run. Would move \(picked.count) items (\(picked.reduce(0) { $0 + $1.bytes }.formattedBytes)) to the Trash.")
         print("Re-run with --yes to uninstall\(picked.count < files.count ? ", or add --all to include the unchecked items" : "").")
         return 0

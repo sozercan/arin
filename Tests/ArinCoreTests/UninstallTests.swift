@@ -183,10 +183,18 @@ extension Sandbox {
 }
 
 @Suite struct UninstallerTests {
-    func uninstaller(_ box: Sandbox, running: [String] = [], keep: URL? = nil) -> Uninstaller {
-        Uninstaller(guardrails: box.guardrails, keepListURL: keep) {
+    func uninstaller(_ box: Sandbox, running: [String] = [], keep: URL? = nil,
+                     casks: [String: String]? = [:]) -> Uninstaller {
+        Uninstaller(guardrails: box.guardrails, keepListURL: keep, casks: { casks }) {
             SystemState(processPaths: running, openPaths: [], openFilesKnown: false)
         }
+    }
+
+    /// Numbers the snapshots an uninstall takes, so a test can change things between items.
+    final class Snapshots: @unchecked Sendable {
+        let lock = NSLock()
+        var count = 0
+        func next() -> Int { lock.withLock { defer { count += 1 }; return count } }
     }
 
     @Test func movesTheAppAndItsFilesToTheTrashAndPutsThemBack() async throws {
@@ -285,5 +293,64 @@ extension Sandbox {
         let report = await uninstaller(box).run(app, files: files)
         #expect(report.items.first?.status == .failed)
         #expect(report.items.last?.status == .skipped && FileInfo.exists(prefs))
+    }
+
+    @Test func checksTheKeepListAndRunningAppsAgainBeforeEachItem() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
+        let caches = try box.mkdir("Library/Caches/com.example.Foo")
+        let support = try box.mkdir("Library/Application Support/com.example.Foo")
+        let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
+        let files = [
+            AppFile(path: caches, kind: .caches, bytes: 0, needsReview: false),
+            AppFile(path: support, kind: .applicationSupport, bytes: 0, needsReview: false),
+            AppFile(path: prefs, kind: .preferences, bytes: 0, needsReview: false),
+        ]
+        let url = URL(fileURLWithPath: "\(box.root)/keep.json")
+        try KeepList().save(to: url)
+        let snapshots = Snapshots()
+        let running = "\(app.path)/Contents/MacOS/Foo"
+        // Support is kept, and the app starts, while earlier items are removed.
+        let uninstaller = Uninstaller(guardrails: box.guardrails, keepListURL: url, casks: { [:] }) {
+            let n = snapshots.next()
+            if n == 1 {
+                var list = KeepList()
+                list.add(id: "t:\(support)", title: "Foo's support", paths: [support])
+                try? list.save(to: url)
+            }
+            return SystemState(processPaths: n >= 2 ? [running] : [], openPaths: [], openFilesKnown: false)
+        }
+        let report = await uninstaller.run(app, files: files)
+        #expect(report.items.map(\.status) == [.cleaned, .skipped, .skipped], "\(report.items.map(\.message))")
+        #expect(report.items[1].message.contains(KeepList.keptBlockerSuffix))
+        #expect(report.items[2].message.contains("is running"))
+        #expect(!FileInfo.exists(caches) && FileInfo.exists(support) && FileInfo.exists(prefs))
+    }
+
+    @Test func refusesACaskThatAlsoInstallsOtherApps() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        var app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
+        let helper = try box.app("Foo Helper", id: "com.example.FooHelper")
+        let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
+        let files = await AppFiles.find(for: app, others: [], guardrails: box.guardrails)
+        let casks = [app.path.lowercased(): "foo", helper.lowercased(): "foo"]
+        // The caller didn't know it was a cask; Homebrew is asked again.
+        let report = await uninstaller(box, casks: casks).run(app, files: files)
+        #expect(report.items.allSatisfy { $0.status == .skipped }, "\(report.items.map(\.message))")
+        #expect(report.items[0].message.contains("also installs Foo Helper.app"))
+        #expect(FileInfo.exists(app.path) && FileInfo.exists(helper) && FileInfo.exists(prefs))
+
+        // Homebrew can't be asked: a known cask isn't trashed behind its back.
+        app.caskToken = "foo"
+        let unanswered = await uninstaller(box, casks: nil).run(app, files: files)
+        #expect(unanswered.items.allSatisfy { $0.status == .skipped } && FileInfo.exists(app.path))
+        #expect(unanswered.items[0].message.contains("Homebrew didn't answer"))
+
+        // Homebrew says it's not a cask (anymore): trashed like any other app.
+        let notACask = await uninstaller(box, casks: [:]).run(app, files: files)
+        #expect(notACask.items.allSatisfy { $0.status == .cleaned }, "\(notACask.items.map(\.message))")
+        #expect(notACask.items[0].message == "moved to Trash" && !FileInfo.exists(app.path))
     }
 }

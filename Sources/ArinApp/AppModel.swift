@@ -404,12 +404,14 @@ final class AppModel {
     var uninstallSelection = Set<String>()
     /// Why the app can't be uninstalled right now (it's running).
     var uninstallRefusal: String?
+    /// Only the latest `prepareUninstall` may fill the sheet.
+    private var uninstallRequest = UUID()
 
     func loadApps() async {
         guard !loadingApps else { return }
         loadingApps = true
         let found = await Task.detached { AppCatalog.installed() }.value
-        apps = found
+        // Published with their casks, so an app picked early still shows it's Homebrew's.
         let casks = await AppCatalog.caskTokens()
         apps = found.map { app in
             var app = app
@@ -446,15 +448,18 @@ final class AppModel {
         uninstallFiles = nil
         uninstallSelection = []
         uninstallRefusal = nil
+        let request = UUID()
+        uninstallRequest = request
         let others = apps.filter { $0.path != app.path }
+        let casks = Dictionary(apps.compactMap { app in app.caskToken.map { (app.path.lowercased(), $0) } }) { first, _ in first }
         Task {
             async let refusal = Uninstaller().refusal(for: app)
             let files = await AppFiles.find(for: app, others: others)
             let reason = await refusal
-            guard uninstallApp?.path == app.path else { return }
+            guard uninstallRequest == request else { return }
             uninstallFiles = files
             uninstallSelection = Set(files.filter { !$0.needsReview }.map(\.id))
-            uninstallRefusal = reason
+            uninstallRefusal = reason ?? Uninstaller.caskRefusal(for: app, casks: casks)
         }
     }
 
