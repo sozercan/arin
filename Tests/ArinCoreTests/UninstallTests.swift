@@ -180,6 +180,15 @@ extension Sandbox {
         // Names only count where apps use them.
         #expect(AppFiles.match("Code", kind: .containers, app: code, others: []) == nil)
     }
+
+    @Test func crashReportsNeedTheDateRightAfterTheExecutable() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let foo = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.foo")))
+        #expect(AppFiles.match("Foo-2026-01-01-000000.ips", kind: .crashReports, app: foo, others: []) == false)
+        #expect(AppFiles.match("Foo-Helper-2026-01-01-000000.ips", kind: .crashReports, app: foo, others: []) == nil)
+        #expect(AppFiles.match("Foo-notes.ips", kind: .crashReports, app: foo, others: []) == nil)
+    }
 }
 
 @Suite struct UninstallerTests {
@@ -352,5 +361,36 @@ extension Sandbox {
         let notACask = await uninstaller(box, casks: [:]).run(app, files: files)
         #expect(notACask.items.allSatisfy { $0.status == .cleaned }, "\(notACask.items.map(\.message))")
         #expect(notACask.items[0].message == "moved to Trash" && !FileInfo.exists(app.path))
+    }
+
+    @Test func seesTheAppRunningThroughASymlinkedFolder() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let real = try box.app("Foo", id: "com.example.Foo")
+        // ~/Applications/Vendor -> ~/Applications: the same bundle by another path.
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/Applications/Vendor", withDestinationPath: "\(box.root)/Applications")
+        let linked = "\(box.root)/Applications/Vendor/Foo.app"
+        let app = try #require(AppCatalog.app(at: linked))
+        let report = await uninstaller(box, running: ["\(real)/Contents/MacOS/Foo"])
+            .run(app, files: [AppFile(path: linked, kind: .app, bytes: 0, needsReview: false)])
+        #expect(report.items.first?.status == .skipped && report.items.first?.message.contains("is running") == true)
+        #expect(FileInfo.exists(real))
+        // And launched through the link, uninstalled by its real path.
+        let state = SystemState(processPaths: ["\(linked)/Contents/MacOS/Foo"], openPaths: [], openFilesKnown: false)
+        #expect(Uninstaller.isRunning(under: real, in: state))
+    }
+
+    @Test func leavesSharedFilesWhileAnotherCopyRuns() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
+        let copy = try box.app("Foo", id: "com.example.Foo", in: "Applications/Vendor")
+        let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
+        // Picked anyway (the sheet leaves it unchecked; `--all` takes it).
+        let report = await uninstaller(box, running: ["\(copy)/Contents/MacOS/Foo"])
+            .run(app, files: [AppFile(path: prefs, kind: .preferences, bytes: 0, needsReview: true)])
+        #expect(report.items.first?.status == .skipped, "\(report.items.map(\.message))")
+        #expect(report.items.first?.message.contains("is running and uses it") == true)
+        #expect(FileInfo.exists(prefs))
     }
 }

@@ -226,6 +226,8 @@ public enum AppFiles {
             guard let exe = app.executable?.lowercased(), exe.count >= 3,
                   !others.contains(where: { $0.executable?.lowercased() == exe }),
                   lower.hasPrefix(exe + "-"),
+                  // The date right after the name: `Foo-Helper-2026-…` is Foo Helper's.
+                  lower.dropFirst(exe.count + 1).prefixMatch(of: /\d{4}-\d{2}-\d{2}/) != nil,
                   [".ips", ".crash", ".diag", ".spin", ".hang"].contains(where: { lower.hasSuffix($0) })
             else { return nil }
             return false
@@ -287,18 +289,28 @@ public struct Uninstaller: Sendable {
     public static func caskRefusal(for app: InstalledApp, casks: [String: String]) -> String? {
         guard let token = app.caskToken else { return nil }
         let own = app.path.lowercased()
-        let siblings = casks.filter { $0.value == token && $0.key != own && FileInfo.exists($0.key) }.keys.sorted()
+        // Keys are lowercased; find each on disk as it's spelled, for case-sensitive volumes too.
+        let siblings = casks.filter { $0.value == token && $0.key != own }.keys
+            .map { FileInfo.actualCase($0) }
+            .filter { FileInfo.exists($0) }
+            .sorted()
         guard !siblings.isEmpty else { return nil }
-        let names = siblings.map { displayName($0) }.joined(separator: ", ")
+        let names = siblings.map { ($0 as NSString).lastPathComponent }.joined(separator: ", ")
         return "Homebrew's \(token) cask also installs \(names). Run brew uninstall --cask \(token) to remove them together."
     }
 
-    /// The name as it's spelled on disk, for a lowercased path.
-    private static func displayName(_ path: String) -> String {
-        let name = (path as NSString).lastPathComponent
-        return FileInfo.children((path as NSString).deletingLastPathComponent)
-            .map { ($0 as NSString).lastPathComponent }
-            .first { $0.lowercased() == name } ?? name
+    /// Whether a program inside `path` runs. Real paths are compared too: a bundle reached through
+    /// a symlinked folder, or launched through one, is the same bundle.
+    public static func isRunning(under path: String, in state: SystemState) -> Bool {
+        func real(_ path: String) -> String {
+            Guardrails.canonical(URL(fileURLWithPath: path).resolvingSymlinksInPath().path).lowercased()
+        }
+        let targets = Set([canonical(path).lowercased(), real(path)]).map { $0 + "/" }
+        return state.processPaths.contains { process in
+            guard process.hasPrefix("/") else { return false }
+            let raw = canonical(process).lowercased()
+            return targets.contains { raw.hasPrefix($0) } || targets.contains { real(process).hasPrefix($0) }
+        }
     }
 
     /// Why the app can't be uninstalled right now, or nil.
@@ -308,7 +320,7 @@ public struct Uninstaller: Sendable {
             return "\((app.path as NSString).lastPathComponent) changed since it was checked; look it up again"
         }
         let state = if let state { state } else { await captureState() }
-        if state.hasExecutable(under: app.path) { return "\(app.name) is running. Quit it first." }
+        if Self.isRunning(under: app.path, in: state) { return "\(app.name) is running. Quit it first." }
         return nil
     }
 
@@ -381,7 +393,11 @@ public struct Uninstaller: Sendable {
             }
         }
         guard FileInfo.exists(file.path) || FileInfo.isSymlink(file.path) else { return result(.skipped, "already gone") }
-        if state.hasExecutable(under: file.path) { return result(.skipped, "a program inside it is running") }
+        if Self.isRunning(under: file.path, in: state) { return result(.skipped, "a program inside it is running") }
+        // Another copy of the app shares these files; don't take them while it's using them.
+        if file.kind != .app, let copy = others.first(where: { $0.bundleID == app.bundleID && Self.isRunning(under: $0.path, in: state) }) {
+            return result(.skipped, "the copy at \((copy.path as NSString).abbreviatingWithTildeInPath) is running and uses it")
+        }
 
         if file.kind == .app, let token = app.caskToken, Guardrails.isCaskToken(token), Shell.which("brew") != nil {
             let command = CommandSpec("brew", ["uninstall", "--cask", token])

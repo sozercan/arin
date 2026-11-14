@@ -434,6 +434,8 @@ final class AppModel {
                     group.addTask { (path, await Size.allocated(path, timeout: 600)) }
                 }
                 for await (path, bytes) in group {
+                    // A reload replaced this task; its cut-short measurements read as zero.
+                    if Task.isCancelled { group.cancelAll(); return }
                     self?.appSizes[path] = bytes
                     if let next = queue.next() { group.addTask { (next, await Size.allocated(next, timeout: 600)) } }
                 }
@@ -450,10 +452,14 @@ final class AppModel {
         uninstallRefusal = nil
         let request = UUID()
         uninstallRequest = request
-        let others = apps.filter { $0.path != app.path }
         let casks = Dictionary(apps.compactMap { app in app.caskToken.map { (app.path.lowercased(), $0) } }) { first, _ in first }
         Task {
             async let refusal = Uninstaller().refusal(for: app)
+            // A fresh catalog, not the list on screen: it may still be loading, or another copy of
+            // the app may have arrived since, and either decides which files start checked.
+            let path = (app.path as NSString).standardizingPath
+            let others = await Task.detached { AppCatalog.installed() }.value
+                .filter { ($0.path as NSString).standardizingPath != path }
             let files = await AppFiles.find(for: app, others: others)
             let reason = await refusal
             guard uninstallRequest == request else { return }
