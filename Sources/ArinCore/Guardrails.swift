@@ -136,6 +136,8 @@ public struct Guardrails: Sendable {
         guard Self.uninstallFolders.contains(where: { parent == library + $0.lowercased() }) else {
             throw .outsideAllowedRoots(path)
         }
+        // `Preferences/ByHost` and `Logs/DiagnosticReports` are shared folders, not one app's item.
+        if Self.uninstallFolders.contains(where: { folded == library + $0.lowercased() }) { throw .protected(path) }
         let exceptions = Self.uninstallExceptions.map { "\(home)/\($0)".lowercased() }
         for protected in protectedPaths.map({ $0.lowercased() }) where !exceptions.contains(protected) {
             if folded == protected || folded.hasPrefix(protected + "/") || protected.hasPrefix(folded + "/") {

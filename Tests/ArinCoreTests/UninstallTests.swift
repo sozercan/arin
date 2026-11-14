@@ -43,6 +43,8 @@ extension Sandbox {
             "/System/Applications/Notes.app",
             "/Users/test/Documents/Foo.app",
             "/Users/test/Library/Preferences",
+            "/Users/test/Library/Preferences/ByHost",
+            "/Users/test/Library/Logs/DiagnosticReports",
             "/Users/test/Library/Preferences/com.apple.finder.plist",
             "/Users/test/Library/Preferences/.GlobalPreferences.plist",
             "/Users/test/Library/Group Containers/group.com.apple.notes",
@@ -179,6 +181,16 @@ extension Sandbox {
         #expect(AppFiles.match("Code", kind: .applicationSupport, app: code, others: []) == true)
         // Names only count where apps use them.
         #expect(AppFiles.match("Code", kind: .containers, app: code, others: []) == nil)
+    }
+
+    @Test func neverOffersASharedFolderAsAnAppsItem() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try #require(AppCatalog.app(at: try box.app("DiagnosticReports", id: "com.example.reports")))
+        let reports = try box.mkdir("Library/Logs/DiagnosticReports")
+        _ = try box.write("Library/Logs/DiagnosticReports/Other-2026-01-01-000000.ips")
+        let files = await AppFiles.find(for: app, others: [], guardrails: box.guardrails)
+        #expect(!files.contains { Uninstaller.canonical($0.path) == Uninstaller.canonical(reports) }, "\(files.map(\.path))")
     }
 
     @Test func crashReportsNeedTheDateRightAfterTheExecutable() throws {
@@ -375,6 +387,13 @@ extension Sandbox {
             .run(app, files: [AppFile(path: linked, kind: .app, bytes: 0, needsReview: false)])
         #expect(report.items.first?.status == .skipped && report.items.first?.message.contains("is running") == true)
         #expect(FileInfo.exists(real))
+        // Homebrew knows it by its real path; its other app keeps brew from running.
+        let helper = try box.app("Foo Helper", id: "com.example.FooHelper")
+        let casks = [real.lowercased(): "foo", helper.lowercased(): "foo"]
+        let cask = await uninstaller(box, casks: casks)
+            .run(app, files: [AppFile(path: linked, kind: .app, bytes: 0, needsReview: false)])
+        #expect(cask.items.first?.message.contains("also installs Foo Helper.app") == true, "\(cask.items.map(\.message))")
+        #expect(FileInfo.exists(real))
         // And launched through the link, uninstalled by its real path.
         let state = SystemState(processPaths: ["\(linked)/Contents/MacOS/Foo"], openPaths: [], openFilesKnown: false)
         #expect(Uninstaller.isRunning(under: real, in: state))
@@ -384,7 +403,8 @@ extension Sandbox {
         let box = try Sandbox()
         defer { box.cleanup() }
         let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
-        let copy = try box.app("Foo", id: "com.example.Foo", in: "Applications/Vendor")
+        // Capitalized differently: the same Library paths on a case-insensitive volume.
+        let copy = try box.app("Foo", id: "com.example.foo", in: "Applications/Vendor")
         let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
         // Picked anyway (the sheet leaves it unchecked; `--all` takes it).
         let report = await uninstaller(box, running: ["\(copy)/Contents/MacOS/Foo"])

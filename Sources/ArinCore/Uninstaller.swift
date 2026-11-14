@@ -288,9 +288,10 @@ public struct Uninstaller: Sendable {
     /// apps the cask installed, which weren't picked or checked.
     public static func caskRefusal(for app: InstalledApp, casks: [String: String]) -> String? {
         guard let token = app.caskToken else { return nil }
-        let own = app.path.lowercased()
+        let casks = canonicalKeys(casks)
+        let own: Set = [canonical(app.path).lowercased(), real(app.path).lowercased()]
         // Keys are lowercased; find each on disk as it's spelled, for case-sensitive volumes too.
-        let siblings = casks.filter { $0.value == token && $0.key != own }.keys
+        let siblings = casks.filter { $0.value == token && !own.contains($0.key) }.keys
             .map { FileInfo.actualCase($0) }
             .filter { FileInfo.exists($0) }
             .sorted()
@@ -302,9 +303,7 @@ public struct Uninstaller: Sendable {
     /// Whether a program inside `path` runs. Real paths are compared too: a bundle reached through
     /// a symlinked folder, or launched through one, is the same bundle.
     public static func isRunning(under path: String, in state: SystemState) -> Bool {
-        func real(_ path: String) -> String {
-            Guardrails.canonical(URL(fileURLWithPath: path).resolvingSymlinksInPath().path).lowercased()
-        }
+        func real(_ path: String) -> String { Self.real(path).lowercased() }
         let targets = Set([canonical(path).lowercased(), real(path)]).map { $0 + "/" }
         return state.processPaths.contains { process in
             guard process.hasPrefix("/") else { return false }
@@ -329,14 +328,14 @@ public struct Uninstaller: Sendable {
         // The bundle goes first: if it can't be removed, the app stays usable with its files.
         let ordered = files.filter { $0.kind == .app } + files.filter { $0.kind != .app }
         progress?(.started(total: ordered.count))
-        let others = AppCatalog.installed(roots: guardrails.applicationRoots).filter { Self.canonical($0.path) != Self.canonical(app.path) }
         // Homebrew's answer now, not the caller's: a cask's bundle must go through `brew`, and only
         // when that removes nothing else.
         var app = app
         var stop: String?
         if ordered.first?.kind == .app {
-            if let casks = await casks() {
-                app.caskToken = casks[app.path.lowercased()]
+            if let casks = await casks().map(Self.canonicalKeys) {
+                // Homebrew knows the bundle by its real path, not one through a symlinked folder.
+                app.caskToken = [Self.canonical(app.path), Self.real(app.path)].lazy.compactMap { casks[$0.lowercased()] }.first
                 stop = Self.caskRefusal(for: app, casks: casks)
             } else if let token = app.caskToken {
                 stop = "Homebrew didn't answer, so Arin can't tell what brew uninstall --cask \(token) would remove. Try again."
@@ -351,6 +350,8 @@ public struct Uninstaller: Sendable {
             let state = await captureState()
             let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
                 ?? .success(KeepList())
+            // Apps installed meanwhile own their files and may be running copies.
+            let others = otherApps(than: app)
             let refused = if let stop { stop } else { await refusal(for: app, state: state) }
             let result = if let refused { Self.result(file, app: app, .skipped, refused) }
                 else { await remove(file, app: app, others: others, keep: keep, state: state) }
@@ -395,7 +396,8 @@ public struct Uninstaller: Sendable {
         guard FileInfo.exists(file.path) || FileInfo.isSymlink(file.path) else { return result(.skipped, "already gone") }
         if Self.isRunning(under: file.path, in: state) { return result(.skipped, "a program inside it is running") }
         // Another copy of the app shares these files; don't take them while it's using them.
-        if file.kind != .app, let copy = others.first(where: { $0.bundleID == app.bundleID && Self.isRunning(under: $0.path, in: state) }) {
+        let id = app.bundleID.lowercased()
+        if file.kind != .app, let copy = others.first(where: { $0.bundleID.lowercased() == id && Self.isRunning(under: $0.path, in: state) }) {
             return result(.skipped, "the copy at \((copy.path as NSString).abbreviatingWithTildeInPath) is running and uses it")
         }
 
@@ -432,6 +434,23 @@ public struct Uninstaller: Sendable {
         let library = "\(guardrails.home)/Library/".lowercased()
         guard file.kind.folders.contains(where: { parent == library + $0.lowercased() }) else { return false }
         return AppFiles.match((path as NSString).lastPathComponent, kind: file.kind, app: app, others: others) != nil
+    }
+
+    /// Installed apps other than `app`, which may have been reached through a symlinked folder.
+    func otherApps(than app: InstalledApp) -> [InstalledApp] {
+        let own: Set = [Self.canonical(app.path).lowercased(), Self.real(app.path).lowercased()]
+        return AppCatalog.installed(roots: guardrails.applicationRoots)
+            .filter { !own.contains(Self.canonical($0.path).lowercased()) && !own.contains(Self.real($0.path).lowercased()) }
+    }
+
+    /// Cask paths in the guardrails' form, still lowercased.
+    static func canonicalKeys(_ casks: [String: String]) -> [String: String] {
+        Dictionary(casks.map { (Guardrails.canonical($0.key), $0.value) }) { first, _ in first }
+    }
+
+    /// The path with every symlink resolved, in the guardrails' form.
+    static func real(_ path: String) -> String {
+        Guardrails.canonical(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
     }
 
     /// `standardizingPath` turns /private/var into /var; compare the form the guardrails use.

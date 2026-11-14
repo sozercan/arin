@@ -410,6 +410,9 @@ final class AppModel {
     func loadApps() async {
         guard !loadingApps else { return }
         loadingApps = true
+        // Measured again: an app updated at the same path has a new size.
+        sizeTask?.cancel()
+        appSizes = [:]
         let found = await Task.detached { AppCatalog.installed() }.value
         // Published with their casks, so an app picked early still shows it's Homebrew's.
         let casks = await AppCatalog.caskTokens()
