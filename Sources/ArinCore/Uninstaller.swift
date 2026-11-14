@@ -90,6 +90,30 @@ public enum AppCatalog {
         return parseCasks(Data(result.stdout.utf8))
     }
 
+    /// `<prefix>/Caskroom` next to the `brew` on PATH.
+    public static func caskroom() -> String? {
+        guard let brew = Shell.which("brew") else { return nil }
+        let real = URL(fileURLWithPath: brew).resolvingSymlinksInPath().path
+        // `<prefix>/bin/brew`, or `<prefix>/Homebrew/bin/brew` on Intel Macs.
+        let candidates = [brew, real].map { (($0 as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent }
+            .flatMap { [$0, ($0 as NSString).deletingLastPathComponent] }
+            .map { "\($0)/Caskroom" }
+        return candidates.first { FileInfo.isDirectory($0) }
+    }
+
+    /// Where the cask's apps are, from its `<Caskroom>/<token>/<version>/<Name>.app` links.
+    static func caskroomApps(_ token: String, in caskroom: String) -> [String] {
+        guard Guardrails.isCaskToken(token) else { return [] }
+        return FileInfo.children("\(caskroom)/\(token)").flatMap { version in
+            FileInfo.children(version).compactMap { entry -> String? in
+                guard entry.lowercased().hasSuffix(".app"), FileInfo.isSymlink(entry),
+                      let target = try? FileManager.default.destinationOfSymbolicLink(atPath: entry)
+                else { return nil }
+                return target.hasPrefix("/") ? target : ((version as NSString).appendingPathComponent(target) as NSString).standardizingPath
+            }
+        }
+    }
+
     static func parseCasks(_ data: Data, appDir: String = "/Applications") -> [String: String] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let casks = root["casks"] as? [[String: Any]]
@@ -271,16 +295,20 @@ public struct Uninstaller: Sendable {
     /// Homebrew's casks by app path (see `AppCatalog.installedCasks`), asked again for every
     /// uninstall: whether the bundle is removed with `brew` never depends on the caller's list.
     public var casks: @Sendable () async -> [String: String]?
+    /// Homebrew's Caskroom, where each installed cask links to the apps it put in place.
+    public var caskroom: String?
 
     public init(
         guardrails: Guardrails = Guardrails(),
         keepListURL: URL? = KeepList.defaultURL,
         casks: @escaping @Sendable () async -> [String: String]? = { await AppCatalog.installedCasks() },
+        caskroom: String? = AppCatalog.caskroom(),
         captureState: @escaping @Sendable () async -> SystemState = { await SystemState.capture(includeOpenFiles: false) }
     ) {
         self.guardrails = guardrails
         self.keepListURL = keepListURL
         self.casks = casks
+        self.caskroom = caskroom
         self.captureState = captureState
     }
 
@@ -319,6 +347,8 @@ public struct Uninstaller: Sendable {
             return "\((app.path as NSString).lastPathComponent) changed since it was checked; look it up again"
         }
         let state = if let state { state } else { await captureState() }
+        // A live Mac always has processes; none means `ps` failed, and running apps can't be seen.
+        if state.processPaths.isEmpty { return "Arin couldn't list running apps, so it can't tell whether \(app.name) is running. Try again." }
         if Self.isRunning(under: app.path, in: state) { return "\(app.name) is running. Quit it first." }
         return nil
     }
@@ -401,7 +431,14 @@ public struct Uninstaller: Sendable {
             return result(.skipped, "the copy at \((copy.path as NSString).abbreviatingWithTildeInPath) is running and uses it")
         }
 
-        if file.kind == .app, let token = app.caskToken, Guardrails.isCaskToken(token), Shell.which("brew") != nil {
+        if file.kind == .app, let token = app.caskToken, Guardrails.isCaskToken(token) {
+            // `brew info` names apps relative to today's appdir; the Caskroom links to where the cask
+            // actually put them. `brew uninstall` must remove this bundle, not another copy.
+            let linked = caskroom.map { AppCatalog.caskroomApps(token, in: $0) } ?? []
+            guard linked.contains(where: { Self.real($0).lowercased() == Self.real(file.path).lowercased() }) else {
+                return result(.skipped, "Homebrew's \(token) cask doesn't point at this copy. If it's Homebrew's, run brew uninstall --cask \(token).")
+            }
+            guard Shell.which("brew") != nil else { return result(.skipped, "brew isn't on PATH, and \(token) is a Homebrew cask") }
             let command = CommandSpec("brew", ["uninstall", "--cask", token])
             let output = await Shell.run(command.executable, command.arguments, timeout: 600)
             if !FileInfo.exists(file.path) { return result(.cleaned, command.display) }

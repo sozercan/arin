@@ -205,11 +205,14 @@ extension Sandbox {
 
 @Suite struct UninstallerTests {
     func uninstaller(_ box: Sandbox, running: [String] = [], keep: URL? = nil,
-                     casks: [String: String]? = [:]) -> Uninstaller {
-        Uninstaller(guardrails: box.guardrails, keepListURL: keep, casks: { casks }) {
-            SystemState(processPaths: running, openPaths: [], openFilesKnown: false)
+                     casks: [String: String]? = [:], caskroom: String? = nil) -> Uninstaller {
+        Uninstaller(guardrails: box.guardrails, keepListURL: keep, casks: { casks }, caskroom: caskroom) {
+            SystemState(processPaths: Self.system + running, openPaths: [], openFilesKnown: false)
         }
     }
+
+    /// Something always runs; an empty list means `ps` failed.
+    static let system = ["/sbin/launchd"]
 
     /// Numbers the snapshots an uninstall takes, so a test can change things between items.
     final class Snapshots: @unchecked Sendable {
@@ -333,14 +336,14 @@ extension Sandbox {
         let snapshots = Snapshots()
         let running = "\(app.path)/Contents/MacOS/Foo"
         // Support is kept, and the app starts, while earlier items are removed.
-        let uninstaller = Uninstaller(guardrails: box.guardrails, keepListURL: url, casks: { [:] }) {
+        let uninstaller = Uninstaller(guardrails: box.guardrails, keepListURL: url, casks: { [:] }, caskroom: nil) {
             let n = snapshots.next()
             if n == 1 {
                 var list = KeepList()
                 list.add(id: "t:\(support)", title: "Foo's support", paths: [support])
                 try? list.save(to: url)
             }
-            return SystemState(processPaths: n >= 2 ? [running] : [], openPaths: [], openFilesKnown: false)
+            return SystemState(processPaths: Self.system + (n >= 2 ? [running] : []), openPaths: [], openFilesKnown: false)
         }
         let report = await uninstaller.run(app, files: files)
         #expect(report.items.map(\.status) == [.cleaned, .skipped, .skipped], "\(report.items.map(\.message))")
@@ -412,5 +415,35 @@ extension Sandbox {
         #expect(report.items.first?.status == .skipped, "\(report.items.map(\.message))")
         #expect(report.items.first?.message.contains("is running and uses it") == true)
         #expect(FileInfo.exists(prefs))
+    }
+
+    @Test func refusesWhenRunningAppsCantBeListed() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
+        let blind = Uninstaller(guardrails: box.guardrails, keepListURL: nil, casks: { [:] }, caskroom: nil) {
+            SystemState(processPaths: [], openPaths: [], openFilesKnown: false)
+        }
+        let report = await blind.run(app, files: [AppFile(path: app.path, kind: .app, bytes: 0, needsReview: false)])
+        #expect(report.items.first?.status == .skipped && report.items.first?.message.contains("couldn't list running apps") == true)
+        #expect(FileInfo.exists(app.path))
+    }
+
+    @Test func runsBrewOnlyForTheCopyTheCaskroomLinksTo() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
+        // The cask put its Foo.app in ~/Applications/Other; this one is a separate copy.
+        let elsewhere = try box.app("Foo", id: "com.example.Foo", in: "Applications/Other")
+        let caskroom = try box.mkdir("Caskroom/foo/1.0")
+        try FileManager.default.createSymbolicLink(atPath: "\(caskroom)/Foo.app", withDestinationPath: elsewhere)
+        let root = "\(box.root)/Caskroom"
+        #expect(AppCatalog.caskroomApps("foo", in: root).map(Uninstaller.real) == [Uninstaller.real(elsewhere)])
+
+        let report = await uninstaller(box, casks: [app.path.lowercased(): "foo"], caskroom: root)
+            .run(app, files: [AppFile(path: app.path, kind: .app, bytes: 0, needsReview: false)])
+        #expect(report.items.first?.status == .skipped, "\(report.items.map(\.message))")
+        #expect(report.items.first?.message.contains("doesn't point at this copy") == true)
+        #expect(FileInfo.exists(app.path) && FileInfo.exists(elsewhere))
     }
 }
