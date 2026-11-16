@@ -141,6 +141,8 @@ public struct Executor: Sendable {
             switch candidate.ruleID {
             case ProjectArtifactRule.ruleID:
                 reason = await ProjectArtifactRule.recheck(path)
+            case "xcode.derived-data" where candidate.id == "xcode.derived-data:orphaned" && !DerivedDataRule.workspaceIsGone(path):
+                reason = "its project or workspace is back; scan again"
             case "temp.stale", "unclassified", "unclassified.home", "xcode.derived-data":
                 reason = FileInfo.isDirectory(path) && !FileInfo.isSymlink(path)
                     ? await GitSafety.repositoryRefusal(in: path, skipPackageCaches: candidate.ruleID != "xcode.derived-data").map { "it \($0)" }

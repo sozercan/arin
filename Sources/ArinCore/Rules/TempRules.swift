@@ -92,8 +92,8 @@ extension TempRule {
     /// the standard `CACHEDIR.TAG`. Nil for anything else.
     static func recognizedCache(_ path: String) -> String? {
         func file(_ name: String) -> String { (path as NSString).appendingPathComponent(name) }
-        if let readme = FileManager.default.contents(atPath: file("README")),
-           String(decoding: readme.prefix(80), as: UTF8.self).hasPrefix("This directory holds cached build artifacts from the Go build system."),
+        if let readme = head(file("README"), 80),
+           String(decoding: readme, as: UTF8.self).hasPrefix("This directory holds cached build artifacts from the Go build system."),
            FileInfo.exists(file("trim.txt")) {
             return "a Go build cache"
         }
@@ -101,14 +101,21 @@ extension TempRule {
            FileInfo.exists(file("info.plist")) || FileInfo.isDirectory(file("ModuleCache.noindex")) || FileInfo.isDirectory(file("Index.noindex")) {
             return "Xcode build output (DerivedData)"
         }
-        if let handle = FileHandle(forReadingAtPath: file("CACHEDIR.TAG")) {
-            defer { try? handle.close() }
-            if let head = try? handle.read(upToCount: cacheTagSignature.utf8.count),
-               String(decoding: head, as: UTF8.self) == cacheTagSignature {
-                return "a folder its tool tagged as a cache (CACHEDIR.TAG)"
-            }
+        if let tag = head(file("CACHEDIR.TAG"), cacheTagSignature.utf8.count),
+           String(decoding: tag, as: UTF8.self) == cacheTagSignature {
+            return "a folder its tool tagged as a cache (CACHEDIR.TAG)"
         }
         return nil
+    }
+
+    /// The first `count` bytes of a regular file (not a symlink, FIFO, or device, which could block or
+    /// lead elsewhere), without reading the rest.
+    static func head(_ path: String, _ count: Int) -> Data? {
+        var info = stat()
+        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: count)
     }
 }
 

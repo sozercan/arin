@@ -107,11 +107,15 @@ public enum GitSafety {
         guard ignored.ok else { return "git couldn't list its ignored files" }
         let entries = ignored.stdout.split(separator: "\0").map(String.init)
         // An ignored folder that also holds a tracked file isn't listed as one; its ignored entries are
-        // listed one by one, so a repository there shows up only as its parts (HEAD, objects/, refs/).
+        // listed one by one, so a repository there shows up only as its parts (HEAD, objects/, refs/),
+        // and git never lists a .git entry beside them.
         for entry in entries {
             let parent = ((worktree as NSString).appendingPathComponent(entry) as NSString).deletingLastPathComponent
-            guard realPath(parent) != realPath(worktree), isGitDirectory(parent) else { continue }
-            return "the ignored files in \(relative(parent, to: worktree))/ are a git repository"
+            guard realPath(parent) != realPath(worktree) else { continue }
+            let dotGit = (parent as NSString).appendingPathComponent(".git")
+            if isGitDirectory(parent) || FileInfo.exists(dotGit) || FileInfo.isSymlink(dotGit) {
+                return "the ignored files in \(relative(parent, to: worktree))/ are in a git repository"
+            }
         }
         for entry in entries where entry.hasSuffix("/") {
             let path = (worktree as NSString).appendingPathComponent(String(entry.dropLast()))

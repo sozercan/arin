@@ -366,6 +366,36 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         #expect(FileInfo.exists("\(wt)/scratch/HEAD"))
     }
 
+    @Test func checkoutsInAnIgnoredFolderWithATrackedFileKeepTheWorktree() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let repo = try await makeRepo(box, "projects/app")
+        _ = try box.write("projects/app/.gitignore", "scratch/\n")
+        _ = try box.write("projects/app/scratch/.gitkeep", "")
+        try await git(repo, "add", ".gitignore")
+        try await git(repo, "add", "-f", "scratch/.gitkeep")
+        try await git(repo, "commit", "-q", "-m", "keep scratch")
+        let wt = "\(box.root)/projects/app.done"
+        try await git(repo, "worktree", "add", "-q", "-b", "done", wt)
+        let source = try await makeRepo(box, "upstream")
+
+        // A nested checkout whose git directory lives elsewhere, with an uncommitted edit.
+        try await git(box.root, "clone", "-q", "--separate-git-dir=\(box.root)/sep", source, "\(wt)/scratch/sub")
+        _ = try box.write("projects/app.done/scratch/sub/README", "edited")
+        let nested = try await scanWorktree(box, repo: repo, path: wt)
+        #expect(nested.blockers.contains { $0.contains("scratch/sub/") }, "\(nested.blockers)")
+
+        // A .git file in the partly ignored folder itself, which git doesn't list.
+        try FileManager.default.removeItem(atPath: "\(wt)/scratch/sub")
+        _ = try box.write("projects/app.done/scratch/notes.txt", "x")
+        _ = try box.write("projects/app.done/scratch/.git", "gitdir: \(box.root)/sep\n")
+        let direct = try await scanWorktree(box, repo: repo, path: wt)
+        #expect(direct.blockers.contains { $0.contains("scratch/") }, "\(direct.blockers)")
+        let result = await Executor(guardrails: box.guardrails).clean(direct, state: .empty)
+        #expect(result.status == .skipped, "\(result.message)")
+        #expect(FileInfo.exists("\(wt)/scratch/.git"))
+    }
+
     @Test func aCleanMergedWorktreeIsStillRemoved() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -455,6 +485,11 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         _ = try box.write("tmp/dd/info.plist", "<plist/>")
         _ = try box.write("tmp/tagged/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n")
         _ = try box.write("tmp/agent-scratch/notes.md", "plan")
+        // Only the start of a README is read; a large one doesn't change the answer.
+        _ = try box.write("tmp/bigreadme/README", String(repeating: "x", count: 4 << 20))
+        _ = try box.write("tmp/bigreadme/trim.txt", "1")
+        #expect(TempRule.recognizedCache("\(box.root)/tmp/bigreadme") == nil)
+        #expect(TempRule.head("\(box.root)/tmp/bigreadme/README", 80)?.count == 80)
 
         for rel in ["gocache", "dd", "tagged"] {
             let c = try await evaluate(box, rel)
@@ -544,6 +579,22 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         #expect(rechecked.status == .skipped, "\(rechecked.message)")
         #expect(FileInfo.exists("\(checkout)/README"))
         #expect(FileInfo.exists("\(box.root)/\(dd)/App-clean/SourcePackages/checkouts/dep/README"))
+    }
+
+    @Test func orphanedDerivedDataWhoseWorkspaceComesBackIsKept() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let workspace = "\(box.root)/projects/App/App.xcodeproj"
+        let plist = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": workspace], format: .xml, options: 0)
+        let dir = try box.mkdir("Library/Developer/Xcode/DerivedData/App-abc")
+        try plist.write(to: URL(fileURLWithPath: "\(dir)/info.plist"))
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        let orphaned = try #require(try await DerivedDataRule().discover(ctx).first { $0.id == "xcode.derived-data:orphaned" })
+        _ = try box.mkdir("projects/App/App.xcodeproj")
+        let result = await Executor(guardrails: box.guardrails).clean(orphaned, state: .empty)
+        #expect(result.status == .skipped && result.message.contains("scan again"), "\(result.message)")
+        #expect(FileInfo.exists(dir))
     }
 
     @Test func derivedDataForADeletedWorkspaceIsOrphaned() throws {
