@@ -44,9 +44,18 @@ public enum Shell {
         "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
     ]
 
+    /// Whether a variable passes git configuration on the command line (`git -c` and
+    /// `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`). These outrank the
+    /// repository's own config, so one could set `core.worktree` and point git at another checkout.
+    static func isGitConfigOverride(_ name: String) -> Bool {
+        name == "GIT_CONFIG_PARAMETERS" || name == "GIT_CONFIG_COUNT"
+            || name.hasPrefix("GIT_CONFIG_KEY_") || name.hasPrefix("GIT_CONFIG_VALUE_")
+    }
+
     public static var environment: [String: String] {
         var env = ProcessInfo.processInfo.environment
         for name in redirectingGitVariables { env.removeValue(forKey: name) }
+        for name in env.keys where isGitConfigOverride(name) { env.removeValue(forKey: name) }
         env["PATH"] = searchPath.joined(separator: ":")
         env["NO_COLOR"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"

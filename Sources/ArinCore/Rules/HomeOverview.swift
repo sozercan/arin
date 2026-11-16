@@ -55,8 +55,11 @@ enum HomeOverview {
         var reportable: [String] = []
         for path in picked where await GitSafety.repositoryRefusal(in: path, skipPackageCaches: true) == nil { reportable.append(path) }
 
+        // `du` finds the folders; the size shown is what deleting one would free (clones of files
+        // kept elsewhere count for little), so a folder that turns out small isn't reported.
+        let measured = await Size.allocated(reportable)
         return reportable.compactMap { path -> Candidate? in
-            guard let bytes = sizes[path], (try? guardrails.check(path)) != nil else { return nil }
+            guard let bytes = measured[path] ?? sizes[path], bytes >= minimum, (try? guardrails.check(path)) != nil else { return nil }
             let display = (path as NSString).abbreviatingWithTildeInPath
             return Candidate(
                 ruleID: "unclassified.home",

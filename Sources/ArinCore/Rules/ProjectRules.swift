@@ -292,7 +292,7 @@ enum ProjectActivity {
         for folder in FileInfo.children(root) {
             let name = (folder as NSString).lastPathComponent
             guard name == base || name.hasPrefix(base + "-") else { continue }
-            for file in FileInfo.children(folder).prefix(1000) where file.hasSuffix(".jsonl") {
+            for file in FileInfo.children(folder) where file.hasSuffix(".jsonl") {
                 if let date = FileInfo.modified(file), date > (newest ?? .distantPast) { newest = date }
             }
         }

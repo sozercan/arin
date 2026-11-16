@@ -121,6 +121,16 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         _ = try box.write("shared/wt/commondir", "../..\n")
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/shared") != nil)
 
+        // A name with a newline in it, and HEAD as a symlink, as git allows.
+        try await git(box.root, "clone", "-q", "--bare", source, "\(box.root)/odd/line\nbreak.git")
+        let newline = await GitSafety.repositoryRefusal(in: "\(box.root)/odd")
+        #expect(newline?.contains("break.git") == true, "\(newline ?? "nil")")
+        try await git(box.root, "clone", "-q", "--bare", source, "\(box.root)/linked/app.git")
+        try FileManager.default.removeItem(atPath: "\(box.root)/linked/app.git/HEAD")
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/linked/app.git/HEAD", withDestinationPath: "refs/heads/main")
+        let symlinked = await GitSafety.repositoryRefusal(in: "\(box.root)/linked")
+        #expect(symlinked?.contains("app.git") == true, "\(symlinked ?? "nil")")
+
         // A file that happens to be named HEAD is not a repository.
         _ = try box.write("plain/notes/HEAD", "x")
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/plain") == nil)
@@ -335,6 +345,27 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         #expect(try String(contentsOfFile: "\(wt)/README", encoding: .utf8).hasPrefix("edited"))
     }
 
+    @Test func aRepositoryInAnIgnoredFolderWithATrackedFileKeepsTheWorktree() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let repo = try await makeRepo(box, "projects/app")
+        _ = try box.write("projects/app/.gitignore", "scratch/\n")
+        _ = try box.write("projects/app/scratch/.gitkeep", "")
+        try await git(repo, "add", ".gitignore")
+        try await git(repo, "add", "-f", "scratch/.gitkeep")
+        try await git(repo, "commit", "-q", "-m", "keep scratch")
+        let wt = "\(box.root)/projects/app.done"
+        try await git(repo, "worktree", "add", "-q", "-b", "done", wt)
+        // `git ls-files --directory` lists scratch's parts, not scratch/, since it holds a tracked file.
+        try await git(wt, "init", "-q", "--bare", "scratch")
+
+        let c = try await scanWorktree(box, repo: repo, path: wt)
+        #expect(c.blockers.contains { $0.contains("scratch/") }, "\(c.blockers)")
+        let result = await Executor(guardrails: box.guardrails).clean(c, state: .empty)
+        #expect(result.status == .skipped, "\(result.message)")
+        #expect(FileInfo.exists("\(wt)/scratch/HEAD"))
+    }
+
     @Test func aCleanMergedWorktreeIsStillRemoved() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -367,6 +398,16 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
             #expect(Shell.redirectingGitVariables.contains(name))
         }
         #expect(Shell.environment["GIT_OPTIONAL_LOCKS"] == "0")
+    }
+
+    @Test func gitConfigOverridesFromTheEnvironmentAreDropped() {
+        for name in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12"] {
+            #expect(Shell.isGitConfigOverride(name))
+        }
+        for name in ["GIT_CONFIG_GLOBAL", "GIT_OPTIONAL_LOCKS", "PATH"] {
+            #expect(!Shell.isGitConfigOverride(name))
+        }
+        #expect(!Shell.environment.keys.contains { Shell.isGitConfigOverride($0) })
     }
 
     @Test func extraEnvironmentReachesTheCommand() async {

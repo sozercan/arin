@@ -19,7 +19,8 @@ public enum GitSafety {
         if skipPackageCaches {
             args += ["(", "-path", "*/pkg/mod", "-o", "-name", "node_modules", ")", "-prune", "-o"]
         }
-        args += ["(", "-name", ".git", "-print", "-prune", ")", "-o", "(", "-type", "f", "-name", "HEAD", "-print", ")"]
+        // NUL-separated, since a name can hold a newline. Git accepts HEAD as a symlink too.
+        args += ["(", "-name", ".git", "-print0", "-prune", ")", "-o", "(", "(", "-type", "f", "-o", "-type", "l", ")", "-name", "HEAD", "-print0", ")"]
         let found = await Shell.run("find", args, timeout: 180)
         guard found.ok else {
             return found.timedOut ? "too large to search for git repositories in time" : "parts of it couldn't be read to check for git repositories"
@@ -27,7 +28,7 @@ public enum GitSafety {
 
         var checkouts: [String] = []
         var mirrors: [String] = []
-        for line in found.lines {
+        for line in found.stdout.split(separator: "\0").map(String.init) {
             let name = (line as NSString).lastPathComponent
             let parent = (line as NSString).deletingLastPathComponent
             if name == ".git" {
@@ -104,7 +105,15 @@ public enum GitSafety {
 
         let ignored = await git(worktree, ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"])
         guard ignored.ok else { return "git couldn't list its ignored files" }
-        for entry in ignored.stdout.split(separator: "\0").map(String.init) where entry.hasSuffix("/") {
+        let entries = ignored.stdout.split(separator: "\0").map(String.init)
+        // An ignored folder that also holds a tracked file isn't listed as one; its ignored entries are
+        // listed one by one, so a repository there shows up only as its parts (HEAD, objects/, refs/).
+        for entry in entries {
+            let parent = ((worktree as NSString).appendingPathComponent(entry) as NSString).deletingLastPathComponent
+            guard realPath(parent) != realPath(worktree), isGitDirectory(parent) else { continue }
+            return "the ignored files in \(relative(parent, to: worktree))/ are a git repository"
+        }
+        for entry in entries where entry.hasSuffix("/") {
             let path = (worktree as NSString).appendingPathComponent(String(entry.dropLast()))
             guard !FileInfo.isSymlink(path) else { continue }
             if let reason = await repositoryRefusal(in: path, skipPackageCaches: true) {
@@ -199,7 +208,8 @@ public enum GitSafety {
 
     /// `HEAD` beside `objects/` and `refs/`, or beside `commondir` or `gitdir`.
     static func isGitDirectory(_ dir: String) -> Bool {
-        guard FileManager.default.fileExists(atPath: (dir as NSString).appendingPathComponent("HEAD")) else { return false }
+        let head = (dir as NSString).appendingPathComponent("HEAD")
+        guard FileInfo.exists(head) || FileInfo.isSymlink(head) else { return false }
         if sharesGitDirectory(dir) { return true }
         return FileInfo.isDirectory((dir as NSString).appendingPathComponent("objects"))
             && FileInfo.isDirectory((dir as NSString).appendingPathComponent("refs"))
