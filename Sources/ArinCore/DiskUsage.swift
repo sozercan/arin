@@ -7,7 +7,8 @@ import Foundation
 ///
 /// A folder's size is the sum of its files' private sizes, plus the blocks a family of clones shares
 /// when every clone in the family is inside the folder (deleting all of them frees those blocks too).
-/// Each hard-linked file counts once. Compressed files, and volumes that don't report a private size,
+/// A hard-linked file counts once, and only when all its links are inside: a link left elsewhere keeps
+/// its data. Compressed files, and volumes that don't report a private size,
 /// use allocated blocks. Snapshots and clones changed after they were made can still keep blocks, so
 /// the measured change in free space stays the reported result.
 enum DiskUsage {
@@ -43,7 +44,8 @@ enum DiskUsage {
         var bytes: Int64
         var device: UInt64
         var inode: UInt64
-        var linked: Bool
+        /// Hard links to the file, 1 when it has no others.
+        var links: UInt32
         /// Clone family and how many files are in it; nil when the file shares no blocks.
         var family: Family?
         var clones: UInt32 = 0
@@ -53,7 +55,7 @@ enum DiskUsage {
             bytes = Int64(stat.st_blocks) * 512
             device = UInt64(bitPattern: Int64(stat.st_dev))
             inode = UInt64(stat.st_ino)
-            linked = stat.st_nlink > 1 && (stat.st_mode & S_IFMT) != S_IFDIR
+            links = (stat.st_mode & S_IFMT) == S_IFDIR ? 1 : UInt32(stat.st_nlink)
         }
     }
 
@@ -64,11 +66,17 @@ enum DiskUsage {
 
     struct Tally {
         var total: Int64 = 0
-        var seenLinks = Set<[UInt64]>()
+        /// Hard-linked files by device and inode, with how many of their links were found.
+        var linked: [[UInt64]: UInt32] = [:]
         var families: [Family: (found: UInt32, clones: UInt32, shared: Int64)] = [:]
 
         mutating func add(_ file: FileSize) {
-            if file.linked, !seenLinks.insert([file.device, file.inode]).inserted { return }
+            if file.links > 1 {
+                let key = [file.device, file.inode]
+                let found = (linked[key] ?? 0) + 1
+                linked[key] = found
+                guard found == file.links else { return }
+            }
             total += file.bytes
             guard let family = file.family, file.clones > 1, file.shared > 0 else { return }
             var entry = families[family] ?? (0, file.clones, 0)
@@ -127,7 +135,7 @@ enum DiskUsage {
             let clones = u32(values + 48)
             guard objectType == regularFile, allocated >= 0 else { return size }
             size.inode = fileID
-            size.linked = links > 1
+            size.links = max(links, 1)
             size.bytes = allocated
             // APFS leaves a compressed file's data out of its private size.
             guard fork & privateSize != 0, flags & compressed == 0, privateBytes >= 0, privateBytes <= allocated else {

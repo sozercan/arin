@@ -72,7 +72,7 @@ Only items marked **Safe** at or below the chosen level are pre-selected. Build 
 - **Nothing that holds work.** Build output and temp folders are refused when git doesn't ignore them, tracks files in them, or a repository inside could hold commits that exist nowhere else (a clone in `.venv/src`, an edited SwiftPM checkout, a bare clone). A merged worktree is refused when an ignored folder in it holds a repository or a file is marked assume-unchanged or skip-worktree. Each check runs again right before the item is removed.
 - **Fails closed.** If Arin can't list open files, can't search a folder for repositories, or mise reports a tracked config it can't load, the item isn't cleaned.
 - **Always Keep.** Right-click an item and choose *Always Keep*. Kept items are never pre-selected, never sent for review, and refused by the cleaner, even when reached through another path or a symlink. If the keep list can't be read, Arin cleans nothing.
-- **Honest numbers.** Sizes count only the blocks deleting an item frees: an APFS clone whose original stays behind counts for almost nothing, unlike in `du`. Snapshots can still hold deleted blocks, so Arin measures the real change in free space and explains any gap.
+- **Honest numbers.** Sizes count only the blocks deleting an item frees: an APFS clone whose original stays behind, or a hard link with another link elsewhere, counts for almost nothing, unlike in `du`. Snapshots can still hold deleted blocks, so Arin measures the real change in free space and explains any gap.
 - **Put Back.** Anything moved to the Trash can be restored from History.
 
 ## In the app

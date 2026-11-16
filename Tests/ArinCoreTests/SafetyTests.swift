@@ -51,6 +51,16 @@ private func run(_ tool: String, _ args: [String], cwd: String? = nil) async thr
         let size = try #require(await Size.allocated(["\(box.root)/linked"])["\(box.root)/linked"])
         #expect(size >= 1024 * 1024 && size < 2 * 1024 * 1024, "\(size)")
     }
+
+    @Test func aHardLinkLeftOutsideKeepsTheData() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let a = try box.write("store/a", String(repeating: "x", count: 1024 * 1024))
+        _ = try box.mkdir("project")
+        try FileManager.default.linkItem(atPath: a, toPath: "\(box.root)/project/a")
+        let size = try #require(await Size.allocated(["\(box.root)/store"])["\(box.root)/store"])
+        #expect(size < 256 * 1024, "\(size)")
+    }
 }
 
 /// A repo with one commit, tagged 1.0.0.
@@ -132,6 +142,57 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         try await git(checkout, "commit", "-q", "--allow-empty", "-m", "local fix")
         let committed = await GitSafety.repositoryRefusal(in: build)
         #expect(committed?.contains("commits its mirror doesn't have") == true, "\(committed ?? "nil")")
+    }
+
+    @Test func swiftPMCheckoutsCompareTheirOwnRefsAgainstTheMirrorAsItIsNow() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let source = try await makeRepo(box, "dep")
+        let checkout = try await makeSwiftPMClones(box, in: "app/.build", source: source)
+        let build = "\(box.root)/app/.build"
+
+        // A commit kept only by a local tag.
+        try await git(checkout, "commit", "-q", "--allow-empty", "-m", "tagged locally")
+        try await git(checkout, "tag", "local-fix")
+        try await git(checkout, "checkout", "-q", "--detach", "1.0.0")
+        let tagged = await GitSafety.repositoryRefusal(in: build)
+        #expect(tagged?.contains("commits its mirror doesn't have") == true, "\(tagged ?? "nil")")
+        try await git(checkout, "tag", "-d", "local-fix")
+        #expect(await GitSafety.repositoryRefusal(in: build) == nil)
+
+        // A commit a stale remote-tracking ref claims the mirror has.
+        try await git(checkout, "commit", "-q", "--allow-empty", "-m", "local")
+        try await git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
+        let stale = await GitSafety.repositoryRefusal(in: build)
+        #expect(stale?.contains("commits its mirror doesn't have") == true, "\(stale ?? "nil")")
+    }
+
+    @Test func swiftPMMirrorsWithAStashOrWorktreesAreRefused() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let source = try await makeRepo(box, "dep")
+        _ = try await makeSwiftPMClones(box, in: "app/.build", source: source)
+        let build = "\(box.root)/app/.build"
+        let mirror = "\(build)/repositories/dep-0d6739d0"
+
+        try await git(mirror, "update-ref", "refs/stash", "1.0.0^{commit}")
+        let stashed = await GitSafety.repositoryRefusal(in: build)
+        #expect(stashed?.contains("stashed") == true, "\(stashed ?? "nil")")
+        try await git(mirror, "update-ref", "-d", "refs/stash")
+
+        try await git(mirror, "worktree", "add", "-q", "--detach", "\(box.root)/elsewhere", "1.0.0")
+        let worktree = await GitSafety.repositoryRefusal(in: build)
+        #expect(worktree?.contains("worktrees") == true, "\(worktree ?? "nil")")
+    }
+
+    @Test func aGitEntryGitCantReadStillCountsAsARepository() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.write("broken/.git", "not a gitdir line")
+        _ = try box.write("broken/node_modules/dep/index.js", "x")
+        #expect(await GitSafety.trackingRefusal("\(box.root)/broken/node_modules") != nil)
+        _ = try box.write("plain/node_modules/dep/index.js", "x")
+        #expect(await GitSafety.trackingRefusal("\(box.root)/plain/node_modules") == nil)
     }
 
     @Test func swiftPMClonesInACustomScratchPathPass() async throws {
@@ -380,6 +441,68 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         #expect(result.status == .cleaned, "\(result.message)")
         #expect(FileInfo.exists("\(box.root)/.bun/install/cache/links/pkg/index.js"))
         #expect(!FileInfo.exists("\(box.root)/.bun/install/cache/react@19.0.0@@@1"))
+    }
+
+    @Test func bunKeepsAGlobalStoreMadeAfterTheScan() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.write(".bun/install/cache/react@19.0.0@@@1/index.js", "x")
+        let rule = try #require(Catalog.cacheRules.first { $0.id == "bun.cache" } as? KnownPathRule)
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        let c = try #require(try await rule.discover(ctx).first)
+        #expect(c.paths == ["\(box.root)/.bun/install/cache/react@19.0.0@@@1"], "\(c.paths)")
+        _ = try box.write(".bun/install/cache/links/pkg/index.js", "x")
+        let result = await Executor(guardrails: box.guardrails).clean(c, state: .empty)
+        #expect(result.status == .cleaned, "\(result.message)")
+        #expect(FileInfo.exists("\(box.root)/.bun/install/cache/links/pkg/index.js"))
+    }
+
+    @Test func aSymlinkedBunCacheIsRemovedAsALink() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        _ = try box.write("elsewhere/cache/links/pkg/index.js", "x")
+        _ = try box.write("elsewhere/cache/react@19.0.0@@@1/index.js", "x")
+        _ = try box.mkdir(".bun/install")
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/.bun/install/cache", withDestinationPath: "\(box.root)/elsewhere/cache")
+        let rule = try #require(Catalog.cacheRules.first { $0.id == "bun.cache" } as? KnownPathRule)
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        let c = try #require(try await rule.discover(ctx).first)
+        #expect(c.paths == ["\(box.root)/.bun/install/cache"], "\(c.paths)")
+    }
+
+    @Test func derivedDataHoldingAnEditedPackageCheckoutIsKept() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let plist = try PropertyListSerialization.data(fromPropertyList: ["WorkspacePath": "\(box.root)/gone/App.xcodeproj"], format: .xml, options: 0)
+        let dd = "Library/Developer/Xcode/DerivedData"
+        for name in ["App-edited", "App-clean"] {
+            let dir = try box.mkdir("\(dd)/\(name)")
+            try plist.write(to: URL(fileURLWithPath: "\(dir)/info.plist"))
+        }
+        let source = try await makeRepo(box, "dep")
+        let checkout = try await makeSwiftPMClones(box, in: "\(dd)/App-edited/SourcePackages", source: source)
+        _ = try box.write("\(dd)/App-edited/SourcePackages/checkouts/dep/README", "edited")
+        _ = try await makeSwiftPMClones(box, in: "\(dd)/App-clean/SourcePackages", source: source)
+
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        let found = try await DerivedDataRule().discover(ctx)
+        let orphaned = try #require(found.first { $0.id == "xcode.derived-data:orphaned" })
+        #expect(orphaned.paths == ["\(box.root)/\(dd)/App-clean"], "\(orphaned.paths)")
+        let kept = try #require(found.first { $0.id == "xcode.derived-data:git-work" })
+        #expect(kept.paths == ["\(box.root)/\(dd)/App-edited"])
+        #expect(kept.blockers.contains { $0.contains("checkouts/dep") }, "\(kept.blockers)")
+        let skipped = await Executor(guardrails: box.guardrails).clean(kept, state: .empty)
+        #expect(skipped.status == .skipped, "\(skipped.message)")
+
+        // An edit made after the scan stops the delete too.
+        _ = try box.write("\(dd)/App-clean/SourcePackages/checkouts/dep/README", "edited later")
+        let rechecked = await Executor(guardrails: box.guardrails).clean(orphaned, state: .empty)
+        #expect(rechecked.status == .skipped, "\(rechecked.message)")
+        #expect(FileInfo.exists("\(checkout)/README"))
+        #expect(FileInfo.exists("\(box.root)/\(dd)/App-clean/SourcePackages/checkouts/dep/README"))
     }
 
     @Test func derivedDataForADeletedWorkspaceIsOrphaned() throws {

@@ -47,9 +47,8 @@ public enum GitSafety {
             return "contains a git repository at \(relative(parent, to: dir))"
         }
         for mirror in mirrors {
-            let bare = await git(mirror, ["rev-parse", "--is-bare-repository"])
-            guard bare.ok, bare.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
-                return "contains a git repository at \(relative(mirror, to: dir)) that isn't a bare SwiftPM mirror"
+            if let problem = await swiftPMMirrorProblem(mirror) {
+                return "contains a git repository at \(relative(mirror, to: dir)) that \(problem)"
             }
         }
         for checkout in checkouts {
@@ -69,7 +68,7 @@ public enum GitSafety {
         guard inside.ok else {
             // No repository anywhere above: nothing for git to protect. A .git that git can't use is
             // not the same as no repository.
-            if !inside.timedOut, ProjectActivity.gitDirectory(above: parent) == nil { return nil }
+            if !inside.timedOut, !hasGitEntry(above: parent) { return nil }
             return "git couldn't tell whether it's ignored"
         }
         guard inside.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
@@ -150,18 +149,53 @@ public enum GitSafety {
         else {
             return "doesn't come from SwiftPM's mirror beside it"
         }
-        // Commits the origin holds: its branches (as remote-tracking refs) and its tags. A tag only
-        // the checkout has doesn't count.
-        let tags = await git(checkout, ["ls-remote", "--tags", origin])
-        guard tags.ok else { return "git couldn't read its mirror" }
-        let tagged = Set(tags.lines.compactMap { $0.split(separator: "\t").first.map(String.init) })
-        let unique = await git(checkout, ["rev-list", "--max-count=1", "HEAD", "--branches", "--not", "--remotes"] + tagged.sorted())
+        // Every commit the checkout's own refs reach (HEAD, branches, tags, anything but the
+        // remote-tracking refs it fetched) must be in the mirror as it is now. Its remote-tracking refs
+        // can be stale, so the mirror's refs are read directly; ones the checkout never fetched are
+        // skipped.
+        let refs = await git(checkout, ["ls-remote", origin])
+        guard refs.ok else { return "git couldn't read its mirror" }
+        let mirrored = Set(refs.lines.compactMap { $0.split(separator: "\t").first.map(String.init) })
+        let unique = await git(checkout, ["rev-list", "--ignore-missing", "--max-count=1", "HEAD", "--exclude=refs/remotes/*", "--all", "--not"]
+            + mirrored.sorted())
         guard unique.ok else { return "git couldn't check" }
         if !unique.stdout.isEmpty { return "has commits its mirror doesn't have" }
         return nil
     }
 
+    /// Why a SwiftPM mirror holds work that fetching it again wouldn't restore, or nil. SwiftPM makes
+    /// it with `git clone --mirror` and only ever fetches into it, so it is bare, has no worktrees and
+    /// no stash. Commits pushed into it by hand can't be told apart from fetched ones without asking
+    /// the network; `swift package reset` deletes it the same way.
+    static func swiftPMMirrorProblem(_ mirror: String) async -> String? {
+        let bare = await git(mirror, ["rev-parse", "--is-bare-repository"])
+        guard bare.ok, bare.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
+            return "isn't a bare SwiftPM mirror"
+        }
+        let worktrees = (mirror as NSString).appendingPathComponent("worktrees")
+        if FileInfo.isSymlink(worktrees) || !FileInfo.children(worktrees).isEmpty { return "has linked worktrees" }
+        let stash = await git(mirror, ["rev-parse", "--verify", "-q", "refs/stash"])
+        switch stash.status {
+        case 1 where !stash.timedOut: return nil
+        case 0: return "has stashed changes"
+        default: return "git couldn't check"
+        }
+    }
+
     // MARK: Helpers
+
+    /// Whether a `.git` entry of any kind, or one that can't be looked at, is in `path` or a folder
+    /// above it. Unlike finding the git directory, this doesn't depend on reading the entry.
+    static func hasGitEntry(above path: String) -> Bool {
+        var dir = path
+        while true {
+            var info = stat()
+            if lstat((dir as NSString).appendingPathComponent(".git"), &info) == 0 || errno != ENOENT { return true }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir || parent.isEmpty { return false }
+            dir = parent
+        }
+    }
 
     /// `HEAD` beside `objects/` and `refs/`, or beside `commondir` or `gitdir`.
     static func isGitDirectory(_ dir: String) -> Bool {

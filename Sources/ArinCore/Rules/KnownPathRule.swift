@@ -22,8 +22,9 @@ public struct KnownPathRule: Rule {
     /// Move to Trash instead of deleting (for things the user may want back).
     public var useTrash: Bool
     public var titleForPath: (@Sendable (String) -> String)?
-    /// Entries directly inside a matched folder that are left in place. When one is there, the folder's
-    /// other entries are deleted instead of the folder itself.
+    /// Entries directly inside a matched folder that are left in place: the folder's other entries are
+    /// deleted instead of the folder itself, so a kept entry made after the scan survives too. A matched
+    /// symlink is removed as itself, never by deleting what it points to.
     public var keepNames: [String]
 
     public init(
@@ -74,7 +75,7 @@ public struct KnownPathRule: Rule {
         }
         if !keepNames.isEmpty {
             unique = unique.flatMap { path -> [String] in
-                guard keepNames.contains(where: { FileInfo.exists((path as NSString).appendingPathComponent($0)) }) else { return [path] }
+                guard FileInfo.isDirectory(path), !FileInfo.isSymlink(path) else { return [path] }
                 return FileInfo.children(path).filter { !keepNames.contains(($0 as NSString).lastPathComponent) }
             }
         }

@@ -11,10 +11,19 @@ struct DerivedDataRule: Rule {
         let entries = FileInfo.children(root)
         guard !entries.isEmpty else { return [] }
         let sizes = await Size.allocated(entries)
+        // Xcode's SwiftPM clones live in SourcePackages; an edited one is work, whatever its project.
+        let refusals = await concurrentMap(entries, limit: 4) { entry in
+            (entry, await GitSafety.repositoryRefusal(in: entry))
+        }
         var orphaned: [String] = []
         var stale: [String] = []
         var recent: [String] = []
-        for entry in entries {
+        var holdingWork: [(path: String, reason: String)] = []
+        for (entry, refusal) in refusals {
+            if let refusal {
+                holdingWork.append((entry, refusal))
+                continue
+            }
             if Self.workspaceIsGone(entry), !ctx.state.isBusy(entry) {
                 orphaned.append(entry)
                 continue
@@ -71,6 +80,24 @@ struct DerivedDataRule: Rule {
                 action: .delete(recent),
                 lastModified: recent.compactMap(FileInfo.modified).max(),
                 blockers: ["built within the last 3 hours"],
+                blockingProcesses: ["xcodebuild"]
+            ))
+        }
+        if !holdingWork.isEmpty {
+            let paths = holdingWork.map(\.path)
+            result.append(Candidate(
+                ruleID: id,
+                key: "git-work",
+                title: "Xcode DerivedData holding git work (\(paths.count))",
+                detail: "Build output with a package checkout or repository that may hold changes nothing else has.",
+                category: .xcode,
+                level: .deep,
+                risk: .review,
+                bytes: paths.reduce(0) { $0 + (sizes[$1] ?? 0) },
+                paths: paths,
+                action: .delete(paths),
+                lastModified: paths.compactMap(FileInfo.modified).max(),
+                blockers: holdingWork.map { "not cleaned: \(($0.path as NSString).lastPathComponent) \($0.reason)" },
                 blockingProcesses: ["xcodebuild"]
             ))
         }
