@@ -11,14 +11,44 @@ struct DerivedDataRule: Rule {
         let entries = FileInfo.children(root)
         guard !entries.isEmpty else { return [] }
         let sizes = await Size.allocated(entries)
+        // Xcode's SwiftPM clones live in SourcePackages; an edited one is work, whatever its project.
+        let refusals = await concurrentMap(entries, limit: 4) { entry in
+            (entry, await GitSafety.repositoryRefusal(in: entry))
+        }
+        var orphaned: [String] = []
         var stale: [String] = []
         var recent: [String] = []
-        for entry in entries {
+        var holdingWork: [(path: String, reason: String)] = []
+        for (entry, refusal) in refusals {
+            if let refusal {
+                holdingWork.append((entry, refusal))
+                continue
+            }
+            if Self.workspaceIsGone(entry), !ctx.state.isBusy(entry) {
+                orphaned.append(entry)
+                continue
+            }
             let activity = FileInfo.recentActivity(entry) ?? .distantPast
             let active = ctx.now.timeIntervalSince(activity) < activeWindow || ctx.state.isBusy(entry)
             if active { recent.append(entry) } else { stale.append(entry) }
         }
         var result: [Candidate] = []
+        if !orphaned.isEmpty {
+            result.append(Candidate(
+                ruleID: id,
+                key: "orphaned",
+                title: "Xcode DerivedData for deleted projects (\(orphaned.count))",
+                detail: "Build output whose project or workspace no longer exists, often a removed worktree. Nothing will build into it again.",
+                category: .xcode,
+                level: .quick,
+                risk: .safe,
+                bytes: orphaned.reduce(0) { $0 + (sizes[$1] ?? 0) },
+                paths: orphaned,
+                action: .delete(orphaned),
+                lastModified: orphaned.compactMap(FileInfo.modified).max(),
+                blockingProcesses: []
+            ))
+        }
         if !stale.isEmpty {
             result.append(Candidate(
                 ruleID: id,
@@ -53,7 +83,44 @@ struct DerivedDataRule: Rule {
                 blockingProcesses: ["xcodebuild"]
             ))
         }
+        if !holdingWork.isEmpty {
+            let paths = holdingWork.map(\.path)
+            result.append(Candidate(
+                ruleID: id,
+                key: "git-work",
+                title: "Xcode DerivedData holding git work (\(paths.count))",
+                detail: "Build output with a package checkout or repository that may hold changes nothing else has.",
+                category: .xcode,
+                level: .deep,
+                risk: .review,
+                bytes: paths.reduce(0) { $0 + (sizes[$1] ?? 0) },
+                paths: paths,
+                action: .delete(paths),
+                lastModified: paths.compactMap(FileInfo.modified).max(),
+                blockers: holdingWork.map { "not cleaned: \(($0.path as NSString).lastPathComponent) \($0.reason)" },
+                blockingProcesses: ["xcodebuild"]
+            ))
+        }
         return result
+    }
+}
+
+extension DerivedDataRule {
+    /// Whether the workspace or project a DerivedData folder was built for no longer exists, from the
+    /// `WorkspacePath` Xcode records in its `info.plist`. A folder without a readable path, or whose
+    /// workspace is on a volume that isn't mounted, is not orphaned.
+    static func workspaceIsGone(_ folder: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: (folder as NSString).appendingPathComponent("info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let workspace = plist["WorkspacePath"] as? String, workspace.hasPrefix("/")
+        else { return false }
+        let components = workspace.split(separator: "/")
+        if components.first == "Volumes", components.count > 1, !FileInfo.isDirectory("/Volumes/\(components[1])") {
+            return false
+        }
+        // Only a definite "no such file" counts; a folder that can't be read may still hold it.
+        var info = stat()
+        return lstat(workspace, &info) != 0 && errno == ENOENT
     }
 }
 

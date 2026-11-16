@@ -172,7 +172,8 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
     public var category: CleanupCategory
     public var level: Level
     public var risk: Risk
-    /// Allocated bytes as `du` reports them. APFS clones and snapshots can make the real gain smaller.
+    /// Estimated bytes deleting it would free (see `DiskUsage`). Snapshots and changed clones can still
+    /// make the real gain smaller; the measured change in free space is the result.
     public var bytes: Int64
     public var paths: [String]
     public var action: CleanupAction

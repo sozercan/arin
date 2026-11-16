@@ -125,6 +125,8 @@ struct MiseRule: Rule {
         }
         let env = ProcessInfo.processInfo.environment
         let dataDir = env["MISE_DATA_DIR"] ?? env["XDG_DATA_HOME"].map { "\($0)/mise" } ?? ctx.path(".local/share/mise")
+        // mise leaves out a tracked config it can't load, so a version only that config pins looks unused.
+        let unloadable = await Self.unloadableConfigs()
         var found: [Candidate] = []
         for (tool, entries) in tools.sorted(by: { $0.key < $1.key }) where !entries.isEmpty {
             let command = CommandSpec("mise", ["prune", "--tools", "--yes", tool])
@@ -142,9 +144,54 @@ struct MiseRule: Rule {
                 risk: .safe,
                 bytes: await Size.total(paths),
                 paths: paths,
-                action: .commands([command])
+                action: .commands([command]),
+                blockers: unloadable.map { ["not cleaned: \($0)"] } ?? []
             ))
         }
         return found
+    }
+
+    /// Why `mise prune` can't be trusted right now, or nil. mise logs "error loading tracked config
+    /// file <path>: <error>" for a tracked config it can't parse and then ignores it, so a version that
+    /// config pins counts as unused. Configs that no longer exist are fine. A dry run that fails, or a
+    /// path that can't be checked, also refuses.
+    static func unloadableConfigs(tool: String? = nil) async -> String? {
+        let result = await Shell.run(
+            "mise", ["prune", "--tools", "--dry-run"] + (tool.map { [$0] } ?? []),
+            environment: ["MISE_QUIET": "0", "MISE_LOG_LEVEL": "info"],
+            timeout: 60
+        )
+        guard result.ok else { return "`mise prune --dry-run` failed, so mise's view of your configs is unknown" }
+        let configs = unloadableConfigs(in: result.stdout + "\n" + result.stderr)
+        guard let first = configs.first else { return nil }
+        let more = configs.count > 1 ? " and \(configs.count - 1) more" : ""
+        return "mise can't load the tracked config \(first)\(more), so it could prune a version that config pins"
+    }
+
+    /// The tracked configs in mise output that failed to load and may still exist.
+    static func unloadableConfigs(in output: String) -> [String] {
+        let marker = "error loading tracked config file "
+        return output.split(separator: "\n").compactMap { line -> String? in
+            guard let range = line.range(of: marker) else { return nil }
+            let text = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            // The path is followed by ": <error>", and a path can itself contain ": ". Try each split.
+            var candidates: [String] = []
+            var search = text.startIndex
+            while let colon = text.range(of: ": ", range: search ..< text.endIndex) {
+                candidates.append(String(text[..<colon.lowerBound]))
+                search = colon.upperBound
+            }
+            candidates.append(text)
+            var sawPath = false
+            for candidate in candidates {
+                let path = (candidate as NSString).expandingTildeInPath
+                guard path.hasPrefix("/") else { continue }
+                sawPath = true
+                var info = stat()
+                if lstat(path, &info) == 0 || errno != ENOENT { return candidate }
+            }
+            // Text that isn't a path can't be shown to be gone.
+            return sawPath ? nil : text
+        }
     }
 }

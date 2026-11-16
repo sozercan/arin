@@ -52,25 +52,27 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 | **Containers & VMs** | Docker build cache and orphaned volumes, Lima and Colima downloads |
 | **Local AI models** | Ollama and LM Studio |
 | **Tool versions** | Old Codex and Claude releases, unused mise versions, extra Rust toolchains |
-| **System** | Stale temp build folders, Time Machine local snapshots |
+| **System** | Stale temp folders (Go caches and DerivedData copies start as Safe; anything else as Review), Time Machine local snapshots |
 | **Everything else** | A size overview of your home folder surfaces other large folders (agent output, logs, app data) under *Unclassified* |
 
 ## Cleanup levels
 
 | Level | Includes |
 |---|---|
-| **Quick** | Caches that refill on their own: package caches, idle DerivedData, unavailable simulators, stale temp folders, old tool versions |
+| **Quick** | Caches that refill on their own: package caches, idle DerivedData and DerivedData for deleted projects, unavailable simulators, stale temp caches, old tool versions |
 | **Standard** | Adds build output (`node_modules`, `.build`, venvs, `bin/`), merged worktrees, Docker build cache, app caches |
 | **Deep** | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, unrecognized app data |
 
-Only items marked **Safe** at or below the chosen level are pre-selected. Build output in a project you changed in the last 7 days is listed but not pre-selected.
+Only items marked **Safe** at or below the chosen level are pre-selected. Build output in a project you changed, or ran a Claude Code session in, during the last 7 days is listed but not pre-selected.
 
 ## Built to be careful
 
 - **The agent can only advise.** It can't run commands that change anything or add actions; Arin's rules and guardrails decide what can be done. Agent verdicts can make an item more cautious, and less cautious only for items no rule recognizes.
 - **Private folders stay private.** Claude Code is denied reads of credentials and personal folders (`~/.ssh`, `~/.aws`, keychains, cookies, Mail, Messages, Documents). Codex's read-only sandbox blocks writes and network access but not reads, so for Codex that rule lives only in the prompt. GitHub Copilot can only list and read the folders under review, and never your home folder as a whole or the private folders above.
+- **Nothing that holds work.** Build output and temp folders are refused when git doesn't ignore them, tracks files in them, or a repository inside could hold commits that exist nowhere else (a clone in `.venv/src`, an edited SwiftPM checkout, a bare clone). A merged worktree is refused when an ignored folder in it holds a repository or a file is marked assume-unchanged or skip-worktree. Each check runs again right before the item is removed.
+- **Fails closed.** If Arin can't list open files, can't search a folder for repositories, or mise reports a tracked config it can't load, the item isn't cleaned.
 - **Always Keep.** Right-click an item and choose *Always Keep*. Kept items are never pre-selected, never sent for review, and refused by the cleaner, even when reached through another path or a symlink. If the keep list can't be read, Arin cleans nothing.
-- **Honest numbers.** Folder sizes overstate what deleting frees because of APFS clones and snapshots. Arin measures the real change in free space and explains any gap.
+- **Honest numbers.** Sizes count only the blocks deleting an item frees: an APFS clone whose original stays behind, or a hard link with another link elsewhere, counts for almost nothing, unlike in `du`. Snapshots can still hold deleted blocks, so Arin measures the real change in free space and explains any gap.
 - **Put Back.** Anything moved to the Trash can be restored from History.
 
 ## In the app
@@ -100,6 +102,7 @@ arin history                               # past cleanups and what grew back
 arin apps                                  # apps you can uninstall
 arin uninstall Slack                       # dry run: the app and the files it keeps
 arin uninstall Slack --yes                 # move them to the Trash
+arin disk --warn-below 20GiB               # print a warning only when free space is low
 ```
 
 A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Run `arin --help` for every option.
@@ -113,6 +116,16 @@ mkdir -p ~/.claude/skills/arin && arin skill > ~/.claude/skills/arin/SKILL.md
 ```
 
 The agent gets nothing beyond the CLI: actions still come from Arin's rules, and the cleaner re-checks everything.
+
+To have Claude Code warn you when the disk is nearly full, add a `SessionStart` hook to `~/.claude/settings.json`. `arin disk --warn-below` prints only when free space is lower and always exits 0:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "arin disk --warn-below 20GiB" }] }]
+  }
+}
+```
 
 ## Uninstall
 

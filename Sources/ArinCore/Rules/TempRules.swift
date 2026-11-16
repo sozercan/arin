@@ -53,18 +53,27 @@ struct TempRule: Rule {
         }
         let name = String(entry.dropFirst(root.count + 1))
         // Agent scratch folders sometimes hold a git checkout with unpushed work, not just build output.
-        let checkout = await FileInfo.containsGitCheckout(entry)
+        let refusal = await GitSafety.repositoryRefusal(in: entry, skipPackageCaches: true)
+        // Being idle and holding no repository doesn't make a folder regenerable. Only a layout a tool
+        // is known to rebuild starts as Safe; anything else is for the user (or their agent) to judge.
+        let cache = Self.recognizedCache(entry)
+        var detail = entry.hasPrefix("/private/tmp")
+            ? "Scratch data in /tmp, idle for 3+ hours."
+            : "Scratch data in your per-user temp folder, idle for 3+ hours. macOS rarely cleans this on its own."
+        if let cache {
+            detail += " It's \(cache), which the tool rebuilds when it needs it."
+        } else {
+            detail += " Arin doesn't recognize what's inside; tools and agents usually leave build caches or test output here, but it may hold work."
+        }
+        if let refusal { blockers.append("not cleaned: it \(refusal)") }
         return [Candidate(
             ruleID: id,
             key: entry,
             title: "Temp: \(name)",
-            detail: (entry.hasPrefix("/private/tmp")
-                ? "Scratch data in /tmp, idle for 3+ hours. Usually build caches or test output left by tools and agents."
-                : "Scratch data in your per-user temp folder, idle for 3+ hours. macOS rarely cleans this on its own.")
-                + (checkout ? " It contains a git checkout (or parts couldn't be read), which may hold work that isn't pushed." : ""),
+            detail: detail,
             category: .temp,
             level: .quick,
-            risk: checkout ? .review : .safe,
+            risk: cache == nil || refusal != nil ? .review : .safe,
             bytes: bytes,
             paths: [entry],
             action: .delete([entry]),
@@ -72,6 +81,41 @@ struct TempRule: Rule {
             blockers: blockers,
             minIdleSeconds: idle
         )]
+    }
+}
+
+extension TempRule {
+    static let cacheTagSignature = "Signature: 8a477f597d28d172789f06886806bc55"
+
+    /// What a temp folder is, when its layout says a tool will rebuild it: a Go build cache (one-off
+    /// `GOCACHE` runs), an Xcode DerivedData folder (`-derivedDataPath` runs), or a folder that carries
+    /// the standard `CACHEDIR.TAG`. Nil for anything else.
+    static func recognizedCache(_ path: String) -> String? {
+        func file(_ name: String) -> String { (path as NSString).appendingPathComponent(name) }
+        if let readme = head(file("README"), 80),
+           String(decoding: readme, as: UTF8.self).hasPrefix("This directory holds cached build artifacts from the Go build system."),
+           FileInfo.exists(file("trim.txt")) {
+            return "a Go build cache"
+        }
+        if FileInfo.isDirectory(file("Build")),
+           FileInfo.exists(file("info.plist")) || FileInfo.isDirectory(file("ModuleCache.noindex")) || FileInfo.isDirectory(file("Index.noindex")) {
+            return "Xcode build output (DerivedData)"
+        }
+        if let tag = head(file("CACHEDIR.TAG"), cacheTagSignature.utf8.count),
+           String(decoding: tag, as: UTF8.self) == cacheTagSignature {
+            return "a folder its tool tagged as a cache (CACHEDIR.TAG)"
+        }
+        return nil
+    }
+
+    /// The first `count` bytes of a regular file (not a symlink, FIFO, or device, which could block or
+    /// lead elsewhere), without reading the rest.
+    static func head(_ path: String, _ count: Int) -> Data? {
+        var info = stat()
+        guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        return try? handle.read(upToCount: count)
     }
 }
 

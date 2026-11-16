@@ -136,7 +136,7 @@ public struct Scanner: Sendable {
             insights.append(Insight(
                 id: "lsof-unavailable",
                 title: "Open-file check unavailable",
-                detail: "lsof did not return results, so items can't be checked for open files. Quit busy apps before cleaning."
+                detail: "lsof did not return results, so items can't be checked for open files. Cleaning skips every item with files until the check works again."
             ))
         }
 

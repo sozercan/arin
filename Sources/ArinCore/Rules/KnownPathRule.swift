@@ -22,6 +22,10 @@ public struct KnownPathRule: Rule {
     /// Move to Trash instead of deleting (for things the user may want back).
     public var useTrash: Bool
     public var titleForPath: (@Sendable (String) -> String)?
+    /// Entries directly inside a matched folder that are left in place: the folder's other entries are
+    /// deleted instead of the folder itself, so a kept entry made after the scan survives too. A matched
+    /// symlink is removed as itself, never by deleting what it points to.
+    public var keepNames: [String]
 
     public init(
         id: String,
@@ -37,7 +41,8 @@ public struct KnownPathRule: Rule {
         minIdleSeconds: TimeInterval? = nil,
         perPath: Bool = false,
         useTrash: Bool = false,
-        titleForPath: (@Sendable (String) -> String)? = nil
+        titleForPath: (@Sendable (String) -> String)? = nil,
+        keepNames: [String] = []
     ) {
         self.id = id
         self.name = name
@@ -53,6 +58,7 @@ public struct KnownPathRule: Rule {
         self.perPath = perPath
         self.useTrash = useTrash
         self.titleForPath = titleForPath
+        self.keepNames = keepNames
     }
 
     public func discover(_ ctx: ScanContext) async throws -> [Candidate] {
@@ -66,6 +72,12 @@ public struct KnownPathRule: Rule {
         for raw in resolved.map({ ($0 as NSString).standardizingPath }) where FileInfo.exists(raw) {
             let path = FileInfo.actualCase(raw)
             if !unique.contains(path) { unique.append(path) }
+        }
+        if !keepNames.isEmpty {
+            unique = unique.flatMap { path -> [String] in
+                guard FileInfo.isDirectory(path), !FileInfo.isSymlink(path) else { return [path] }
+                return FileInfo.children(path).filter { !keepNames.contains(($0 as NSString).lastPathComponent) }
+            }
         }
         guard !unique.isEmpty else { return [] }
 

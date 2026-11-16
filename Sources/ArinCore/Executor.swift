@@ -19,7 +19,7 @@ public struct CleanupReport: Codable, Sendable {
     public var items: [CleanupItemResult]
     public var freeBefore: Int64
     public var freeAfter: Int64
-    /// What `du` said the cleaned items used. Not the same as space freed.
+    /// What the cleaned items were estimated to free. Not the same as space freed.
     public var estimatedBytes: Int64
     public var explanations: [String]
 
@@ -114,12 +114,43 @@ public struct Executor: Sendable {
 
     /// Checks that only make sense at the moment a command runs. Returns why it must not run.
     static func preflight(_ command: CommandSpec) async -> String? {
+        if command.executable == "mise", command.arguments.first == "prune", let tool = command.arguments.last,
+           let reason = await MiseRule.unloadableConfigs(tool: tool) {
+            return reason
+        }
         if command.executable == "ollama", command.arguments.first == "rm", let model = command.arguments.last {
             let loaded = await Shell.run("ollama", ["ps"], timeout: 20)
             guard loaded.ok else { return "couldn't check whether \(model) is loaded in Ollama" }
             if OllamaModelRule.parseTable(loaded.stdout).contains(where: { $0.name == model }) {
                 return "\(model) is loaded in Ollama right now"
             }
+        }
+        return nil
+    }
+
+    /// The rule's own safety checks, run again right before deleting: a repository can appear, or a
+    /// folder can become tracked, between the scan and the cleanup. Returns why it must not run.
+    static func recheck(_ candidate: Candidate) async -> String? {
+        let paths: [String]
+        switch candidate.action {
+        case let .delete(list), let .trash(list): paths = list
+        default: return nil
+        }
+        for path in paths {
+            let reason: String?
+            switch candidate.ruleID {
+            case ProjectArtifactRule.ruleID:
+                reason = await ProjectArtifactRule.recheck(path)
+            case "xcode.derived-data" where candidate.id == "xcode.derived-data:orphaned" && !DerivedDataRule.workspaceIsGone(path):
+                reason = "its project or workspace is back; scan again"
+            case "temp.stale", "unclassified", "unclassified.home", "xcode.derived-data":
+                reason = FileInfo.isDirectory(path) && !FileInfo.isSymlink(path)
+                    ? await GitSafety.repositoryRefusal(in: path, skipPackageCaches: candidate.ruleID != "xcode.derived-data").map { "it \($0)" }
+                    : nil
+            default:
+                reason = nil
+            }
+            if let reason { return "\((path as NSString).abbreviatingWithTildeInPath): \(reason)" }
         }
         return nil
     }
@@ -165,6 +196,10 @@ public struct Executor: Sendable {
             return result(.skipped, error.description)
         }
 
+        // Without the open-file snapshot, nothing shows whether an app or a build is using these files.
+        if !state.openFilesKnown, !candidate.paths.isEmpty {
+            return result(.skipped, "couldn't check for open files (lsof returned nothing); try again")
+        }
         // Re-check right before acting: things change between scan and clean.
         let live = state.blockers(
             paths: candidate.paths,
@@ -177,6 +212,10 @@ public struct Executor: Sendable {
             for path in candidate.paths where await FileInfo.hasRecentWrites(path, within: idle) {
                 return result(.skipped, "\((path as NSString).abbreviatingWithTildeInPath) was written recently (may be in use)")
             }
+        }
+
+        if let reason = await Self.recheck(candidate) {
+            return result(.skipped, "not cleaned: \(reason)")
         }
 
         switch candidate.action {
@@ -245,6 +284,11 @@ public struct Executor: Sendable {
             guard current.ok, current.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == head else {
                 return result(.skipped, "HEAD moved since the scan; rescan to recheck whether it's merged", false)
             }
+        }
+        // git checks only what `status` shows. Ignored folders (and any clone inside them) and files
+        // marked assume-unchanged or skip-worktree would go without a word.
+        if let reason = await GitSafety.worktreeRefusal(path) {
+            return result(.skipped, "not removed: \(reason)", false)
         }
         // No --force: git refuses if there are uncommitted or untracked files.
         let remove = await Shell.run("git", ["-C", repo, "worktree", "remove", path], timeout: 600)
@@ -328,7 +372,7 @@ public struct Executor: Sendable {
         if !snapshots.isEmpty {
             notes.append("\(snapshots.count) local snapshot(s) still reference deleted files. The space returns once they're removed, typically after a pending macOS update installs and you restart.")
         }
-        notes.append("du counts APFS clones and shared blocks in full, so the folder totals overstate what deleting frees.")
+        notes.append("Estimates leave out blocks shared with files elsewhere, but snapshots and clones changed after they were copied can still hold blocks a deleted item used.")
         if cleaned.contains(where: { $0.category == .containers }) {
             notes.append("Docker's disk image hands space back to macOS gradually.")
         }

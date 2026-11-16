@@ -8,10 +8,12 @@ public struct SystemState: Sendable {
     public var busyDirectories: Set<String>
     /// Open file paths themselves.
     public var openFiles: Set<String>
-    /// Whether the open-file snapshot succeeded; when false, open-file checks are skipped and reported.
+    /// Whether the open-file snapshot succeeded. When false the scan says so and the executor cleans nothing
+    /// that has paths, since nothing shows whether they're in use.
     public var openFilesKnown: Bool
 
-    public static let empty = SystemState(processPaths: [], busyDirectories: [], openFiles: [], openFilesKnown: false)
+    /// Nothing running and nothing open, as a complete snapshot.
+    public static let empty = SystemState(processPaths: [], busyDirectories: [], openFiles: [], openFilesKnown: true)
 
     public init(processPaths: [String], busyDirectories: Set<String>, openFiles: Set<String>, openFilesKnown: Bool) {
         self.processPaths = processPaths

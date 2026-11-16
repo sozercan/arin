@@ -3,7 +3,8 @@ import Foundation
 /// Regenerable build output inside project checkouts: dependency folders, build directories,
 /// tool caches marked with CACHEDIR.TAG, and git-ignored bin/ folders full of downloaded tools.
 struct ProjectArtifactRule: Rule {
-    let id = "projects.artifacts"
+    static let ruleID = "projects.artifacts"
+    let id = ProjectArtifactRule.ruleID
     let name = "Project build output"
 
     enum Kind: String {
@@ -66,6 +67,10 @@ struct ProjectArtifactRule: Rule {
             }
             if kind == .terraform { risk = .review }
             var blockers = ctx.state.isBusy(path) ? ["files inside are open by a running process"] : []
+            // Name and marker files say what a folder is, not that nothing in it is someone's work.
+            if let refusal = await Self.refusal(path) {
+                blockers.append("not cleaned: \(refusal)")
+            }
             if let active = ProjectActivity.lastActivity(project: project, artifact: path),
                ctx.now.timeIntervalSince(active) < Self.activeWindow {
                 blockers.append("project changed \(ProjectActivity.describe(active, now: ctx.now)), so it's not pre-selected")
@@ -85,6 +90,23 @@ struct ProjectArtifactRule: Rule {
                 blockers: blockers
             )
         }.compactMap { $0 }
+    }
+
+    /// Why the folder must not be deleted even though it looks like build output: git doesn't ignore
+    /// it, tracks files in it, or a repository inside holds work (an editable install's clone in
+    /// `.venv/src`, an edited SwiftPM checkout). Checked at scan time and again right before deleting.
+    static func refusal(_ path: String) async -> String? {
+        if let reason = await GitSafety.trackingRefusal(path) { return reason }
+        return await GitSafety.repositoryRefusal(in: path)
+    }
+
+    /// Re-checks a scanned folder right before it's deleted.
+    static func recheck(_ path: String) async -> String? {
+        guard !FileInfo.isSymlink(path) else { return "it's now a symlink" }
+        guard FileInfo.exists(path) else { return nil }
+        guard FileInfo.isDirectory(path) else { return "it's no longer a folder" }
+        guard await classify(path) != nil else { return "it no longer looks like build output" }
+        return await refusal(path)
     }
 
     static func classify(_ path: String) async -> Kind? {
@@ -135,7 +157,8 @@ struct ProjectArtifactRule: Rule {
     }
 
     /// A folder a tool marked as a cache with a valid CACHEDIR.TAG (pytest, mypy, ruff and others).
-    /// Only cache-named folders count, and never one that is itself a project or holds a checkout.
+    /// Only cache-named folders count, and never one that is itself a project. A checkout inside blocks
+    /// it like any other build output (see `refusal`).
     static func isTaggedCache(_ path: String) -> Bool {
         let name = (path as NSString).lastPathComponent
         guard name.hasPrefix(".") || name.lowercased().contains("cache") else { return false }
@@ -145,17 +168,13 @@ struct ProjectArtifactRule: Rule {
         try? handle.close()
         guard String(decoding: head, as: UTF8.self) == "Signature: 8a477f597d28d172789f06886806bc55" else { return false }
         let projectMarkers = [".git", "package.json", "Package.swift", "go.mod", "Cargo.toml", "pyproject.toml", "Makefile"]
-        if projectMarkers.contains(where: { FileInfo.exists((path as NSString).appendingPathComponent($0)) }) { return false }
-        return nestedCheckout(in: path) == nil
+        return !projectMarkers.contains(where: { FileInfo.exists((path as NSString).appendingPathComponent($0)) })
     }
 
     /// bin/ is safe when it holds only executables and tool trees (envtest's k8s/, Python envs).
-    /// Notes, scratch source, or nested checkouts make it a review item.
+    /// Notes or scratch source make it a review item; a checkout inside blocks it (see `refusal`).
     static func binLooksGenerated(_ path: String) -> (Bool, String) {
         var odd: [String] = []
-        if let checkout = nestedCheckout(in: path) {
-            odd.append(checkout)
-        }
         for child in FileInfo.children(path) {
             let name = (child as NSString).lastPathComponent
             if name.hasPrefix(".") { odd.append(name); continue }
@@ -168,33 +187,6 @@ struct ProjectArtifactRule: Rule {
         }
         if odd.isEmpty { return (true, "") }
         return (false, "Contains non-binary entries worth checking: \(odd.prefix(5).joined(separator: ", "))\(odd.count > 5 ? ", …" : "").")
-    }
-
-    /// Describes the first `.git` anywhere under `dir`, relative to it. Tool trees are small; a tree too large
-    /// to finish walking, or one with unreadable parts, is reported as possibly holding a checkout.
-    static func nestedCheckout(in dir: String) -> String? {
-        final class Failure: @unchecked Sendable { var path: String? }
-        let failure = Failure()
-        let root = URL(fileURLWithPath: dir)
-        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, errorHandler: { url, _ in
-            failure.path = failure.path ?? url.path
-            return true
-        }) else { return "contents could not be read" }
-        var seen = 0
-        let prefix = root.standardizedFileURL.path + "/"
-        while let url = walker.nextObject() as? URL {
-            if url.lastPathComponent == ".git" {
-                let parent = url.deletingLastPathComponent().standardizedFileURL.path + "/"
-                let relative = parent.hasPrefix(prefix) ? String(parent.dropFirst(prefix.count)) : parent
-                return "\(relative.isEmpty ? "./" : relative) (git checkout)"
-            }
-            seen += 1
-            if seen > 100_000 { return "contents too large to check" }
-        }
-        if let path = failure.path {
-            return "\((path as NSString).lastPathComponent) could not be read"
-        }
-        return nil
     }
 
     static func detail(_ kind: Kind) -> String {
@@ -246,11 +238,13 @@ func concurrentMap<T: Sendable, R: Sendable>(
 }
 
 /// When a project was last worked on, from cheap signals: git's index, HEAD and reflog for the
-/// enclosing repository (following a linked worktree's `.git` file), and the project's own files
-/// two levels down. Build output is skipped, since installs and builds rewrite it on their own.
+/// enclosing repository (following a linked worktree's `.git` file), the project's own files two
+/// levels down, and Claude Code sessions in the repository. Build output is skipped, since installs
+/// and builds rewrite it on their own.
 enum ProjectActivity {
-    static func lastActivity(project: String, artifact: String) -> Date? {
+    static func lastActivity(project: String, artifact: String, transcripts: String? = transcriptsRoot) -> Date? {
         var dates: [Date] = []
+        if let transcripts, let date = transcriptActivity(project: project, root: transcripts) { dates.append(date) }
         if let gitDir = gitDirectory(above: project) {
             for name in ["index", "HEAD", "logs/HEAD"] {
                 if let date = FileInfo.modified((gitDir as NSString).appendingPathComponent(name)) { dates.append(date) }
@@ -273,6 +267,49 @@ enum ProjectActivity {
             if seen > 2000 { break }
         }
         return dates.max()
+    }
+
+    /// Where Claude Code keeps its session transcripts, one folder per working directory.
+    static var transcriptsRoot: String {
+        let config = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? (NSHomeDirectory() as NSString).appendingPathComponent(".claude")
+        return (config as NSString).appendingPathComponent("projects")
+    }
+
+    /// Claude Code names a transcript folder after the session's working directory, with every
+    /// character other than an ASCII letter or digit replaced by `-`.
+    static func transcriptFolderName(_ path: String) -> String {
+        String(path.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+    }
+
+    /// The newest Claude Code transcript written in the project's repository or below it. An agent
+    /// session that only reads files or runs tests changes nothing else a scan can see. The match is by
+    /// name prefix, so a sibling such as `app-two` can count for `app`; that only makes a project look
+    /// more active.
+    static func transcriptActivity(project: String, root: String) -> Date? {
+        let base = transcriptFolderName(workTreeRoot(above: project) ?? project)
+        var newest: Date?
+        for folder in FileInfo.children(root) {
+            let name = (folder as NSString).lastPathComponent
+            guard name == base || name.hasPrefix(base + "-") else { continue }
+            for file in FileInfo.children(folder) where file.hasSuffix(".jsonl") {
+                if let date = FileInfo.modified(file), date > (newest ?? .distantPast) { newest = date }
+            }
+        }
+        return newest
+    }
+
+    /// The nearest folder at or above `path` that holds a `.git` entry.
+    static func workTreeRoot(above path: String) -> String? {
+        var dir = path
+        for _ in 0 ..< 8 {
+            let dotGit = (dir as NSString).appendingPathComponent(".git")
+            if FileInfo.exists(dotGit) || FileInfo.isSymlink(dotGit) { return dir }
+            let parent = (dir as NSString).deletingLastPathComponent
+            if parent == dir || parent.isEmpty { break }
+            dir = parent
+        }
+        return nil
     }
 
     /// The git directory for `path` or its nearest ancestor that has one.
