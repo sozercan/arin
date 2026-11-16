@@ -113,9 +113,10 @@ public enum Catalog {
         KnownPathRule(
             id: "bun.cache",
             name: "Bun cache",
-            detail: "`bun pm cache rm` only works inside a project, so the cache directories are deleted directly.",
+            detail: "`bun pm cache rm` only works inside a project, so the cache directories are deleted directly. The global store in `links/` stays: projects with `globalStore = true` link into it.",
             paths: [".bun/install/cache", "Library/Caches/.bun"],
-            blockingProcesses: ["bun"]
+            blockingProcesses: ["bun"],
+            keepNames: ["links"]
         ),
         KnownPathRule(
             id: "yarn.cache",

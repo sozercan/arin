@@ -31,7 +31,7 @@ Read [docs/learnings.md](docs/learnings.md) first. Every rule should trace back 
 - Actions come only from rules. Agent output is verdicts by candidate ID and never becomes a command or a path.
 - `Guardrails.swift` is the last line of defense. Keep protected paths and the command allowlist strict, and add a test for any change.
 - Prefer a tool's own cleanup command when it works. Delete directly only where the native command is known to fail.
-- Report the measured change in free space, not `du` totals, as the result.
+- Report the measured change in free space, not size estimates, as the result.
 
 ## Releasing
 

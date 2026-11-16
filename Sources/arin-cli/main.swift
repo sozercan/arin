@@ -15,6 +15,8 @@ commands:
   uninstall APP        Move an app and the files it keeps in ~/Library to the Trash
                        (dry run unless --yes). APP is a name, bundle ID, or path.
   skill                Print instructions that teach a coding agent to use arin
+  disk                 Free space on your home folder's volume. With --warn-below SIZE, print
+                       only when it's lower, and always exit 0 (for an agent's session hook)
 
 options:
   --level quick|standard|deep   Cleanup depth (default: standard)
@@ -32,6 +34,7 @@ options:
   --fetch                       git fetch --prune before classifying worktrees
   --trash                       clean: move to Trash instead of deleting
   --all                         uninstall: also take files matched only by name or shared with other apps
+  --warn-below SIZE             disk: warn only below this much free space (20GiB, 500GB, …)
   --yes                         clean: actually do it
   --json                        Machine-readable output
 """
@@ -48,6 +51,7 @@ struct Args {
     var plan: String?
     var out: String?
     var remove = false
+    var warnBelow: String?
     var positional: [String] = []
     var checkPRs = true
     var fetch = false
@@ -83,6 +87,7 @@ struct Args {
             case "--plan": plan = (try value(arg) as NSString).expandingTildeInPath
             case "--out": out = (try value(arg) as NSString).expandingTildeInPath
             case "--remove": remove = true
+            case "--warn-below": warnBelow = try value(arg)
             case "--no-pr": checkPRs = false
             case "--fetch": fetch = true
             case "--trash": trash = true
@@ -181,7 +186,7 @@ func printHistory(json: Bool) {
     if cleanups.isEmpty { print("No cleanups yet.") }
     for cleanup in cleanups.suffix(20).reversed() {
         let cleaned = cleanup.items.filter { $0.status == .cleaned }.count
-        print("\(cleanup.date.formatted(date: .abbreviated, time: .shortened))\(cleanup.auto ? " (auto)" : ""): freed \(max(cleanup.measuredBytes, 0).formattedBytes), \(cleaned)/\(cleanup.items.count) items, du estimate \(cleanup.estimatedBytes.formattedBytes)")
+        print("\(cleanup.date.formatted(date: .abbreviated, time: .shortened))\(cleanup.auto ? " (auto)" : ""): freed \(max(cleanup.measuredBytes, 0).formattedBytes), \(cleaned)/\(cleanup.items.count) items, estimate \(cleanup.estimatedBytes.formattedBytes)")
     }
 }
 
@@ -301,7 +306,7 @@ func summarize(_ report: ScanReport, level: Level) {
     print("Disk: \(disk.freeBytes.formattedBytes) free of \(disk.totalBytes.formattedBytes) (\(Int(disk.usedFraction * 100))% used)")
     printTable(report.candidates, level: level)
     let selected = report.candidates.filter { $0.isDefaultSelected(at: level) }
-    print("\nPre-selected at \(level.label): \(selected.count) items, \(selected.dedupedBytes.formattedBytes) (du estimate)")
+    print("\nPre-selected at \(level.label): \(selected.count) items, \(selected.dedupedBytes.formattedBytes) (estimate)")
     for insight in report.insights {
         print("\nⓘ \(insight.title)\(insight.bytes.map { " — \($0.formattedBytes)" } ?? "")\n  \(insight.detail)")
     }
@@ -309,6 +314,36 @@ func summarize(_ report: ScanReport, level: Level) {
         print("\n⚠︎ \(rule): \(error)")
     }
     print(String(format: "\nScan took %.0fs. Nothing was changed.", report.finishedAt.timeIntervalSince(report.startedAt)))
+}
+
+/// With --warn-below, problems go to stderr and the exit status stays 0, so a session hook never fails.
+func runDisk(_ args: Args) -> Int32 {
+    let hook = args.warnBelow != nil
+    var threshold: Int64?
+    if let raw = args.warnBelow {
+        guard let parsed = ByteSize.parse(raw) else {
+            eprint("arin disk: can't read the size \(raw); use a value such as 20GiB or 500GB")
+            return 0
+        }
+        threshold = parsed
+    }
+    let status = Disk.status()
+    guard status.totalBytes > 0 else {
+        eprint("arin disk: couldn't read free space on your home folder's volume")
+        return hook ? 0 : 1
+    }
+    if let threshold {
+        if status.freeBytes < threshold {
+            print("Low disk space: \(status.freeBytes.formattedBytes) free on the volume that holds your home folder, below \(threshold.formattedBytes). Run `arin scan` to see what can be reclaimed safely.")
+        }
+        return 0
+    }
+    if args.json {
+        printJSON(status)
+    } else {
+        print("\(status.freeBytes.formattedBytes) free of \(status.totalBytes.formattedBytes) (\(Int(status.usedFraction * 100))% used)")
+    }
+    return 0
 }
 
 func main() async -> Int32 {
@@ -361,7 +396,7 @@ func main() async -> Int32 {
             let data = try CleanupPlan(items).encoded()
             if let out = args.out {
                 try data.write(to: URL(fileURLWithPath: out), options: .atomic)
-                print("Saved a plan of \(items.count) items (\(items.dedupedBytes.formattedBytes) du estimate) to \(out).")
+                print("Saved a plan of \(items.count) items (\(items.dedupedBytes.formattedBytes) estimate) to \(out).")
                 print("Run it with: arin clean --plan \(out) --yes")
             } else {
                 print(String(decoding: data, as: UTF8.self))
@@ -382,6 +417,9 @@ func main() async -> Int32 {
     case "skill":
         print(agentSkill)
         return 0
+
+    case "disk":
+        return runDisk(args)
 
     case "apps":
         let apps = await installedApps()
@@ -428,7 +466,7 @@ func main() async -> Int32 {
             return 0
         }
         guard args.yes else {
-            print("Dry run. Would clean \(picked.count) items (\(picked.dedupedBytes.formattedBytes) du estimate):")
+            print("Dry run. Would clean \(picked.count) items (\(picked.dedupedBytes.formattedBytes) estimate):")
             for c in picked { print("  \(pad(c.bytes.formattedBytes, 10)) \(c.title)\n             \(c.action.summary)") }
             print("\nRe-run with --yes to clean.")
             return 0
@@ -442,7 +480,7 @@ func main() async -> Int32 {
         if args.json {
             printJSON(result)
         } else {
-            print("\nCleaned \(result.cleanedCount)/\(result.items.count). du estimate \(result.estimatedBytes.formattedBytes); free space changed by \(result.measuredBytes.formattedBytes) (\(result.freeBefore.formattedBytes) → \(result.freeAfter.formattedBytes)).")
+            print("\nCleaned \(result.cleanedCount)/\(result.items.count). Estimated \(result.estimatedBytes.formattedBytes); free space changed by \(result.measuredBytes.formattedBytes) (\(result.freeBefore.formattedBytes) → \(result.freeAfter.formattedBytes)).")
             for note in result.explanations { print("  • \(note)") }
         }
         return result.items.contains { $0.status == .failed } ? 1 : 0

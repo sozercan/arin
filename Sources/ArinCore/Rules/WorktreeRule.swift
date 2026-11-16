@@ -158,6 +158,9 @@ struct WorktreeRule: Rule {
         if dirty > 0 { notes.append("Has \(dirty) uncommitted or untracked files; `git worktree remove` will refuse until you look.") }
         var blockers: [String] = []
         if ctx.state.isBusy(entry.path) { blockers.append("a process is working inside it") }
+        if dirty == 0, let refusal = await GitSafety.worktreeRefusal(entry.path) {
+            blockers.append("not removed: \(refusal)")
+        }
         if entry.path.contains("/.t3/worktrees/") {
             risk = max(risk, .review)
             notes.append("Created by T3; a live thread may still use it and recreate it.")

@@ -34,8 +34,19 @@ public enum Shell {
         return dirs
     }()
 
+    /// Variables that point git at another repository, index, or object store, or change how it reads
+    /// paths. A parent such as a git hook can set them; every `git -C <dir>` would then inspect the
+    /// wrong repository.
+    static let redirectingGitVariables = [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+    ]
+
     public static var environment: [String: String] {
         var env = ProcessInfo.processInfo.environment
+        for name in redirectingGitVariables { env.removeValue(forKey: name) }
         env["PATH"] = searchPath.joined(separator: ":")
         env["NO_COLOR"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
@@ -60,6 +71,7 @@ public enum Shell {
         _ arguments: [String] = [],
         cwd: String? = nil,
         input: String? = nil,
+        environment extra: [String: String] = [:],
         timeout: TimeInterval = 60
     ) async -> ShellResult {
         guard let exe = which(executable) else {
@@ -71,7 +83,7 @@ public enum Shell {
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async {
-                    continuation.resume(returning: runBlocking(exe, arguments, cwd: cwd, input: input, timeout: timeout, handle: handle))
+                    continuation.resume(returning: runBlocking(exe, arguments, cwd: cwd, input: input, extra: extra, timeout: timeout, handle: handle))
                 }
             }
         } onCancel: {
@@ -84,6 +96,7 @@ public enum Shell {
         _ arguments: [String],
         cwd: String?,
         input: String?,
+        extra: [String: String],
         timeout: TimeInterval,
         handle: ProcessHandle
     ) -> ShellResult {
@@ -107,7 +120,7 @@ public enum Shell {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = arguments
-        process.environment = environment
+        process.environment = environment.merging(extra) { _, new in new }
         if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         process.standardOutput = outHandle
         process.standardError = errHandle

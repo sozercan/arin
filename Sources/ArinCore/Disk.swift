@@ -41,3 +41,24 @@ public enum Disk {
         return names.sorted()
     }
 }
+
+public enum ByteSize {
+    /// Parses sizes such as `20GiB`, `20G`, `500MB`, or `1.5 TiB`. `KiB`/`MiB`/`GiB`/`TiB` and the bare
+    /// letters are powers of 1024; `KB`/`MB`/`GB`/`TB` are powers of 1000. A plain number is bytes.
+    public static func parse(_ text: String) -> Int64? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard let match = trimmed.wholeMatch(of: /([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)/),
+              let number = Double(match.1)
+        else { return nil }
+        let units: [String: Double] = [
+            "": 1, "b": 1,
+            "k": 1024, "kib": 1024, "m": 1_048_576, "mib": 1_048_576,
+            "g": 1_073_741_824, "gib": 1_073_741_824, "t": 1_099_511_627_776, "tib": 1_099_511_627_776,
+            "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+        ]
+        guard let unit = units[String(match.2).lowercased()] else { return nil }
+        let bytes = number * unit
+        guard bytes.isFinite, bytes < Double(Int64.max) else { return nil }
+        return Int64(bytes)
+    }
+}

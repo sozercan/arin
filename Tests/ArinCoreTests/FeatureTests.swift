@@ -248,11 +248,14 @@ private func setModified(_ path: String, daysAgo: Double) throws {
         #expect(await ProjectArtifactRule.classify("\(p)/py/.pytest_cache") == .taggedCache)
         #expect(await ProjectArtifactRule.classify("\(p)/py/.fake_cache") == nil)
         #expect(await ProjectArtifactRule.classify("\(p)/py/data") == nil)
-        #expect(await ProjectArtifactRule.classify("\(p)/py/.mypy_cache") == nil)
+        // A tagged cache that holds a checkout is still a cache, but it is blocked (see SafetyTests).
+        #expect(await ProjectArtifactRule.classify("\(p)/py/.mypy_cache") == .taggedCache)
 
         let found = try await ProjectArtifactRule().discover(context(box))
         let names = Set(found.map { ($0.paths[0] as NSString).lastPathComponent + "@" + (($0.paths[0] as NSString).deletingLastPathComponent as NSString).lastPathComponent })
-        #expect(names == [".next@web", "build@android", ".terraform@infra", ".pytest_cache@py"])
+        #expect(names == [".next@web", "build@android", ".terraform@infra", ".pytest_cache@py", ".mypy_cache@py"])
+        let mypy = try #require(found.first { $0.paths[0].hasSuffix(".mypy_cache") })
+        #expect(mypy.blockers.contains { $0.contains("vendored") } && !mypy.isDefaultSelected(at: .deep), "\(mypy.blockers)")
         #expect(found.first { $0.paths[0].hasSuffix(".terraform") }?.risk == .review)
     }
 }

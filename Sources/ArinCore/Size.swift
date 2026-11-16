@@ -1,19 +1,32 @@
 import Foundation
 
 public enum Size {
-    /// Allocated bytes per path via `du -sk`. Missing paths are omitted.
-    /// `du` counts APFS clones in full, so totals can overstate what deleting frees.
+    /// What deleting each path would free, as `DiskUsage` measures it: APFS clones count only their
+    /// private blocks unless the whole clone family is inside the path. Missing paths are omitted, and
+    /// so is a path whose walk doesn't finish within `timeout`.
     public static func allocated(_ paths: [String], timeout: TimeInterval = 180) async -> [String: Int64] {
-        let existing = paths.filter { FileManager.default.fileExists(atPath: $0) }
+        let existing = paths.filter { FileManager.default.fileExists(atPath: $0) || FileInfo.isSymlink($0) }
         guard !existing.isEmpty else { return [:] }
-        var sizes: [String: Int64] = [:]
-        for chunk in existing.chunked(64) {
-            let result = await Shell.run("du", ["-sk"] + chunk, timeout: timeout)
-            for (path, kb) in parseDu(result.stdout) {
-                sizes[path, default: 0] += kb * 1024
-            }
+        let deadline = Date().addingTimeInterval(timeout)
+        let measured = await concurrentMap(existing, limit: 4) { path -> (String, Int64?) in
+            (path, await measure(path, deadline: deadline))
         }
+        var sizes: [String: Int64] = [:]
+        for (path, bytes) in measured { if let bytes { sizes[path] = bytes } }
         return sizes
+    }
+
+    static func measure(_ path: String, deadline: Date) async -> Int64? {
+        let flag = CancelFlag()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: DiskUsage.measure(path, deadline: deadline, cancelled: flag))
+                }
+            }
+        } onCancel: {
+            flag.set()
+        }
     }
 
     public static func allocated(_ path: String, timeout: TimeInterval = 180) async -> Int64 {
@@ -81,20 +94,6 @@ public enum FileInfo {
         guard exists(path) || isSymlink(path) else { return false }
         let minutes = String(max(Int(window / 60), 1))
         let result = await Shell.run("find", [path, "-mmin", "-\(minutes)", "-print", "-quit"], timeout: 120)
-        return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Whether the tree holds a git checkout outside package-manager layouts. Searches the whole
-    /// tree; a walk that can't finish (timeout, unreadable subtree) counts as "yes".
-    public static func containsGitCheckout(_ path: String) async -> Bool {
-        // Only recognized package-manager output is skipped, by layout, not by a bare folder name:
-        // a real project under scratch/checkouts/ or scratch/pkg/ must still be found.
-        let result = await Shell.run("find", [
-            path,
-            "(", "-path", "*/SourcePackages/checkouts", "-o", "-path", "*/.build/checkouts",
-            "-o", "-path", "*/pkg/mod", "-o", "-name", "node_modules", ")", "-prune",
-            "-o", "-name", ".git", "-print", "-quit",
-        ], timeout: 120)
         return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 

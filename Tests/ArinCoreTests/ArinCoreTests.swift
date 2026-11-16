@@ -498,17 +498,18 @@ struct CLIFailure: Error { var message: String }
         defer { box.cleanup() }
         _ = try box.mkdir("scratch/wt-verify/.git")
         _ = try box.mkdir("plain/dd/Build")
-        #expect(await FileInfo.containsGitCheckout("\(box.root)/scratch"))
-        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/plain")))
+        #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/scratch", skipPackageCaches: true) != nil)
+        #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/plain", skipPackageCaches: true) == nil)
     }
 }
 
 @Suite struct TempRulePackageTests {
-    @Test func ignoresPackageCheckouts() async throws {
+    @Test func aCheckoutGitCantReadIsNotSwiftPMs() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
+        // A bare `.git` folder git can't use proves nothing about what's inside.
         _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
-        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/dd")))
+        #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/dd", skipPackageCaches: true) != nil)
     }
 }
 
@@ -588,20 +589,22 @@ struct CLIFailure: Error { var message: String }
         _ = try box.mkdir("gopkg/pkg/my-project/.git")
         _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
         _ = try box.mkdir("gomod/pkg/mod/github.com/x/y/.git")
-        #expect(await FileInfo.containsGitCheckout("\(box.root)/deep"))
-        #expect(await FileInfo.containsGitCheckout("\(box.root)/named"))
-        #expect(await FileInfo.containsGitCheckout("\(box.root)/gopkg"))
-        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/dd")))
-        #expect(!(await FileInfo.containsGitCheckout("\(box.root)/gomod")))
+        func refused(_ rel: String) async -> Bool {
+            await GitSafety.repositoryRefusal(in: "\(box.root)/\(rel)", skipPackageCaches: true) != nil
+        }
+        #expect(await refused("deep"))
+        #expect(await refused("named"))
+        #expect(await refused("gopkg"))
+        #expect(await refused("dd"))
+        #expect(!(await refused("gomod")))
     }
 
-    @Test func binToolFolderWithCheckoutNeedsReview() throws {
+    @Test func binToolFolderWithCheckoutNeedsReview() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
         _ = try box.mkdir("repo/bin/tools/.git")
-        let (generated, note) = ProjectArtifactRule.binLooksGenerated("\(box.root)/repo/bin")
-        #expect(!generated)
-        #expect(note.contains("git checkout"))
+        let refusal = await GitSafety.repositoryRefusal(in: "\(box.root)/repo/bin")
+        #expect(refusal?.contains("tools") == true, "\(refusal ?? "nil")")
     }
 
     @Test func overviewNeverEntersCheckouts() throws {
@@ -647,15 +650,14 @@ struct CLIFailure: Error { var message: String }
         }
         _ = try box.mkdir("scratch/locked/inner")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(box.root)/scratch/locked")
-        #expect(await FileInfo.containsGitCheckout("\(box.root)/scratch"))
+        #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/scratch", skipPackageCaches: true) != nil)
         #expect(await FileInfo.hasRecentWrites("\(box.root)/scratch", within: 60))
         #expect(!(await FileInfo.hasRecentWrites("\(box.root)/missing", within: 60)))
 
         _ = try box.mkdir("repo/bin/tools/locked/inner")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: "\(box.root)/repo/bin/tools/locked")
-        let (generated, note) = ProjectArtifactRule.binLooksGenerated("\(box.root)/repo/bin")
-        #expect(!generated)
-        #expect(note.contains("could not be read"), "\(note)")
+        let refusal = await GitSafety.repositoryRefusal(in: "\(box.root)/repo/bin")
+        #expect(refusal?.contains("couldn't be read") == true, "\(refusal ?? "nil")")
     }
 
     @Test func worktreeWithNewCommitsSinceScanIsKept() async throws {
