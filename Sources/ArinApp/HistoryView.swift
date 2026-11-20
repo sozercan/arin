@@ -106,8 +106,8 @@ private struct CleanupRecordRow: View {
         DisclosureGroup {
             ForEach(record.items) { item in
                 HStack(alignment: .top) {
-                    Image(systemName: item.status == .cleaned ? "checkmark.circle" : item.status == .failed ? "xmark.octagon" : "minus.circle")
-                        .foregroundStyle(item.status == .cleaned ? .green : item.status == .failed ? .red : .secondary)
+                    Image(systemName: item.status.symbol)
+                        .foregroundStyle(item.status.color)
                     VStack(alignment: .leading) {
                         Text(item.title).lineLimit(1)
                         Text(item.message).font(.caption).foregroundStyle(.secondary).lineLimit(2)

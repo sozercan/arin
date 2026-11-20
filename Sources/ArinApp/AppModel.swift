@@ -616,8 +616,9 @@ final class AppModel {
 
     private func tick() async {
         refreshDisk()
+        let alert = LowSpacePolicy.evaluate(free: disk.freeBytes, threshold: lowSpaceThreshold, alerted: notifiedLowSpace)
         guard isLowOnSpace else {
-            notifiedLowSpace = false
+            notifiedLowSpace = alert.alerted
             return
         }
         if autoMode, !phase.isBusy, lastAutoClean.map({ Date().timeIntervalSince($0) > 3600 }) ?? true {
@@ -637,8 +638,8 @@ final class AppModel {
             await task.value
             return
         }
-        if !notifiedLowSpace {
-            notifiedLowSpace = true
+        notifiedLowSpace = alert.alerted
+        if alert.notify {
             notify(
                 title: "Your disk is almost full",
                 body: "\(disk.freeBytes.formattedBytes) free. Open Arin to see what's safe to remove."

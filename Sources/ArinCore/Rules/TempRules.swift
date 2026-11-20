@@ -11,7 +11,7 @@ struct TempRule: Rule {
         let uid = getuid()
         let tmp = Guardrails.canonical(ctx.options.tmpDir)
         var entries: [String] = []
-        for root in [tmp, "/private/tmp"] {
+        for root in [tmp, ctx.options.sharedTmpDir] {
             for child in FileInfo.children(root) {
                 let name = (child as NSString).lastPathComponent
                 if name.hasPrefix("com.apple.") || name.hasPrefix("arin-") || name == "TemporaryItems" { continue }

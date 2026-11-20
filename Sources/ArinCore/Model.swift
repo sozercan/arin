@@ -280,3 +280,15 @@ public extension Int64 {
         ByteCountFormatter.string(fromByteCount: self, countStyle: .binary)
     }
 }
+
+public enum CandidateSelection {
+    /// The candidates with these IDs, in scan order, and the IDs that match none of them. Callers
+    /// refuse the whole selection when any ID is unmatched, so a typo never cleans something else.
+    public static func pick(_ ids: [String], from candidates: [Candidate]) -> (picked: [Candidate], unmatched: [String]) {
+        let known = Set(candidates.map(\.id))
+        var unmatched: [String] = []
+        for id in ids where !known.contains(id) && !unmatched.contains(id) { unmatched.append(id) }
+        let wanted = Set(ids)
+        return (candidates.filter { wanted.contains($0.id) }, unmatched)
+    }
+}

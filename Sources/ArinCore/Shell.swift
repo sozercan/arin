@@ -15,15 +15,28 @@ public struct ShellResult: Sendable {
     }
 }
 
+/// Stands in for the tools `Shell` runs, so tests can make every tool missing, failing, silent, or
+/// hanging. Set it with `Shell.$runner.withValue(_:operation:)`; it reaches child tasks of the operation.
+public protocol CommandRunner: Sendable {
+    func which(_ name: String) -> String?
+    func run(_ executable: String, _ arguments: [String], cwd: String?, input: String?,
+             environment: [String: String], timeout: TimeInterval) async -> ShellResult
+}
+
 /// Runs tools with a timeout and a PATH that includes the usual developer bin dirs.
 /// GUI apps start with a minimal PATH, so lookups would otherwise miss Homebrew, ~/.local/bin, etc.
 public enum Shell {
+    /// Replaces real tools for the current task tree. Nil runs them.
+    @TaskLocal public static var runner: (any CommandRunner)?
+
     public static let searchPath: [String] = {
         let home = NSHomeDirectory()
         var dirs = [
             "\(home)/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
             "\(home)/go/bin", "/usr/local/go/bin", "/opt/homebrew/opt/go/libexec/bin",
             "\(home)/.cargo/bin", "\(home)/.bun/bin", "\(home)/Library/pnpm",
+            // Docker Desktop's per-user CLI install, its bundled CLI, and OrbStack.
+            "\(home)/.docker/bin", "/Applications/Docker.app/Contents/Resources/bin", "\(home)/.orbstack/bin",
             "/usr/bin", "/bin", "/usr/sbin", "/sbin",
         ]
         if let path = ProcessInfo.processInfo.environment["PATH"] {
@@ -67,12 +80,15 @@ public enum Shell {
     }
 
     public static func which(_ name: String) -> String? {
-        if name.hasPrefix("/") { return FileManager.default.isExecutableFile(atPath: name) ? name : nil }
-        for dir in searchPath {
-            let candidate = "\(dir)/\(name)"
-            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        if let runner { return runner.which(name) }
+        let found: String?
+        if name.hasPrefix("/") {
+            found = FileManager.default.isExecutableFile(atPath: name) ? name : nil
+        } else {
+            found = searchPath.lazy.map { "\($0)/\(name)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
         }
-        return nil
+        if let found, DeveloperTools.isStub(found), !DeveloperTools.installed() { return nil }
+        return found
     }
 
     public static func run(
@@ -83,6 +99,9 @@ public enum Shell {
         environment extra: [String: String] = [:],
         timeout: TimeInterval = 60
     ) async -> ShellResult {
+        if let runner {
+            return await runner.run(executable, arguments, cwd: cwd, input: input, environment: extra, timeout: timeout)
+        }
         guard let exe = which(executable) else {
             return ShellResult(status: 127, stdout: "", stderr: "\(executable): not found", timedOut: false)
         }
@@ -189,5 +208,26 @@ final class ProcessHandle: @unchecked Sendable {
             return process
         }
         if let running, running.isRunning { running.terminate() }
+    }
+}
+
+/// Whether Xcode or the Command Line Tools are installed, found without running anything. Until one
+/// is, `/usr/bin/git`, `xcrun` and similar are stubs that open macOS's install dialog when run.
+public enum DeveloperTools {
+    static let stubs: Set<String> = ["git", "xcrun", "xcodebuild", "swift", "clang", "make", "python3", "pip3"]
+
+    static func isStub(_ path: String) -> Bool {
+        path.hasPrefix("/usr/bin/") && stubs.contains(String(path.dropFirst("/usr/bin/".count)))
+    }
+
+    /// The selected developer folder (`DEVELOPER_DIR` or `xcode-select`'s link) or a default one exists.
+    public static func installed(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        var folders: [String] = []
+        if let dir = environment["DEVELOPER_DIR"], !dir.isEmpty { folders.append(dir) }
+        if let link = try? FileManager.default.destinationOfSymbolicLink(atPath: "/var/db/xcode_select_link") {
+            folders.append(link)
+        }
+        folders += ["/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools"]
+        return folders.contains { FileManager.default.fileExists(atPath: "\($0)/usr/bin") }
     }
 }

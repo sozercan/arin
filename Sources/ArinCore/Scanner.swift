@@ -3,6 +3,8 @@ import Foundation
 public struct ScanOptions: Sendable {
     public var home: String
     public var tmpDir: String
+    /// The temp folder shared by every user. Tests point it into their sandbox.
+    public var sharedTmpDir = "/private/tmp"
     /// Where to look for repositories, worktrees, and build output.
     public var projectRoots: [String]
     /// Ask GitHub (via `gh`) whether branches were squash-merged.

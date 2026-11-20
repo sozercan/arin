@@ -134,8 +134,8 @@ struct CLIFailure: Error { var message: String }
 
         let target = "\(box.root)/Library/Caches/gomod"
         let executor = Executor(guardrails: box.guardrails)
-        let errors = await executor.delete([target])
-        #expect(errors.isEmpty)
+        let removal = await executor.delete([target])
+        #expect(removal.isComplete, "\(removal.problems)")
         #expect(!FileManager.default.fileExists(atPath: target))
     }
 
@@ -547,8 +547,8 @@ struct CLIFailure: Error { var message: String }
         _ = try box.mkdir("Library/Caches")
         let link = "\(box.root)/Library/Caches/linked"
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: "\(box.root)/projects/real")
-        let errors = await Executor(guardrails: box.guardrails).delete([link])
-        #expect(errors.isEmpty)
+        let removal = await Executor(guardrails: box.guardrails).delete([link])
+        #expect(removal.isComplete)
         #expect(!FileInfo.isSymlink(link))
         #expect(FileManager.default.fileExists(atPath: keep))
     }
