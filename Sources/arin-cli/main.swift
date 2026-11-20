@@ -87,7 +87,8 @@ struct Args {
             case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }
             case "--ids":
-                ids = try value(arg).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                // IDs hold paths verbatim, so spaces are part of them: never trim.
+                ids = try value(arg).split(separator: ",").map(String.init)
                 if ids?.isEmpty == true { throw CLIError("--ids needs at least one candidate id") }
             case "--plan": plan = (try value(arg) as NSString).expandingTildeInPath
             case "--out": out = (try value(arg) as NSString).expandingTildeInPath

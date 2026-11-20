@@ -329,11 +329,15 @@ public struct Executor: Sendable {
         } else {
             item.status = .partial
             item.message = "removed \(removal.removedEntries) entries, left \(removal.problems)"
-            if removal.unreadFolders > 0 {
+            // A walk that times out is omitted from the sizes, like a path that's gone: only a
+            // path that no longer exists may count as nothing left.
+            let left = await Size.allocated(paths)
+            let measured = paths.allSatisfy { left[$0] != nil || !(FileManager.default.fileExists(atPath: $0) || FileInfo.isSymlink($0)) }
+            if removal.unreadFolders > 0 || !measured {
                 item.estimatedBytes = 0
                 item.message += " (the size of what's left is unknown)"
             } else {
-                item.estimatedBytes = max(0, candidate.bytes - (await Size.total(paths)))
+                item.estimatedBytes = max(0, candidate.bytes - left.values.reduce(0, +))
             }
         }
         return item

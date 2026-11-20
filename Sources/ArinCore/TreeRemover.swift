@@ -254,7 +254,7 @@ public enum RemovalAdvice {
                 return "locked by the system (schg flag); Arin never uses admin rights, so it stays"
             }
             if st.st_flags & UInt32(UF_IMMUTABLE | UF_APPEND) != 0 {
-                return "locked in Finder (uchg flag); unlock it with `chflags -R nouchg \(quoted)` and try again"
+                return "locked (uchg or uappnd flag); unlock it with `chflags -R nouchg,nouappnd \(quoted)` and try again"
             }
             if st.st_uid != uid {
                 return "owned by \(userName(st.st_uid)); Arin never uses admin rights, so it stays"
@@ -264,7 +264,8 @@ public enum RemovalAdvice {
         var pst = stat()
         if lstat(parent, &pst) == 0 {
             if pst.st_flags & UInt32(UF_IMMUTABLE | UF_APPEND) != 0 {
-                return "its folder is locked in Finder (uchg flag); unlock it and try again"
+                let folder = "'" + parent.replacingOccurrences(of: "'", with: "'\\''") + "'"
+                return "its folder is locked (uchg or uappnd flag); unlock it with `chflags nouchg,nouappnd \(folder)` and try again"
             }
             if pst.st_uid != uid { return "its folder is owned by \(userName(pst.st_uid)); Arin never uses admin rights, so it stays" }
             if access(parent, W_OK) != 0 { return "its folder is read-only" }

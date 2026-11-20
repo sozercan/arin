@@ -9,7 +9,7 @@ private func candidate(_ path: String, bytes: Int64 = 1) -> Candidate {
 }
 
 private func unlock(_ box: Sandbox) {
-    _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/chflags"), arguments: ["-R", "nouchg", box.root]).waitUntilExit()
+    _ = try? Process.run(URL(fileURLWithPath: "/usr/bin/chflags"), arguments: ["-R", "nouchg,nouappnd", box.root]).waitUntilExit()
 }
 
 @Suite struct TreeRemoverTests {
@@ -97,7 +97,7 @@ private func unlock(_ box: Sandbox) {
 
         let item = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(candidate(target, bytes: 1000), state: .empty)
         #expect(item.status == .partial)
-        #expect(item.message.contains("uchg"), "\(item.message)")
+        #expect(item.message.contains("nouchg"), "\(item.message)")
         #expect(FileManager.default.fileExists(atPath: locked))
         #expect(!FileManager.default.fileExists(atPath: "\(target)/a"))
     }
@@ -110,6 +110,15 @@ private func unlock(_ box: Sandbox) {
         let item = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(candidate(locked), state: .empty)
         #expect(item.status == .failed)
         #expect(item.estimatedBytes == 0)
+    }
+
+    @Test func appendOnlyAdviceClearsBothUserFlags() throws {
+        let box = try Sandbox()
+        defer { unlock(box); box.cleanup() }
+        let file = try box.write("Library/Caches/appendonly")
+        #expect(chflags(file, UInt32(UF_APPEND)) == 0)
+        let advice = RemovalAdvice.advice(path: file, errno: EPERM)
+        #expect(advice.contains("nouchg,nouappnd"), "\(advice)")
     }
 
     @Test func adviceNamesTheCause() {
