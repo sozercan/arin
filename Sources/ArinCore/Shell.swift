@@ -81,14 +81,15 @@ public enum Shell {
 
     public static func which(_ name: String) -> String? {
         if let runner { return runner.which(name) }
-        let found: String?
-        if name.hasPrefix("/") {
-            found = FileManager.default.isExecutableFile(atPath: name) ? name : nil
-        } else {
-            found = searchPath.lazy.map { "\($0)/\(name)" }.first { FileManager.default.isExecutableFile(atPath: $0) }
-        }
-        if let found, DeveloperTools.isStub(found), !DeveloperTools.installed() { return nil }
-        return found
+        let usable: (String) -> Bool = { !DeveloperTools.isStub($0) || DeveloperTools.installed() }
+        return locate(name, in: searchPath, usable: usable)
+    }
+
+    /// The first executable named `name` in `dirs` that `usable` accepts. A stub that would open an
+    /// install dialog is skipped, so a real copy later in the path is still found.
+    static func locate(_ name: String, in dirs: [String], usable: (String) -> Bool) -> String? {
+        let candidates = name.hasPrefix("/") ? [name] : dirs.map { "\($0)/\(name)" }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) && usable($0) }
     }
 
     public static func run(

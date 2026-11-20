@@ -37,15 +37,53 @@ private func unlock(_ box: Sandbox) {
         #expect(removal.removedEntries == 0)
     }
 
-    @Test func handlesUnreadableFoldersTheUserOwns() async throws {
+    @Test func makesReadOnlyFoldersWritableThroughTheirDescriptor() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
-        let locked = try box.mkdir("Library/Caches/tool/locked")
-        _ = try box.write("Library/Caches/tool/locked/inner/file")
-        #expect(chmod(locked, 0o000) == 0)
+        let inner = try box.mkdir("Library/Caches/tool/pkg/inner")
+        _ = try box.write("Library/Caches/tool/pkg/inner/file")
+        #expect(chmod(inner, 0o555) == 0)
+        #expect(chmod("\(box.root)/Library/Caches/tool/pkg", 0o555) == 0)
         let removal = await TreeRemover.remove("\(box.root)/Library/Caches/tool")
         #expect(removal.isComplete, "\(removal.problems)")
         #expect(!FileInfo.exists("\(box.root)/Library/Caches/tool"))
+    }
+
+    /// A folder that can't be opened can't be pinned, so it's never chmod-ed by name.
+    @Test func leavesFoldersItCantOpenAndCreditsNothing() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let target = try box.mkdir("Library/Caches/tool")
+        _ = try box.write("Library/Caches/tool/small")
+        let unreadable = try box.mkdir("Library/Caches/tool/unreadable")
+        try Data(count: 2_000_000).write(to: URL(fileURLWithPath: "\(unreadable)/big"))
+        #expect(chmod(unreadable, 0o000) == 0)
+        defer { _ = chmod(unreadable, 0o700) }
+
+        let item = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(candidate(target, bytes: 2_100_000), state: .empty)
+        #expect(item.status == .partial)
+        #expect(item.estimatedBytes == 0)
+        #expect(item.message.contains("chmod -R u+rwx"), "\(item.message)")
+        #expect(item.message.contains("unknown"))
+        var mode = stat()
+        #expect(stat(unreadable, &mode) == 0 && mode.st_mode & 0o777 == 0, "left untouched")
+    }
+
+    @Test func partialEstimateIsTheScannedSizeLessWhatsLeft() async throws {
+        let box = try Sandbox()
+        defer { unlock(box); box.cleanup() }
+        let target = try box.mkdir("Library/Caches/tool")
+        try Data(count: 1_000_000).write(to: URL(fileURLWithPath: "\(target)/gone"))
+        let locked = "\(target)/locked"
+        try Data(count: 3_000_000).write(to: URL(fileURLWithPath: locked))
+        #expect(chflags(locked, UInt32(UF_IMMUTABLE)) == 0)
+        let scanned = await Size.total([target])
+
+        let item = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(candidate(target, bytes: scanned), state: .empty)
+        #expect(item.status == .partial)
+        let left = await Size.total([target])
+        #expect(item.estimatedBytes == scanned - left)
+        #expect(item.estimatedBytes < 1_500_000)
     }
 
     @Test func lockedFilesLeaveAPartialResultWithAdvice() async throws {
@@ -194,6 +232,19 @@ private extension Process {
 }
 
 @Suite struct DeveloperToolsTests {
+    @Test func skipsAStubAndFindsALaterRealTool() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        for dir in ["stub", "real"] {
+            let path = try box.write("\(dir)/git", "#!/bin/sh\n")
+            #expect(chmod(path, 0o755) == 0)
+        }
+        let stubDir = "\(box.root)/stub"
+        let found = Shell.locate("git", in: [stubDir, "\(box.root)/real"]) { !$0.hasPrefix(stubDir + "/") }
+        #expect(found == "\(box.root)/real/git")
+        #expect(Shell.locate("git", in: [stubDir]) { !$0.hasPrefix(stubDir + "/") } == nil)
+    }
+
     @Test func onlySystemStubsCount() {
         #expect(DeveloperTools.isStub("/usr/bin/git"))
         #expect(DeveloperTools.isStub("/usr/bin/xcrun"))

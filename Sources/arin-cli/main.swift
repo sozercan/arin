@@ -466,10 +466,17 @@ func main() async -> Int32 {
             let resolved = plan.resolve(against: report.candidates)
             // --ids narrows a plan to those items; it never adds anything the plan doesn't hold.
             if let ids = args.ids {
+                // Every named item must be in the plan and still ready in this scan; otherwise
+                // nothing runs, as without --plan.
                 let planned = Set(plan.items.map(\.id))
+                let ready = Set(resolved.ready.map(\.id))
                 let unplanned = ids.filter { !planned.contains($0) }
-                guard unplanned.isEmpty else {
+                let notReady = ids.filter { planned.contains($0) && !ready.contains($0) }
+                guard unplanned.isEmpty, notReady.isEmpty else {
                     for id in unplanned { eprint("  not in the plan: \(id)") }
+                    for (item, reason) in resolved.refused where notReady.contains(item.id) {
+                        eprint("  refused: \(item.title) — \(reason)")
+                    }
                     eprint("Nothing was cleaned.")
                     return 2
                 }

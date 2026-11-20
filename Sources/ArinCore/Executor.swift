@@ -227,7 +227,7 @@ public struct Executor: Sendable {
 
         case let .delete(paths):
             if trashInsteadOfDelete { return await trashResult(paths) }
-            return Self.deleteResult(candidate, await delete(paths), done: "deleted")
+            return await Self.deleteResult(candidate, await delete(paths), paths: paths, done: "deleted")
 
         case let .trash(paths):
             return await trashResult(paths)
@@ -311,11 +311,14 @@ public struct Executor: Sendable {
         }
         let removal = await delete([path])
         _ = await Shell.run("git", ["-C", repo, "worktree", "prune"], timeout: 30)
-        return Self.deleteResult(candidate, removal, done: "git worktree remove (fixed read-only files)")
+        return await Self.deleteResult(candidate, removal, paths: [path], done: "git worktree remove (fixed read-only files)")
     }
 
     /// Cleaned when everything went, partial when only some of it did, failed when nothing did.
-    static func deleteResult(_ candidate: Candidate, _ removal: TreeRemoval, done: String) -> CleanupItemResult {
+    /// A partial estimate is the scanned size less what's left, measured the same way as the scan
+    /// (clone- and hard-link-aware). When a folder couldn't be read, what's left is unknown, and
+    /// nothing is credited: the measured change in free space is the result either way.
+    static func deleteResult(_ candidate: Candidate, _ removal: TreeRemoval, paths: [String], done: String) async -> CleanupItemResult {
         var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned, message: done,
                                      estimatedBytes: candidate.bytes, trashed: false, trashedPaths: nil)
         guard !removal.isComplete else { return item }
@@ -326,7 +329,12 @@ public struct Executor: Sendable {
         } else {
             item.status = .partial
             item.message = "removed \(removal.removedEntries) entries, left \(removal.problems)"
-            item.estimatedBytes = max(0, candidate.bytes - removal.leftBytes)
+            if removal.unreadFolders > 0 {
+                item.estimatedBytes = 0
+                item.message += " (the size of what's left is unknown)"
+            } else {
+                item.estimatedBytes = max(0, candidate.bytes - (await Size.total(paths)))
+            }
         }
         return item
     }

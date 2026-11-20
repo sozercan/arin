@@ -18,6 +18,8 @@ public struct TreeRemoval: Sendable {
     public var leftBehind: [LeftBehind] = []
     public var leftCount = 0
     public var leftBytes: Int64 = 0
+    /// Folders left without being read, so the size of what's left is unknown.
+    public var unreadFolders = 0
 
     public var isComplete: Bool { leftCount == 0 }
 
@@ -33,6 +35,7 @@ public struct TreeRemoval: Sendable {
         removedBytes += other.removedBytes
         leftCount += other.leftCount
         leftBytes += other.leftBytes
+        unreadFolders += other.unreadFolders
         leftBehind += other.leftBehind.prefix(max(0, TreeRemover.maxReported - leftBehind.count))
     }
 
@@ -52,7 +55,9 @@ public struct TreeRemoval: Sendable {
 ///   entries are removed with `unlinkat`, so a link is removed as a link.
 /// - It never deletes into another volume, including one mounted after the guardrails checked the path.
 /// - Read-only folders the user owns (Go module caches, envtest binaries) are made writable just
-///   before they're emptied. Files aren't: removing a file only needs its folder to be writable.
+///   before they're emptied, through the descriptor that was checked to be on the same volume.
+///   Files aren't: removing a file only needs its folder to be writable. A folder that can't be
+///   opened at all is left alone, since nothing could pin what a chmod by name would change.
 /// - A folder that a running process refills while it's being emptied is emptied again before it's
 ///   reported.
 public enum TreeRemover {
@@ -131,14 +136,12 @@ public enum TreeRemover {
     /// Removes everything inside the folder. True when nothing was left behind.
     private static func clearContents(parent: Int32, name: [CChar], path: String, device: dev_t, depth: Int,
                                       into r: inout TreeRemoval) -> Bool {
-        var fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        if fd < 0, errno == EACCES, makeOwnerAccessible(parent: parent, name: name) {
-            fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        }
+        let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else {
             let code = errno
             if code == ENOENT { return true }
             r.record(path, code)
+            r.unreadFolders += 1
             return false
         }
         var dst = stat()
@@ -155,6 +158,7 @@ public enum TreeRemover {
             let code = errno
             close(fd)
             r.record(path, code)
+            r.unreadFolders += 1
             return false
         }
         defer { closedir(dir) }
@@ -183,6 +187,7 @@ public enum TreeRemover {
                     ok = false
                 } else if depth + 1 > maxDepth {
                     r.record(display, ELOOP)
+                    r.unreadFolders += 1
                     ok = false
                 } else if !removeDirectory(parent: dfd, name: child, path: display, device: device, depth: depth + 1, into: &r) {
                     ok = false
@@ -196,14 +201,6 @@ public enum TreeRemover {
             }
         }
         return ok
-    }
-
-    /// Gives the owner read, write and search on a folder they own but can't open.
-    private static func makeOwnerAccessible(parent: Int32, name: [CChar]) -> Bool {
-        var st = stat()
-        guard fstatat(parent, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFDIR,
-              st.st_uid == getuid() else { return false }
-        return fchmodat(parent, name, (st.st_mode & 0o7777) | S_IRWXU, AT_SYMLINK_NOFOLLOW) == 0
     }
 
     private static func allocated(_ st: stat) -> Int64 { Int64(st.st_blocks) * 512 }
@@ -271,6 +268,9 @@ public enum RemovalAdvice {
             }
             if pst.st_uid != uid { return "its folder is owned by \(userName(pst.st_uid)); Arin never uses admin rights, so it stays" }
             if access(parent, W_OK) != 0 { return "its folder is read-only" }
+        }
+        if st.st_mode & S_IFMT == S_IFDIR, st.st_uid == uid, access(path, R_OK | X_OK) != 0 {
+            return "you can't read this folder; run `chmod -R u+rwx \(quoted)` and try again"
         }
         return "macOS blocked access; give Arin Full Disk Access in System Settings › Privacy & Security, then try again"
     }
