@@ -69,6 +69,26 @@ private func unlock(_ box: Sandbox) {
         #expect(stat(unreadable, &mode) == 0 && mode.st_mode & 0o777 == 0, "left untouched")
     }
 
+    /// A second path behind an unsearchable folder can't be measured or removed: it isn't gone.
+    @Test func unreachablePathsLeaveTheSizeUnknown() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let first = try box.mkdir("Library/Caches/one")
+        _ = try box.write("Library/Caches/one/file")
+        let fence = try box.mkdir("Library/Caches/fence")
+        let second = try box.mkdir("Library/Caches/fence/two")
+        try Data(count: 2_000_000).write(to: URL(fileURLWithPath: "\(second)/big"))
+        #expect(chmod(fence, 0o000) == 0)
+        defer { _ = chmod(fence, 0o700) }
+
+        let item = Candidate(ruleID: "t", title: "t", detail: "", category: .devCaches, level: .quick, risk: .safe,
+                             bytes: 2_100_000, paths: [first, second], action: .delete([first, second]))
+        let result = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(item, state: .empty)
+        #expect(result.status == .partial)
+        #expect(result.estimatedBytes == 0)
+        #expect(result.message.contains("unknown"), "\(result.message)")
+    }
+
     @Test func partialEstimateIsTheScannedSizeLessWhatsLeft() async throws {
         let box = try Sandbox()
         defer { unlock(box); box.cleanup() }
@@ -259,6 +279,17 @@ private extension Process {
         #expect(DeveloperTools.isStub("/usr/bin/xcrun"))
         #expect(!DeveloperTools.isStub("/opt/homebrew/bin/git"))
         #expect(!DeveloperTools.isStub("/usr/bin/tmutil"))
+    }
+
+    @Test func acceptsAnXcodeBundleAsTheSelection() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let app = try box.mkdir("Xcode-beta.app")
+        _ = try box.mkdir("Xcode-beta.app/Contents/Developer/usr/bin")
+        let none = "\(box.root)/no-link"
+        #expect(DeveloperTools.installed(environment: ["DEVELOPER_DIR": app], selectLink: none, defaults: []))
+        #expect(!DeveloperTools.installed(environment: [:], selectLink: none, defaults: []))
+        #expect(!DeveloperTools.installed(environment: ["DEVELOPER_DIR": "\(box.root)/missing.app"], selectLink: none, defaults: []))
     }
 
     @Test func honorsDeveloperDir() throws {

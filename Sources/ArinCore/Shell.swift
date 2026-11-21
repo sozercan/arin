@@ -222,13 +222,18 @@ public enum DeveloperTools {
     }
 
     /// The selected developer folder (`DEVELOPER_DIR` or `xcode-select`'s link) or a default one exists.
-    public static func installed(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+    /// Like `xcode-select`, a selection may name the Xcode app itself (`/Applications/Xcode-beta.app`).
+    public static func installed(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        selectLink: String = "/var/db/xcode_select_link",
+        defaults: [String] = ["/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools"]
+    ) -> Bool {
         var folders: [String] = []
         if let dir = environment["DEVELOPER_DIR"], !dir.isEmpty { folders.append(dir) }
-        if let link = try? FileManager.default.destinationOfSymbolicLink(atPath: "/var/db/xcode_select_link") {
-            folders.append(link)
+        if let link = try? FileManager.default.destinationOfSymbolicLink(atPath: selectLink) { folders.append(link) }
+        folders += defaults
+        return folders.contains { folder in
+            ["\(folder)/usr/bin", "\(folder)/Contents/Developer/usr/bin"].contains { FileManager.default.fileExists(atPath: $0) }
         }
-        folders += ["/Applications/Xcode.app/Contents/Developer", "/Library/Developer/CommandLineTools"]
-        return folders.contains { FileManager.default.fileExists(atPath: "\($0)/usr/bin") }
     }
 }
