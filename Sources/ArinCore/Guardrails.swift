@@ -166,7 +166,7 @@ public struct Guardrails: Sendable {
 
     public static let allowedExecutables: Set<String> = [
         "go", "npm", "uv", "brew", "yarn", "pnpm", "xcrun", "git", "docker", "rustup", "sqlite3", "podman",
-        "tmutil", "ollama", "mise",
+        "tmutil", "ollama", "mise", "codex", "claude",
     ]
 
     public static func allows(_ command: CommandSpec) -> Bool {
@@ -183,9 +183,19 @@ public struct Guardrails: Sendable {
             return args.count == 2 && args[0] == "rm" && isName(args[1])
         case "mise":
             return args.count == 4 && Array(args.prefix(3)) == ["prune", "--tools", "--yes"] && isName(args[3])
+        case "codex":
+            return args.count == 3 && args[0] == "delete" && args[1] == "--force" && CodexSessionsRule.isThreadID(args[2])
+        case "claude":
+            return args.count == 3 && args[0] == "purge" && args[1] == "--yes" && isProjectPath(args[2])
         default:
             return true
         }
+    }
+
+    static func isProjectPath(_ value: String) -> Bool {
+        value.hasPrefix("/") && (value as NSString).standardizingPath == value
+            && value.split(separator: "/").count >= 2 && !value.split(separator: "/").contains("..")
+            && !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     static func canonical(_ path: String) -> String {

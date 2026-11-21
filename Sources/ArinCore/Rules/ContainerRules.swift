@@ -123,7 +123,8 @@ struct SQLiteFreePagesRule: Rule {
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("sqlite3") != nil else { return [] }
         var result: [Candidate] = []
-        for db in Glob.expand(ctx.path(".codex/logs_*.sqlite")) {
+        let databases = [".codex/logs_*.sqlite", ".codex/thread_history_*.sqlite"].flatMap { Glob.expand(ctx.path($0)) }
+        for db in databases {
             let pragma = await Shell.run("sqlite3", ["-readonly", db, "PRAGMA page_size; PRAGMA freelist_count;"], timeout: 30)
             let numbers = pragma.lines.compactMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
             guard numbers.count == 2 else { continue }
@@ -133,7 +134,7 @@ struct SQLiteFreePagesRule: Rule {
                 ruleID: id,
                 key: db,
                 title: "Compact \((db as NSString).lastPathComponent)",
-                detail: "\(free.formattedBytes) of this database is unused pages. VACUUM rewrites it smaller and keeps every row. This is generic SQLite maintenance, not a documented Codex procedure, and it must not run while Codex is writing, so quit every Codex session first.",
+                detail: "\(free.formattedBytes) of this database is unused pages. VACUUM rewrites it smaller and keeps every row. Deleting Codex sessions leaves their space free inside the file until then. This is generic SQLite maintenance, not a documented Codex procedure, and it must not run while Codex is writing, so quit every Codex session first.",
                 category: .agentData,
                 level: .deep,
                 risk: .review,

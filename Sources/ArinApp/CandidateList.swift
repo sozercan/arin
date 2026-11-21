@@ -101,7 +101,8 @@ struct CandidateList: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .help(item.paths.joined(separator: "\n"))
+                    .help((item.paths.prefix(20) + (item.paths.count > 20 ? ["… and \(item.paths.count - 20) more"] : []))
+                        .joined(separator: "\n"))
             }
             .width(min: 120, ideal: 240)
         }
@@ -285,7 +286,7 @@ private struct CandidateInspector: View {
 
             if !item.paths.isEmpty {
                 Section("Location") {
-                    ForEach(item.paths, id: \.self) { path in
+                    ForEach(item.paths.prefix(50), id: \.self) { path in
                         HStack {
                             Text((path as NSString).abbreviatingWithTildeInPath)
                                 .lineLimit(2)
@@ -301,6 +302,10 @@ private struct CandidateInspector: View {
                             .help("Reveal in Finder")
                             .accessibilityLabel("Reveal \(path) in Finder")
                         }
+                    }
+                    if item.paths.count > 50 {
+                        Text("… and \(item.paths.count - 50) more")
+                            .foregroundStyle(.secondary)
                     }
                 }
             }

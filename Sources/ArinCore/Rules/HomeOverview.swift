@@ -8,7 +8,7 @@ enum HomeOverview {
         "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public", "Applications",
         ".Trash", ".codex/sessions", "Library/Caches", "Library/Application Support", "Library/Developer",
         ".cache", "Library/Mobile Documents", "Library/CloudStorage",
-        ".claude/projects",
+        ".claude/projects", ".codex/archived_sessions", ".copilot/session-state",
     ]
 
     static func discover(_ ctx: ScanContext, claimed: [String]) async -> [Candidate] {
