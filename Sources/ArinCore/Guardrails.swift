@@ -195,7 +195,7 @@ public struct Guardrails: Sendable {
     /// Only these tools may be run by an action.
     public static let allowedExecutables: Set<String> = [
         "go", "npm", "uv", "brew", "yarn", "pnpm", "xcrun", "git", "docker", "rustup", "sqlite3", "podman",
-        "tmutil", "ollama", "mise",
+        "tmutil", "ollama", "mise", "codex", "claude",
     ]
 
     /// Whether an action may run this command. Tools whose other subcommands could do real damage
@@ -217,9 +217,23 @@ public struct Guardrails: Sendable {
         case "mise":
             // mise decides what's unused; Arin only names the tool.
             return args.count == 4 && Array(args.prefix(3)) == ["prune", "--tools", "--yes"] && isName(args[3])
+        case "codex":
+            // One saved session, by UUID. Codex skips its prompt (`--force`) only for a UUID.
+            return args.count == 3 && args[0] == "delete" && args[1] == "--force" && CodexSessionsRule.isThreadID(args[2])
+        case "claude":
+            // One project's data, by its working directory. Never `--all`, never a relative path or an option.
+            return args.count == 3 && args[0] == "purge" && args[1] == "--yes" && isProjectPath(args[2])
         default:
             return true
         }
+    }
+
+    /// An absolute, already-normalized directory path at least two levels deep, such as a removed
+    /// worktree. Never `/`, `/Users`, or anything with `..` or control characters.
+    static func isProjectPath(_ value: String) -> Bool {
+        value.hasPrefix("/") && (value as NSString).standardizingPath == value
+            && value.split(separator: "/").count >= 2 && !value.split(separator: "/").contains("..")
+            && !value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     /// /var and /tmp are symlinks into /private; compare canonical forms.

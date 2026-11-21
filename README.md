@@ -51,7 +51,8 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 | **Git worktrees** | Worktrees whose branch was merged, including squash merges |
 | **Containers & VMs** | Docker build cache and orphaned volumes, Lima and Colima downloads |
 | **Local AI models** | Ollama and LM Studio |
-| **Tool versions** | Old Codex and Claude releases, unused mise versions, extra Rust toolchains |
+| **Tool versions** | Old Codex, Claude and Copilot CLI releases, unused mise versions, extra Rust toolchains |
+| **Agent data** | Codex sessions idle for 30 days (removed with `codex delete`), Claude Code data for folders that no longer exist (`claude purge`), Claude's Cowork VM, bloated agent databases |
 | **System** | Stale temp folders (Go caches and DerivedData copies start as Safe; anything else as Review), Time Machine local snapshots |
 | **Everything else** | A size overview of your home folder surfaces other large folders (agent output, logs, app data) under *Unclassified* |
 
@@ -61,7 +62,7 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 |---|---|
 | **Quick** | Caches that refill on their own: package caches, idle DerivedData and DerivedData for deleted projects, unavailable simulators, stale temp caches, old tool versions |
 | **Standard** | Adds build output (`node_modules`, `.build`, venvs, `bin/`), merged worktrees, Docker build cache, app caches |
-| **Deep** | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, unrecognized app data |
+| **Deep** | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, agent history, unrecognized app data |
 
 Only items marked **Safe** at or below the chosen level are pre-selected. Build output in a project you changed, or ran a Claude Code session in, during the last 7 days is listed but not pre-selected.
 

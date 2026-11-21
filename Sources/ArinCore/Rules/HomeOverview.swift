@@ -16,8 +16,8 @@ enum HomeOverview {
         "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public", "Applications",
         ".Trash", ".codex/sessions", "Library/Caches", "Library/Application Support", "Library/Developer",
         ".cache", "Library/Mobile Documents", "Library/CloudStorage",
-        // Claude Code history and memory; agent history has its own retention tools.
-        ".claude/projects",
+        // Agent history and memory. Each has its own deletion tool that keeps the agent's index in step.
+        ".claude/projects", ".codex/archived_sessions", ".copilot/session-state",
     ]
 
     static func discover(_ ctx: ScanContext, claimed: [String]) async -> [Candidate] {

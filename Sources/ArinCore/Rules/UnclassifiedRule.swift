@@ -79,35 +79,3 @@ struct SnapshotInsightRule: InsightRule {
         )]
     }
 }
-
-/// Agent history that Arin won't delete itself: it's conversation data with its own deletion tools.
-struct AgentHistoryInsightRule: InsightRule {
-    func insights(_ ctx: ScanContext) async -> [Insight] {
-        var result: [Insight] = []
-        let codexSessions = ctx.path(".codex/sessions")
-        if FileInfo.isDirectory(codexSessions) {
-            let bytes = await Size.allocated(codexSessions)
-            if bytes > 2 * 1024 * 1024 * 1024 {
-                result.append(Insight(
-                    id: "codex-sessions",
-                    title: "Codex session history",
-                    detail: "Use `codex delete <SESSION>` so database and index entries go with the transcripts. Deleting files directly leaves stale records, and the measured gain is often much smaller than the file total.",
-                    bytes: bytes
-                ))
-            }
-        }
-        let dockerRaw = ctx.path("Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw")
-        if FileInfo.exists(dockerRaw) {
-            let bytes = await Size.allocated(dockerRaw)
-            if bytes > 5 * 1024 * 1024 * 1024 {
-                result.append(Insight(
-                    id: "docker-raw",
-                    title: "Docker disk image",
-                    detail: "Docker.raw holds images, containers and volumes. Never delete it directly. Start Docker so Arin can see what is reclaimable inside it.",
-                    bytes: bytes
-                ))
-            }
-        }
-        return result
-    }
-}

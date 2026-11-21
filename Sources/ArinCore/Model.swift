@@ -139,6 +139,8 @@ public enum CleanupAction: Codable, Sendable, Hashable {
         switch self {
         case let .delete(paths): "Delete \(paths.count == 1 ? "1 item" : "\(paths.count) items")"
         case let .trash(paths): "Move \(paths.count == 1 ? "1 item" : "\(paths.count) items") to Trash"
+        case let .commands(cmds) where cmds.count > 3:
+            "\(cmds.prefix(2).map(\.display).joined(separator: " && ")) && … (\(cmds.count) commands)"
         case let .commands(cmds): cmds.map(\.display).joined(separator: " && ")
         case let .removeWorktree(repo, path, _): "git -C \(repo) worktree remove \(path)"
         case .none: "No action"

@@ -203,15 +203,22 @@ public struct Executor: Sendable {
         if !state.openFilesKnown, !candidate.paths.isEmpty {
             return result(.skipped, "couldn't check for open files (lsof returned nothing); try again")
         }
+        // Commands that each remove one session check their own files right before they run, so one
+        // session in use doesn't hold back the rest.
+        let perItem: [CommandSpec]? = {
+            guard case let .commands(commands) = candidate.action, !commands.isEmpty,
+                  commands.allSatisfy(Self.isPerItem) else { return nil }
+            return commands
+        }()
         // Re-check right before acting: things change between scan and clean.
         let live = state.blockers(
-            paths: candidate.paths,
+            paths: perItem == nil ? candidate.paths : [],
             processes: candidate.blockingProcesses,
-            minIdle: candidate.minIdleSeconds
+            minIdle: perItem == nil ? candidate.minIdleSeconds : nil
         )
         if !live.isEmpty { return result(.skipped, live.joined(separator: "; ")) }
         // The snapshot only sees a path and its children; check the whole tree for recent writes.
-        if let idle = candidate.minIdleSeconds {
+        if perItem == nil, let idle = candidate.minIdleSeconds {
             for path in candidate.paths where await FileInfo.hasRecentWrites(path, within: idle) {
                 return result(.skipped, "\((path as NSString).abbreviatingWithTildeInPath) was written recently (may be in use)")
             }
@@ -231,6 +238,9 @@ public struct Executor: Sendable {
 
         case let .trash(paths):
             return await trashResult(paths)
+
+        case let .commands(commands) where perItem != nil:
+            return await runPerItem(candidate, commands, state: state)
 
         case let .commands(commands):
             var warnings: [String] = []
@@ -260,6 +270,78 @@ public struct Executor: Sendable {
         case let .removeWorktree(repo, path, head):
             return await removeWorktree(candidate, repo: repo, path: path, head: head, result: result)
         }
+    }
+
+    /// Commands that each remove one thing with the tool's own command: a Codex session with
+    /// `codex delete`, or a deleted folder's Claude Code data with `claude purge`.
+    static func isPerItem(_ command: CommandSpec) -> Bool {
+        switch (command.executable, command.arguments.first) {
+        case ("codex", "delete"), ("claude", "purge"): true
+        default: false
+        }
+    }
+
+    /// Why this one command must not run right now, from the rule's own checks.
+    func perItemRefusal(_ command: CommandSpec, state: SystemState) async -> String? {
+        guard Guardrails.allows(command), let target = command.arguments.last else { return "refusing to run \(command.display)" }
+        switch command.executable {
+        case "codex":
+            return await CodexSessionsRule.recheck(target, codexHome: "\(guardrails.home)/.codex", state: state, now: Date())
+        case "claude":
+            return ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state, now: Date())
+        default:
+            return "refusing to run \(command.display)"
+        }
+    }
+
+    /// Runs each command after its own check. One that's refused or fails doesn't stop the rest, and
+    /// the estimate counts only what's gone afterwards.
+    func runPerItem(_ candidate: Candidate, _ commands: [CommandSpec], state: SystemState) async -> CleanupItemResult {
+        var done = 0
+        var skipped: [String: Int] = [:]
+        var failures: [String] = []
+        for command in commands {
+            if Task.isCancelled {
+                skipped["cancelled", default: 0] += 1
+                continue
+            }
+            if let reason = await perItemRefusal(command, state: state) {
+                skipped[reason, default: 0] += 1
+                continue
+            }
+            // Pin Codex to the home that was scanned, whatever CODEX_HOME the caller has.
+            let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : [:]
+            let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
+                                         environment: environment, timeout: min(commandTimeout, 300))
+            if output.ok {
+                done += 1
+            } else {
+                let tail = (output.timedOut ? "timed out" : (output.stderr.isEmpty ? output.stdout : output.stderr))
+                    .trimmingCharacters(in: .whitespacesAndNewlines).suffix(200)
+                failures.append("\(command.arguments.last ?? command.display): \(tail)")
+            }
+        }
+        let noun = commands.first?.executable == "codex" ? "sessions" : "projects"
+        var parts = ["removed \(done) of \(commands.count) \(noun)"]
+        if !skipped.isEmpty {
+            parts.append("skipped " + skipped.sorted { $0.value > $1.value }.map { "\($0.value) (\($0.key))" }.joined(separator: ", "))
+        }
+        if let first = failures.first {
+            parts.append("\(failures.count) failed, first: \(first)")
+        }
+        var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned,
+                                     message: parts.joined(separator: "; "), estimatedBytes: candidate.bytes,
+                                     trashed: false, trashedPaths: nil)
+        if done == commands.count { return item }
+        if done == 0 {
+            item.status = failures.isEmpty ? .skipped : .failed
+            item.estimatedBytes = 0
+            return item
+        }
+        item.status = .partial
+        let left = await Size.total(candidate.paths)
+        item.estimatedBytes = max(0, candidate.bytes - left)
+        return item
     }
 
     /// True when the candidate's folders now use under a quarter of their scanned size.
