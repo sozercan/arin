@@ -166,11 +166,21 @@ public enum TreeRemover {
 
         // Byte-exact names, whatever their encoding.
         var names: [[CChar]] = []
-        while let entry = readdir(dir) {
+        // readdir returns nil both at the end and on an error; only errno, read right then, tells
+        // them apart.
+        var readError: Int32 = 0
+        while true {
+            errno = 0
+            guard let entry = readdir(dir) else { readError = errno; break }
             let length = Int(entry.pointee.d_namlen)
             let bytes = withUnsafeBytes(of: entry.pointee.d_name) { Array($0.prefix(length)).map { CChar(bitPattern: $0) } }
             if bytes == [46] || bytes == [46, 46] { continue }
             names.append(bytes + [0])
+        }
+        if readError != 0 {
+            r.record(path, readError)
+            r.unreadFolders += 1
+            return false
         }
 
         var ok = true

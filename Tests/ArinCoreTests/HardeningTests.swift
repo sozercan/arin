@@ -261,6 +261,17 @@ private extension Process {
 }
 
 @Suite struct DeveloperToolsTests {
+    @Test func aLinkToAStubIsAStub() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let link = "\(box.root)/bin/git"
+        _ = try box.mkdir("bin")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: "/usr/bin/git")
+        #expect(DeveloperTools.isStub(link))
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/bin/tm", withDestinationPath: "/usr/bin/tmutil")
+        #expect(!DeveloperTools.isStub("\(box.root)/bin/tm"))
+    }
+
     @Test func skipsAStubAndFindsALaterRealTool() throws {
         let box = try Sandbox()
         defer { box.cleanup() }

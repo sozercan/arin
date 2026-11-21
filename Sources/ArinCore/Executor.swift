@@ -331,7 +331,7 @@ public struct Executor: Sendable {
             item.message = "removed \(removal.removedEntries) entries, left \(removal.problems)"
             // A walk that times out is omitted from the sizes, like a path that's gone. Only a path
             // whose lstat says ENOENT counts as nothing left; one that can't be reached is unknown.
-            let left = await Size.allocated(paths)
+            let left = removal.unreadFolders > 0 ? [:] : await Size.allocated(paths)
             let measured = paths.allSatisfy { path in
                 var st = stat()
                 return left[path] != nil || (lstat(path, &st) != 0 && errno == ENOENT)

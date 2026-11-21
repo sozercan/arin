@@ -217,8 +217,11 @@ final class ProcessHandle: @unchecked Sendable {
 public enum DeveloperTools {
     static let stubs: Set<String> = ["git", "xcrun", "xcodebuild", "swift", "clang", "make", "python3", "pip3"]
 
+    /// A stub at `/usr/bin`, or a link elsewhere on the path that resolves to one.
     static func isStub(_ path: String) -> Bool {
-        path.hasPrefix("/usr/bin/") && stubs.contains(String(path.dropFirst("/usr/bin/".count)))
+        [path, URL(fileURLWithPath: path).resolvingSymlinksInPath().path].contains {
+            $0.hasPrefix("/usr/bin/") && stubs.contains(String($0.dropFirst("/usr/bin/".count)))
+        }
     }
 
     /// The selected developer folder (`DEVELOPER_DIR` or `xcode-select`'s link) or a default one exists.
