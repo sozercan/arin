@@ -62,7 +62,10 @@ struct Args {
 
     init(_ argv: [String]) throws {
         var it = argv.makeIterator()
+        var given = Set<String>()
         func value(_ flag: String) throws -> String {
+            // Last-one-wins would quietly drop the first value, e.g. half of a list of IDs.
+            guard given.insert(flag).inserted else { throw CLIError("\(flag) given more than once") }
             guard let v = it.next() else { throw CLIError("\(flag) needs a value") }
             return v
         }
@@ -83,7 +86,10 @@ struct Args {
             case "--model": model = try value(arg)
             case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }
-            case "--ids": ids = try value(arg).split(separator: ",").map(String.init)
+            case "--ids":
+                // IDs hold paths verbatim, so spaces are part of them: never trim.
+                ids = try value(arg).split(separator: ",").map(String.init)
+                if ids?.isEmpty == true { throw CLIError("--ids needs at least one candidate id") }
             case "--plan": plan = (try value(arg) as NSString).expandingTildeInPath
             case "--out": out = (try value(arg) as NSString).expandingTildeInPath
             case "--remove": remove = true
@@ -155,9 +161,16 @@ func record(_ entry: HistoryEntry) {
     do { try History().append(entry) } catch { eprint("warning: could not write history: \(error.localizedDescription)") }
 }
 
-func chosen(_ report: ScanReport, _ args: Args) -> [Candidate] {
-    if let ids = args.ids { return report.candidates.filter { ids.contains($0.id) } }
-    return report.candidates.filter { $0.isDefaultSelected(at: args.level) }
+/// The candidates named by --ids, or the pre-selection. Nil, after saying why, when an ID matches
+/// nothing in the scan: the caller then does nothing at all.
+func chosen(_ report: ScanReport, _ args: Args) -> [Candidate]? {
+    guard let ids = args.ids else { return report.candidates.filter { $0.isDefaultSelected(at: args.level) } }
+    let (picked, unmatched) = CandidateSelection.pick(ids, from: report.candidates)
+    guard unmatched.isEmpty else {
+        for id in unmatched { eprint("  no candidate \(id) in this scan (gone, or under the size cutoff)") }
+        return nil
+    }
+    return picked
 }
 
 func printHistory(json: Bool) {
@@ -298,7 +311,7 @@ func runUninstall(_ args: Args) async -> Int32 {
         for note in result.explanations { print("  • \(note)") }
         if result.items.contains(where: { $0.trashedPaths != nil }) { print("  • Put them back from the Trash, or from History in the app.") }
     }
-    return result.items.contains { $0.status == .failed } ? 1 : 0
+    return result.hasFailures ? 1 : 0
 }
 
 func summarize(_ report: ScanReport, level: Level) {
@@ -391,7 +404,10 @@ func main() async -> Int32 {
 
     case "plan":
         let report = await scan(args)
-        let items = chosen(report, args)
+        guard let items = chosen(report, args) else {
+            eprint("No plan was written.")
+            return 2
+        }
         do {
             let data = try CleanupPlan(items).encoded()
             if let out = args.out {
@@ -446,13 +462,25 @@ func main() async -> Int32 {
             }
         }
         let report = await scan(args)
-        var picked = chosen(report, args)
+        var picked: [Candidate]
         if let plan {
             let resolved = plan.resolve(against: report.candidates)
             // --ids narrows a plan to those items; it never adds anything the plan doesn't hold.
             if let ids = args.ids {
+                // Every named item must be in the plan and still ready in this scan; otherwise
+                // nothing runs, as without --plan.
                 let planned = Set(plan.items.map(\.id))
-                for id in ids where !planned.contains(id) { eprint("  not in the plan: \(id)") }
+                let ready = Set(resolved.ready.map(\.id))
+                let unplanned = ids.filter { !planned.contains($0) }
+                let notReady = ids.filter { planned.contains($0) && !ready.contains($0) }
+                guard unplanned.isEmpty, notReady.isEmpty else {
+                    for id in unplanned { eprint("  not in the plan: \(id)") }
+                    for (item, reason) in resolved.refused where notReady.contains(item.id) {
+                        eprint("  refused: \(item.title) — \(reason)")
+                    }
+                    eprint("Nothing was cleaned.")
+                    return 2
+                }
                 picked = resolved.ready.filter { ids.contains($0.id) }
             } else {
                 picked = resolved.ready
@@ -460,6 +488,11 @@ func main() async -> Int32 {
             for (item, reason) in resolved.refused where args.ids?.contains(item.id) ?? true {
                 eprint("  refused: \(item.title) — \(reason)")
             }
+        } else if let selection = chosen(report, args) {
+            picked = selection
+        } else {
+            eprint("Nothing was cleaned.")
+            return 2
         }
         guard !picked.isEmpty else {
             print("Nothing to clean.")
@@ -483,7 +516,7 @@ func main() async -> Int32 {
             print("\nCleaned \(result.cleanedCount)/\(result.items.count). Estimated \(result.estimatedBytes.formattedBytes); free space changed by \(result.measuredBytes.formattedBytes) (\(result.freeBefore.formattedBytes) → \(result.freeAfter.formattedBytes)).")
             for note in result.explanations { print("  • \(note)") }
         }
-        return result.items.contains { $0.status == .failed } ? 1 : 0
+        return result.hasFailures ? 1 : 0
 
     default:
         print(usage)

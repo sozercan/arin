@@ -61,3 +61,23 @@ struct RiskBadge: View {
         .help(fromAgent ? "Includes your agent's verdict" : "Rule verdict")
     }
 }
+
+extension CleanupItemResult.Status {
+    var symbol: String {
+        switch self {
+        case .cleaned: "checkmark.circle"
+        case .partial: "exclamationmark.triangle"
+        case .skipped: "minus.circle"
+        case .failed: "xmark.octagon"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .cleaned: .green
+        case .partial: .orange
+        case .skipped: .secondary
+        case .failed: .red
+        }
+    }
+}

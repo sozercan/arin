@@ -94,7 +94,7 @@ struct ResultSheet: View {
                     }
                 }
 
-                Text("\(report.cleanedCount) cleaned, \(problems.count) skipped or failed")
+                Text("\(report.cleanedCount) cleaned, \(problems.count) skipped, failed or partly removed")
                     .font(.headline)
                 List(report.items) { item in
                     HStack(alignment: .top) {
@@ -123,19 +123,6 @@ struct ResultSheet: View {
         }
     }
 
-    private func icon(_ status: CleanupItemResult.Status) -> String {
-        switch status {
-        case .cleaned: "checkmark.circle.fill"
-        case .skipped: "minus.circle"
-        case .failed: "xmark.octagon.fill"
-        }
-    }
-
-    private func color(_ status: CleanupItemResult.Status) -> Color {
-        switch status {
-        case .cleaned: .green
-        case .skipped: .secondary
-        case .failed: .red
-        }
-    }
+    private func icon(_ status: CleanupItemResult.Status) -> String { status.symbol + (status == .skipped ? "" : ".fill") }
+    private func color(_ status: CleanupItemResult.Status) -> Color { status.color }
 }

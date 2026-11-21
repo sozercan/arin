@@ -2,7 +2,8 @@ import Foundation
 
 public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public enum Status: String, Codable, Sendable {
-        case cleaned, skipped, failed
+        /// `partial`: some of it was removed and the rest couldn't be; the message says what and why.
+        case cleaned, partial, skipped, failed
     }
 
     public var id: String
@@ -26,6 +27,8 @@ public struct CleanupReport: Codable, Sendable {
     /// Net change in free space, measured on the volume.
     public var measuredBytes: Int64 { freeAfter - freeBefore }
     public var cleanedCount: Int { items.filter { $0.status == .cleaned }.count }
+    /// Some item failed or was only partly removed.
+    public var hasFailures: Bool { items.contains { $0.status == .failed || $0.status == .partial } }
 }
 
 public enum CleanupEvent: Sendable {
@@ -89,7 +92,7 @@ public struct Executor: Sendable {
         }
 
         let after = Disk.status(path: guardrails.home).freeBytes
-        let cleaned = results.filter { $0.status == .cleaned }
+        let cleaned = results.filter { $0.status == .cleaned || $0.status == .partial }
         let estimated = cleaned.reduce(0) { $0 + $1.estimatedBytes }
         let report = CleanupReport(
             items: results,
@@ -224,8 +227,7 @@ public struct Executor: Sendable {
 
         case let .delete(paths):
             if trashInsteadOfDelete { return await trashResult(paths) }
-            let errors = await delete(paths)
-            return errors.isEmpty ? result(.cleaned, "deleted") : result(.failed, errors.joined(separator: "; "))
+            return await Self.deleteResult(candidate, await delete(paths), paths: paths, done: "deleted")
 
         case let .trash(paths):
             return await trashResult(paths)
@@ -256,7 +258,7 @@ public struct Executor: Sendable {
             return result(.cleaned, "\(done) finished with warnings: \(warnings.joined(separator: "; ").prefix(300))")
 
         case let .removeWorktree(repo, path, head):
-            return await removeWorktree(repo: repo, path: path, head: head, result: result)
+            return await removeWorktree(candidate, repo: repo, path: path, head: head, result: result)
         }
     }
 
@@ -268,6 +270,7 @@ public struct Executor: Sendable {
     }
 
     func removeWorktree(
+        _ candidate: Candidate,
         repo: String,
         path: String,
         head: String?,
@@ -306,38 +309,54 @@ public struct Executor: Sendable {
         guard list.ok, !stillRegistered else {
             return result(.failed, "git could not remove it and it is still registered: \(message.prefix(300))", false)
         }
-        let errors = await delete([path])
+        let removal = await delete([path])
         _ = await Shell.run("git", ["-C", repo, "worktree", "prune"], timeout: 30)
-        if errors.isEmpty { return result(.cleaned, "git worktree remove (fixed read-only files)", false) }
-        return result(.failed, errors.joined(separator: "; "), false)
+        return await Self.deleteResult(candidate, removal, paths: [path], done: "git worktree remove (fixed read-only files)")
     }
 
-    /// Deletes paths, retrying once after `chmod -R u+w` for read-only trees.
-    func delete(_ paths: [String]) async -> [String] {
-        var errors: [String] = []
-        for path in paths {
-            do { try guardrails.check(path) } catch { errors.append(error.description); continue }
-            guard FileManager.default.fileExists(atPath: path) || FileInfo.resolveSymlink(path) != nil else { continue }
-            if FileInfo.isSymlink(path) {
-                // Remove the link itself; never chmod or rm -rf through it.
-                do { try FileManager.default.removeItem(atPath: path) } catch {
-                    errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(error.localizedDescription)")
-                }
-                continue
+    /// Cleaned when everything went, partial when only some of it did, failed when nothing did.
+    /// A partial estimate is the scanned size less what's left, measured the same way as the scan
+    /// (clone- and hard-link-aware). When a folder couldn't be read, what's left is unknown, and
+    /// nothing is credited: the measured change in free space is the result either way.
+    static func deleteResult(_ candidate: Candidate, _ removal: TreeRemoval, paths: [String], done: String) async -> CleanupItemResult {
+        var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned, message: done,
+                                     estimatedBytes: candidate.bytes, trashed: false, trashedPaths: nil)
+        guard !removal.isComplete else { return item }
+        if removal.removedEntries == 0 {
+            item.status = .failed
+            item.message = "couldn't remove \(removal.problems)"
+            item.estimatedBytes = 0
+        } else {
+            item.status = .partial
+            item.message = "removed \(removal.removedEntries) entries, left \(removal.problems)"
+            // A walk that times out is omitted from the sizes, like a path that's gone. Only a path
+            // whose lstat says ENOENT counts as nothing left; one that can't be reached is unknown.
+            let left = await Size.allocated(paths)
+            let measured = paths.allSatisfy { path in
+                var st = stat()
+                return left[path] != nil || (lstat(path, &st) != 0 && errno == ENOENT)
             }
-            if (try? FileManager.default.removeItem(atPath: path)) != nil { continue }
-            _ = await Shell.run("chmod", ["-R", "u+w", path], timeout: 300)
-            do {
-                try FileManager.default.removeItem(atPath: path)
-            } catch {
-                // removeItem stops at the first failure; rm reports what's actually stuck.
-                let rm = await Shell.run("rm", ["-rf", path], timeout: 900)
-                if FileManager.default.fileExists(atPath: path) {
-                    errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(rm.stderr.isEmpty ? error.localizedDescription : String(rm.stderr.prefix(300)))")
-                }
+            if removal.unreadFolders > 0 || !measured {
+                item.estimatedBytes = 0
+                item.message += " (the size of what's left is unknown)"
+            } else {
+                item.estimatedBytes = max(0, candidate.bytes - left.values.reduce(0, +))
             }
         }
-        return errors
+        return item
+    }
+
+    /// Deletes paths entry by entry (`TreeRemover`), carrying on past anything that can't be removed.
+    func delete(_ paths: [String]) async -> TreeRemoval {
+        var removal = TreeRemoval()
+        for path in paths {
+            do { try guardrails.check(path) } catch {
+                removal.record(path, EPERM, advice: error.description)
+                continue
+            }
+            removal.merge(await TreeRemover.remove(path))
+        }
+        return removal
     }
 
     func trash(_ paths: [String]) async -> (errors: [String], moved: [TrashedPath]) {
@@ -351,7 +370,7 @@ public struct Executor: Sendable {
                 try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &location)
                 if let location = location?.path { moved.append(TrashedPath(original: path, location: location)) }
             } catch {
-                errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(error.localizedDescription)")
+                errors.append("\((path as NSString).abbreviatingWithTildeInPath): \(RemovalAdvice.advice(for: error, path: path))")
             }
         }
         return (errors, moved)

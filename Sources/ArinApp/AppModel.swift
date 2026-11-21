@@ -378,6 +378,13 @@ final class AppModel {
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
         selection.subtract(cleanedIDs)
+        // A partly removed item stays listed for a retry, sized as what's left, so the retry's
+        // estimate doesn't count again what this cleanup already credited.
+        for item in result.items where item.status == .partial {
+            if let index = candidates.firstIndex(where: { $0.id == item.id }) {
+                candidates[index].bytes = max(0, candidates[index].bytes - item.estimatedBytes)
+            }
+        }
         refreshDisk()
         phase = .idle
         if auto {
@@ -616,8 +623,9 @@ final class AppModel {
 
     private func tick() async {
         refreshDisk()
+        let alert = LowSpacePolicy.evaluate(free: disk.freeBytes, threshold: lowSpaceThreshold, alerted: notifiedLowSpace)
         guard isLowOnSpace else {
-            notifiedLowSpace = false
+            notifiedLowSpace = alert.alerted
             return
         }
         if autoMode, !phase.isBusy, lastAutoClean.map({ Date().timeIntervalSince($0) > 3600 }) ?? true {
@@ -637,8 +645,8 @@ final class AppModel {
             await task.value
             return
         }
-        if !notifiedLowSpace {
-            notifiedLowSpace = true
+        notifiedLowSpace = alert.alerted
+        if alert.notify {
             notify(
                 title: "Your disk is almost full",
                 body: "\(disk.freeBytes.formattedBytes) free. Open Arin to see what's safe to remove."

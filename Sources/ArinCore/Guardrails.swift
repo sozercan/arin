@@ -7,6 +7,8 @@ public struct Guardrails: Sendable {
     public var protectedPaths: [String]
     /// Where an uninstall may take an app bundle from. Cleanups never touch these.
     public var applicationRoots: [String]
+    /// Where volumes are mounted right now. Nil when they can't be listed, which refuses every path.
+    public var mountPoints: @Sendable () -> [String]? = Guardrails.currentMountPoints
 
     public init(home: String = NSHomeDirectory(), tmpDir: String = NSTemporaryDirectory()) {
         let home = Self.canonical((home as NSString).standardizingPath)
@@ -32,6 +34,7 @@ public struct Guardrails: Sendable {
         case outsideAllowedRoots(String)
         case protected(String)
         case tooShallow(String)
+        case mountInside(String)
 
         public var description: String {
             switch self {
@@ -39,6 +42,7 @@ public struct Guardrails: Sendable {
             case let .outsideAllowedRoots(p): "refusing path outside home and temp: \(p)"
             case let .protected(p): "refusing protected path \(p)"
             case let .tooShallow(p): "refusing top-level path \(p)"
+            case let .mountInside(p): "refusing \(p): a volume is mounted there or inside it (eject it first)"
             }
         }
     }
@@ -52,8 +56,34 @@ public struct Guardrails: Sendable {
         try checkCanonical(path)
         let parent = (path as NSString).deletingLastPathComponent
         let realParent = Self.canonical(URL(fileURLWithPath: parent).resolvingSymlinksInPath().path)
-        if realParent != parent {
-            try checkCanonical((realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent))
+        let real = (realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent)
+        if realParent != parent { try checkCanonical(real) }
+        try checkNoMount(path, real: real)
+    }
+
+    /// Refuses a path that is a mount point or has one below it. Deleting, chmod-ing or removing a
+    /// worktree there would reach into another volume, such as a disk image or a network share.
+    func checkNoMount(_ path: String, real: String) throws(Violation) {
+        guard let mounts = mountPoints() else { throw .mountInside(path) }
+        let targets = Set([path, real].flatMap { [$0, "/System/Volumes/Data" + $0] }.map { $0.lowercased() })
+        for mount in mounts.map({ Self.canonical($0).lowercased() }) where mount != "/" {
+            if targets.contains(where: { mount == $0 || mount.hasPrefix($0 + "/") }) { throw .mountInside(path) }
+        }
+    }
+
+    /// Mount points from `getfsstat`, or nil if the call fails.
+    public static func currentMountPoints() -> [String]? {
+        let count = getfsstat(nil, 0, MNT_NOWAIT)
+        guard count > 0 else { return nil }
+        var buffer = [Darwin.statfs](repeating: Darwin.statfs(), count: Int(count) + 16)
+        let got = buffer.withUnsafeMutableBufferPointer {
+            getfsstat($0.baseAddress, Int32($0.count * MemoryLayout<Darwin.statfs>.stride), MNT_NOWAIT)
+        }
+        guard got > 0 else { return nil }
+        return buffer.prefix(Int(got)).map { entry in
+            withUnsafeBytes(of: entry.f_mntonname) { raw in
+                String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+            }
         }
     }
 

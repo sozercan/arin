@@ -62,3 +62,17 @@ public enum ByteSize {
         return Int64(bytes)
     }
 }
+
+/// One low-space alert per drop below the threshold. After alerting, it re-arms only once free space is
+/// back above the threshold by a margin, so free space hovering around the line doesn't alert each dip.
+public enum LowSpacePolicy {
+    /// 10% of the threshold, at least 2 GB.
+    public static func rearmMargin(threshold: Int64) -> Int64 { max(2_000_000_000, threshold / 10) }
+
+    /// Whether to alert now, and whether an alert stays outstanding.
+    public static func evaluate(free: Int64, threshold: Int64, alerted: Bool) -> (notify: Bool, alerted: Bool) {
+        if free < threshold { return (!alerted, true) }
+        if alerted, free < threshold + rearmMargin(threshold: threshold) { return (false, true) }
+        return (false, false)
+    }
+}
