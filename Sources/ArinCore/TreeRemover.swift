@@ -1,24 +1,18 @@
 import Darwin
 import Foundation
 
-/// An entry a delete couldn't remove, with what the user can do about it.
 public struct LeftBehind: Codable, Sendable, Hashable {
     public var path: String
     public var errno: Int32
     public var advice: String
 }
 
-/// What a delete did. Sizes are allocated blocks and only describe the attempt; the cleanup result
-/// is the measured change in free space.
 public struct TreeRemoval: Sendable {
     public var removedEntries = 0
     public var removedBytes: Int64 = 0
-    /// The deepest cause of each failure (a folder kept because a child failed isn't listed again),
-    /// capped at `TreeRemover.maxReported`. `leftCount` is the full count.
     public var leftBehind: [LeftBehind] = []
     public var leftCount = 0
     public var leftBytes: Int64 = 0
-    /// Folders left without being read, so the size of what's left is unknown.
     public var unreadFolders = 0
 
     public var isComplete: Bool { leftCount == 0 }
@@ -39,7 +33,6 @@ public struct TreeRemoval: Sendable {
         leftBehind += other.leftBehind.prefix(max(0, TreeRemover.maxReported - leftBehind.count))
     }
 
-    /// "what was left: why", one line per distinct reason.
     public var problems: String {
         var reasons: [String] = []
         for entry in leftBehind where !reasons.contains(entry.advice) { reasons.append(entry.advice) }
@@ -49,22 +42,10 @@ public struct TreeRemoval: Sendable {
     }
 }
 
-/// Deletes a file, link or folder entry by entry and carries on past anything it can't remove.
-///
-/// - Symlinks are never followed: folders are opened relative to their parent with `O_NOFOLLOW` and
-///   entries are removed with `unlinkat`, so a link is removed as a link.
-/// - It never deletes into another volume, including one mounted after the guardrails checked the path.
-/// - Read-only folders the user owns (Go module caches, envtest binaries) are made writable just
-///   before they're emptied, through the descriptor that was checked to be on the same volume.
-///   Files aren't: removing a file only needs its folder to be writable. A folder that can't be
-///   opened at all is left alone, since nothing could pin what a chmod by name would change.
-/// - A folder that a running process refills while it's being emptied is emptied again before it's
-///   reported.
 public enum TreeRemover {
     public static let maxReported = 20
     static let refillRetries = 2
     static let maxDepth = 512
-    /// Each level holds a folder open and a few KB of stack; the thread gets room for `maxDepth`.
     static let stackSize = 32 << 20
 
     public static func remove(_ path: String) async -> TreeRemoval {
@@ -105,7 +86,7 @@ public enum TreeRemover {
         defer { close(pfd) }
         var pst = stat()
         guard fstat(pfd, &pst) == 0, pst.st_dev == st.st_dev else {
-            r.record(path, EXDEV)  // the item itself is a mount point
+            r.record(path, EXDEV)
             return r
         }
         let name = Array((path as NSString).lastPathComponent.utf8CString)
@@ -113,7 +94,6 @@ public enum TreeRemover {
         return r
     }
 
-    /// Empties and removes the folder `name` inside `parent`. True when nothing was left behind.
     private static func removeDirectory(parent: Int32, name: [CChar], path: String, device: dev_t, depth: Int,
                                         into r: inout TreeRemoval) -> Bool {
         for attempt in 0...refillRetries {
@@ -133,7 +113,6 @@ public enum TreeRemover {
         return false
     }
 
-    /// Removes everything inside the folder. True when nothing was left behind.
     private static func clearContents(parent: Int32, name: [CChar], path: String, device: dev_t, depth: Int,
                                       into r: inout TreeRemoval) -> Bool {
         let fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -150,7 +129,6 @@ public enum TreeRemover {
             r.record(path, EXDEV)
             return false
         }
-        // Entries can only be unlinked from a folder that is writable and searchable.
         if dst.st_uid == getuid(), dst.st_mode & S_IRWXU != S_IRWXU {
             _ = fchmod(fd, (dst.st_mode & 0o7777) | S_IRWXU)
         }
@@ -164,7 +142,6 @@ public enum TreeRemover {
         defer { closedir(dir) }
         let dfd = dirfd(dir)
 
-        // Byte-exact names, whatever their encoding.
         var names: [[CChar]] = []
         while let entry = readdir(dir) {
             let length = Int(entry.pointee.d_namlen)
@@ -206,7 +183,6 @@ public enum TreeRemover {
     private static func allocated(_ st: stat) -> Int64 { Int64(st.st_blocks) * 512 }
 }
 
-/// Turns a failed removal into something the user can act on.
 public enum RemovalAdvice {
     public static func advice(path: String, errno code: Int32) -> String {
         switch code {
@@ -233,7 +209,6 @@ public enum RemovalAdvice {
         }
     }
 
-    /// Advice for an error Foundation threw (a move to the Trash), from its POSIX cause when it has one.
     public static func advice(for error: any Error, path: String) -> String {
         let ns = error as NSError
         var code: Int32?
@@ -276,7 +251,6 @@ public enum RemovalAdvice {
         return "macOS blocked access; give Arin Full Disk Access in System Settings › Privacy & Security, then try again"
     }
 
-    /// Names of processes with files open at or just below `path` (a bounded look).
     static func holders(under path: String, limit: Int = 32) -> [String] {
         var files = [path]
         if let walker = FileManager.default.enumerator(atPath: path) {

@@ -1,7 +1,5 @@
 import Foundation
 
-/// A cache or leftover at a known location, cleaned with the tool's own command when the tool
-/// is installed, or by deleting the directory otherwise.
 public struct KnownPathRule: Rule {
     public var id: String
     public var name: String
@@ -9,22 +7,14 @@ public struct KnownPathRule: Rule {
     public var category: CleanupCategory
     public var level: Level
     public var risk: Risk
-    /// Paths relative to home, absolute paths, or globs in the last component (`*.ShipIt`).
     public var paths: [String]
-    /// Optional resolver that asks the tool where its cache lives (`go env GOCACHE`).
     public var resolve: (@Sendable (ScanContext) async -> [String])?
-    /// Native cleanup commands, used when `commands.first.executable` is installed.
     public var commands: [CommandSpec]?
     public var blockingProcesses: [String]
     public var minIdleSeconds: TimeInterval?
-    /// One candidate per matched path instead of one for the whole rule.
     public var perPath: Bool
-    /// Move to Trash instead of deleting (for things the user may want back).
     public var useTrash: Bool
     public var titleForPath: (@Sendable (String) -> String)?
-    /// Entries directly inside a matched folder that are left in place: the folder's other entries are
-    /// deleted instead of the folder itself, so a kept entry made after the scan survives too. A matched
-    /// symlink is removed as itself, never by deleting what it points to.
     public var keepNames: [String]
 
     public init(
@@ -116,7 +106,6 @@ public struct KnownPathRule: Rule {
 }
 
 public enum Glob {
-    /// Expands `*` and `?` in the last path component only.
     public static func expand(_ pattern: String) -> [String] {
         let last = (pattern as NSString).lastPathComponent
         guard last.contains("*") || last.contains("?") else { return [pattern] }

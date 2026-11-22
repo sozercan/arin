@@ -1,18 +1,11 @@
 import Foundation
 
-/// A snapshot of what's running and which files are open, used for preflight checks.
 public struct SystemState: Sendable {
-    /// Executable paths of running processes.
     public var processPaths: [String]
-    /// Every directory that contains (at any depth) an open file or a process cwd.
     public var busyDirectories: Set<String>
-    /// Open file paths themselves.
     public var openFiles: Set<String>
-    /// Whether the open-file snapshot succeeded. When false the scan says so and the executor cleans nothing
-    /// that has paths, since nothing shows whether they're in use.
     public var openFilesKnown: Bool
 
-    /// Nothing running and nothing open, as a complete snapshot.
     public static let empty = SystemState(processPaths: [], busyDirectories: [], openFiles: [], openFilesKnown: true)
 
     public init(processPaths: [String], busyDirectories: Set<String>, openFiles: Set<String>, openFilesKnown: Bool) {
@@ -31,7 +24,6 @@ public struct SystemState: Sendable {
             while dir.count > 1, busy.insert(dir).inserted {
                 dir = (dir as NSString).deletingLastPathComponent
             }
-            // A process cwd is reported as a directory path; treat it as busy itself.
             busy.insert(path)
         }
         self.init(processPaths: processPaths, busyDirectories: busy, openFiles: files, openFilesKnown: openFilesKnown)
@@ -52,7 +44,6 @@ public struct SystemState: Sendable {
         return SystemState(processPaths: processes, openPaths: open, openFilesKnown: !lsof.timedOut && !open.isEmpty)
     }
 
-    /// True if a process named `name` runs, matching the executable's basename or an app bundle name.
     public func isRunning(_ name: String) -> Bool {
         let bundle = "/\(name).app/"
         return processPaths.contains { path in
@@ -60,8 +51,6 @@ public struct SystemState: Sendable {
         }
     }
 
-    /// Loose match for apps whose data folder name differs from the executable
-    /// ("Code - Insiders" -> "Visual Studio Code - Insiders.app"). Errs toward reporting running.
     public func isAppRunning(matching folderName: String) -> Bool {
         let needle = folderName.lowercased().replacingOccurrences(of: " ", with: "")
         guard !needle.isEmpty else { return false }
@@ -73,7 +62,6 @@ public struct SystemState: Sendable {
         }
     }
 
-    /// Names prefixed with `app:` use the loose app-bundle match; others match exactly.
     public func runningAny(_ names: [String]) -> [String] {
         names.compactMap { name in
             if name.hasPrefix("app:") {
@@ -84,18 +72,15 @@ public struct SystemState: Sendable {
         }
     }
 
-    /// True if a file under `path` is open or a process works inside it.
     public func isBusy(_ path: String) -> Bool {
         busyDirectories.contains(path) || openFiles.contains(path)
     }
 
-    /// True if a running process's executable lives under `path`.
     public func hasExecutable(under path: String) -> Bool {
         let prefix = path.hasSuffix("/") ? path : path + "/"
         return processPaths.contains { $0.hasPrefix(prefix) }
     }
 
-    /// Preflight blockers for a set of paths.
     public func blockers(paths: [String], processes: [String], minIdle: TimeInterval?, now: Date = Date()) -> [String] {
         var reasons: [String] = []
         let running = runningAny(processes)

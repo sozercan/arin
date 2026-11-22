@@ -8,20 +8,34 @@ on:
   push:
     branches: [main]
     paths:
-      - "Package.swift"
+      - "**/*.swift"
+      - "**/*.sh"
+      - "**/*.env"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.xml"
+      - "**/*.svg"
+      - "**/*.plist"
+      - ".gitignore"
+      - ".comment-baseline.json"
       - "Sources/**"
       - "Tests/**"
       - "Scripts/**"
-      - "version.env"
-      - ".github/workflows/ci.yml"
   pull_request:
     paths:
-      - "Package.swift"
+      - "**/*.swift"
+      - "**/*.sh"
+      - "**/*.env"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.xml"
+      - "**/*.svg"
+      - "**/*.plist"
+      - ".gitignore"
+      - ".comment-baseline.json"
       - "Sources/**"
       - "Tests/**"
       - "Scripts/**"
-      - "version.env"
-      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -34,16 +48,28 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Show toolchain
         run: |
           xcodebuild -version
           swift --version
 
+      - name: Check comment ratchet
+        env:
+          COMMENT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$COMMENT_BASE" ] && [ "$COMMENT_BASE" != 0000000000000000000000000000000000000000 ]; then
+            Scripts/check-comments.sh --base "$COMMENT_BASE"
+          else
+            Scripts/check-comments.sh
+          fi
+          Scripts/test-comment-lint.sh
+
       - name: Build
         run: swift build
 
-      # Tests touch only their own sandbox folders under $TMPDIR; nothing on the runner is cleaned.
       - name: Test
         run: swift test
 

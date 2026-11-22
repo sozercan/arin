@@ -120,7 +120,6 @@ struct SettingsView: View {
         }
     }
 
-    /// Stored with `~` like the defaults above; the scanner expands it.
     private func add(_ url: URL) {
         let root = (url.path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath
         let trimmed = root.count > 1 && root.hasSuffix("/") ? String(root.dropLast()) : root
@@ -129,7 +128,6 @@ struct SettingsView: View {
     }
 }
 
-/// Model and effort for the selected agent, as two plain pickers.
 private struct ReviewSetupRows: View {
     @Environment(AppModel.self) private var model
     var agent: AgentProvider

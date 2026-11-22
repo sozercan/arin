@@ -15,18 +15,13 @@ public struct ShellResult: Sendable {
     }
 }
 
-/// Stands in for the tools `Shell` runs, so tests can make every tool missing, failing, silent, or
-/// hanging. Set it with `Shell.$runner.withValue(_:operation:)`; it reaches child tasks of the operation.
 public protocol CommandRunner: Sendable {
     func which(_ name: String) -> String?
     func run(_ executable: String, _ arguments: [String], cwd: String?, input: String?,
              environment: [String: String], timeout: TimeInterval) async -> ShellResult
 }
 
-/// Runs tools with a timeout and a PATH that includes the usual developer bin dirs.
-/// GUI apps start with a minimal PATH, so lookups would otherwise miss Homebrew, ~/.local/bin, etc.
 public enum Shell {
-    /// Replaces real tools for the current task tree. Nil runs them.
     @TaskLocal public static var runner: (any CommandRunner)?
 
     public static let searchPath: [String] = {
@@ -35,7 +30,6 @@ public enum Shell {
             "\(home)/.local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin",
             "\(home)/go/bin", "/usr/local/go/bin", "/opt/homebrew/opt/go/libexec/bin",
             "\(home)/.cargo/bin", "\(home)/.bun/bin", "\(home)/Library/pnpm",
-            // Docker Desktop's per-user CLI install, its bundled CLI, and OrbStack.
             "\(home)/.docker/bin", "/Applications/Docker.app/Contents/Resources/bin", "\(home)/.orbstack/bin",
             "/usr/bin", "/bin", "/usr/sbin", "/sbin",
         ]
@@ -47,9 +41,6 @@ public enum Shell {
         return dirs
     }()
 
-    /// Variables that point git at another repository, index, or object store, or change how it reads
-    /// paths. A parent such as a git hook can set them; every `git -C <dir>` would then inspect the
-    /// wrong repository.
     static let redirectingGitVariables = [
         "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
@@ -57,9 +48,6 @@ public enum Shell {
         "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
     ]
 
-    /// Whether a variable passes git configuration on the command line (`git -c` and
-    /// `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`). These outrank the
-    /// repository's own config, so one could set `core.worktree` and point git at another checkout.
     static func isGitConfigOverride(_ name: String) -> Bool {
         name == "GIT_CONFIG_PARAMETERS" || name == "GIT_CONFIG_COUNT"
             || name.hasPrefix("GIT_CONFIG_KEY_") || name.hasPrefix("GIT_CONFIG_VALUE_")
@@ -72,8 +60,6 @@ public enum Shell {
         env["PATH"] = searchPath.joined(separator: ":")
         env["NO_COLOR"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
-        // `git status` otherwise rewrites the index to refresh it: scans would write to every repo and
-        // make each one look recently worked on.
         env["GIT_OPTIONAL_LOCKS"] = "0"
         env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
         return env
@@ -85,8 +71,6 @@ public enum Shell {
         return locate(name, in: searchPath, usable: usable)
     }
 
-    /// The first executable named `name` in `dirs` that `usable` accepts. A stub that would open an
-    /// install dialog is skipped, so a real copy later in the path is still found.
     static func locate(_ name: String, in dirs: [String], usable: (String) -> Bool) -> String? {
         let candidates = name.hasPrefix("/") ? [name] : dirs.map { "\($0)/\(name)" }
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) && usable($0) }
@@ -107,7 +91,6 @@ public enum Shell {
             return ShellResult(status: 127, stdout: "", stderr: "\(executable): not found", timedOut: false)
         }
         if Task.isCancelled { return .cancelled }
-        // Cancelling the calling task terminates the subprocess, so a stopped scan stops its du/find/git too.
         let handle = ProcessHandle()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -129,7 +112,6 @@ public enum Shell {
         timeout: TimeInterval,
         handle: ProcessHandle
     ) -> ShellResult {
-        // Temp files instead of pipes: no deadlock when a tool writes megabytes (lsof, du).
         let tmp = FileManager.default.temporaryDirectory
         let id = UUID().uuidString
         let outURL = tmp.appendingPathComponent("arin-\(id).out")
@@ -189,13 +171,11 @@ public enum Shell {
     }
 }
 
-/// Lets a cancellation handler terminate a process that a background thread started.
 final class ProcessHandle: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var cancelled = false
 
-    /// Returns false if cancellation already happened; the caller then terminates the process itself.
     func attach(_ process: Process) -> Bool {
         lock.withLock {
             self.process = process
@@ -212,8 +192,6 @@ final class ProcessHandle: @unchecked Sendable {
     }
 }
 
-/// Whether Xcode or the Command Line Tools are installed, found without running anything. Until one
-/// is, `/usr/bin/git`, `xcrun` and similar are stubs that open macOS's install dialog when run.
 public enum DeveloperTools {
     static let stubs: Set<String> = ["git", "xcrun", "xcodebuild", "swift", "clang", "make", "python3", "pip3"]
 
@@ -221,8 +199,6 @@ public enum DeveloperTools {
         path.hasPrefix("/usr/bin/") && stubs.contains(String(path.dropFirst("/usr/bin/".count)))
     }
 
-    /// The selected developer folder (`DEVELOPER_DIR` or `xcode-select`'s link) or a default one exists.
-    /// Like `xcode-select`, a selection may name the Xcode app itself (`/Applications/Xcode-beta.app`).
     public static func installed(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         selectLink: String = "/var/db/xcode_select_link",

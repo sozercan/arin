@@ -1,7 +1,5 @@
 import Foundation
 
-/// Large directories no specific rule explains. These are what the agent review is for:
-/// the rules don't know them, so they start as "review" and the agent may mark them safe.
 public struct UnclassifiedRule: Rule {
     public let id = "unclassified"
     public let name = "Unclassified large folders"
@@ -34,7 +32,6 @@ public struct UnclassifiedRule: Rule {
                 let name = (child as NSString).lastPathComponent
                 if name.hasPrefix("com.apple.") || name.hasPrefix(".") && root.relative != ".cache" { return false }
                 if (try? guardrails.check(child)) == nil { return false }
-                // Skip anything that overlaps a path a specific rule already handles.
                 return !claimed.contains { $0 == child || $0.hasPrefix(child + "/") || child.hasPrefix($0 + "/") }
             }
             let sizes = await Size.allocated(children)
@@ -64,7 +61,6 @@ public struct UnclassifiedRule: Rule {
     }
 }
 
-/// APFS snapshots and staged macOS updates hold deleted files' space.
 struct SnapshotInsightRule: InsightRule {
     func insights(_ ctx: ScanContext) async -> [Insight] {
         let snapshots = await Disk.localSnapshots()
@@ -80,7 +76,6 @@ struct SnapshotInsightRule: InsightRule {
     }
 }
 
-/// Agent history that Arin won't delete itself: it's conversation data with its own deletion tools.
 struct AgentHistoryInsightRule: InsightRule {
     func insights(_ ctx: ScanContext) async -> [Insight] {
         var result: [Insight] = []

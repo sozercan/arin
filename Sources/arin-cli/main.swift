@@ -64,7 +64,6 @@ struct Args {
         var it = argv.makeIterator()
         var given = Set<String>()
         func value(_ flag: String) throws -> String {
-            // Last-one-wins would quietly drop the first value, e.g. half of a list of IDs.
             guard given.insert(flag).inserted else { throw CLIError("\(flag) given more than once") }
             guard let v = it.next() else { throw CLIError("\(flag) needs a value") }
             return v
@@ -87,7 +86,6 @@ struct Args {
             case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }
             case "--ids":
-                // IDs hold paths verbatim, so spaces are part of them: never trim.
                 ids = try value(arg).split(separator: ",").map(String.init)
                 if ids?.isEmpty == true { throw CLIError("--ids needs at least one candidate id") }
             case "--plan": plan = (try value(arg) as NSString).expandingTildeInPath
@@ -156,13 +154,10 @@ func scan(_ args: Args) async -> ScanReport {
     return report
 }
 
-/// History is a convenience; failing to write it never stops a scan or a cleanup.
 func record(_ entry: HistoryEntry) {
     do { try History().append(entry) } catch { eprint("warning: could not write history: \(error.localizedDescription)") }
 }
 
-/// The candidates named by --ids, or the pre-selection. Nil, after saying why, when an ID matches
-/// nothing in the scan: the caller then does nothing at all.
 func chosen(_ report: ScanReport, _ args: Args) -> [Candidate]? {
     guard let ids = args.ids else { return report.candidates.filter { $0.isDefaultSelected(at: args.level) } }
     let (picked, unmatched) = CandidateSelection.pick(ids, from: report.candidates)
@@ -217,8 +212,6 @@ func runKeep(_ args: Args) -> Int32 {
     do {
         try KeepList.update { list in
             for id in args.positional {
-                // Most IDs are `rule:/path`; recording the path protects it from a parent's cleanup
-                // right away. The next scan records the paths of any ID, logical ones included.
                 let key = id.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
                 if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : []) }
             }
@@ -231,7 +224,6 @@ func runKeep(_ args: Args) -> Int32 {
     return 0
 }
 
-/// Installed apps, with the Homebrew cask that installed each one.
 func installedApps() async -> [InstalledApp] {
     let casks = await AppCatalog.caskTokens()
     return AppCatalog.installed().map { app in
@@ -241,7 +233,6 @@ func installedApps() async -> [InstalledApp] {
     }
 }
 
-/// Apps matching a path, bundle ID, or name (with or without `.app`), ignoring case.
 func findApps(_ query: String, in apps: [InstalledApp]) -> [InstalledApp] {
     if query.contains("/") {
         let path = ((query as NSString).expandingTildeInPath as NSString).standardizingPath.lowercased()
@@ -329,7 +320,6 @@ func summarize(_ report: ScanReport, level: Level) {
     print(String(format: "\nScan took %.0fs. Nothing was changed.", report.finishedAt.timeIntervalSince(report.startedAt)))
 }
 
-/// With --warn-below, problems go to stderr and the exit status stays 0, so a session hook never fails.
 func runDisk(_ args: Args) -> Int32 {
     let hook = args.warnBelow != nil
     var threshold: Int64?
@@ -465,10 +455,7 @@ func main() async -> Int32 {
         var picked: [Candidate]
         if let plan {
             let resolved = plan.resolve(against: report.candidates)
-            // --ids narrows a plan to those items; it never adds anything the plan doesn't hold.
             if let ids = args.ids {
-                // Every named item must be in the plan and still ready in this scan; otherwise
-                // nothing runs, as without --plan.
                 let planned = Set(plan.items.map(\.id))
                 let ready = Set(resolved.ready.map(\.id))
                 let unplanned = ids.filter { !planned.contains($0) }

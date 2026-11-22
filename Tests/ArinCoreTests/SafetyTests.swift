@@ -11,7 +11,7 @@ private func run(_ tool: String, _ args: [String], cwd: String? = nil) async thr
     @Test func clonesCountOnlyTheirPrivateBlocksUnlessTheWholeFamilyIsInside() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
-        let data = String(repeating: "0123456789abcdef", count: 64 * 1024) // 1 MiB
+        let data = String(repeating: "0123456789abcdef", count: 64 * 1024)
         let original = try box.write("store/blob", data)
         _ = try box.mkdir("project")
         _ = try box.mkdir("pair")
@@ -24,10 +24,8 @@ private func run(_ tool: String, _ args: [String], cwd: String? = nil) async thr
         let mib: Int64 = 1024 * 1024
         let project = try #require(sizes["\(box.root)/project"])
         let plainSize = try #require(sizes["\(box.root)/plain"])
-        // A clone whose source stays behind frees almost nothing.
         #expect(project < mib / 4, "\(project)")
         #expect(plainSize >= mib, "\(plainSize)")
-        // `du` sees the clone in full.
         let du = await Shell.run("du", ["-sk", "\(box.root)/project"], timeout: 30)
         #expect((Int64(du.stdout.split(separator: "\t").first ?? "0") ?? 0) * 1024 >= mib)
     }
@@ -63,7 +61,6 @@ private func run(_ tool: String, _ args: [String], cwd: String? = nil) async thr
     }
 }
 
-/// A repo with one commit, tagged 1.0.0.
 private func makeRepo(_ box: Sandbox, _ rel: String) async throws -> String {
     let repo = try box.mkdir(rel)
     try await git(repo, "init", "-q", "-b", "main")
@@ -74,8 +71,6 @@ private func makeRepo(_ box: Sandbox, _ rel: String) async throws -> String {
     return repo
 }
 
-/// SwiftPM's layout in `<folder>`: a bare mirror in `repositories` and a checkout cloned from it,
-/// detached at the pinned tag, as `swift package resolve` leaves them.
 private func makeSwiftPMClones(_ box: Sandbox, in folder: String, source: String) async throws -> String {
     let mirror = "\(box.root)/\(folder)/repositories/dep-0d6739d0"
     let checkout = "\(box.root)/\(folder)/checkouts/dep"
@@ -101,7 +96,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
     let options = ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: ["\(box.root)/projects"],
                               checkPullRequests: false, minimumBytes: 0, keepListURL: nil)
     let found = await WorktreeRule.scanRepo(repo, ctx: ScanContext(options: options, state: .empty, now: Date()))
-    // git reports the real path (/private/var/…), so match by name.
     let name = (path as NSString).lastPathComponent
     return try #require(found.first { (($0.paths.first ?? "") as NSString).lastPathComponent == name }, "\(found.map(\.paths))")
 }
@@ -116,12 +110,10 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         let bare = await GitSafety.repositoryRefusal(in: "\(box.root)/scratch")
         #expect(bare?.contains("app.git") == true, "\(bare ?? "nil")")
 
-        // A linked worktree's git directory has HEAD and commondir but no objects of its own.
         _ = try box.write("shared/wt/HEAD", "ref: refs/heads/x\n")
         _ = try box.write("shared/wt/commondir", "../..\n")
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/shared") != nil)
 
-        // A name with a newline in it, and HEAD as a symlink, as git allows.
         try await git(box.root, "clone", "-q", "--bare", source, "\(box.root)/odd/line\nbreak.git")
         let newline = await GitSafety.repositoryRefusal(in: "\(box.root)/odd")
         #expect(newline?.contains("break.git") == true, "\(newline ?? "nil")")
@@ -131,7 +123,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         let symlinked = await GitSafety.repositoryRefusal(in: "\(box.root)/linked")
         #expect(symlinked?.contains("app.git") == true, "\(symlinked ?? "nil")")
 
-        // A file that happens to be named HEAD is not a repository.
         _ = try box.write("plain/notes/HEAD", "x")
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/plain") == nil)
     }
@@ -161,7 +152,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         let checkout = try await makeSwiftPMClones(box, in: "app/.build", source: source)
         let build = "\(box.root)/app/.build"
 
-        // A commit kept only by a local tag.
         try await git(checkout, "commit", "-q", "--allow-empty", "-m", "tagged locally")
         try await git(checkout, "tag", "local-fix")
         try await git(checkout, "checkout", "-q", "--detach", "1.0.0")
@@ -170,7 +160,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         try await git(checkout, "tag", "-d", "local-fix")
         #expect(await GitSafety.repositoryRefusal(in: build) == nil)
 
-        // A commit a stale remote-tracking ref claims the mirror has.
         try await git(checkout, "commit", "-q", "--allow-empty", "-m", "local")
         try await git(checkout, "update-ref", "refs/remotes/origin/main", "HEAD")
         let stale = await GitSafety.repositoryRefusal(in: build)
@@ -209,7 +198,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         let box = try Sandbox()
         defer { box.cleanup() }
         let source = try await makeRepo(box, "dep")
-        // `swift build --scratch-path` and `-clonedSourcePackagesDirPath` put the clones in any folder.
         _ = try box.write("scratch/wbuild/workspace-state.json", "{}")
         _ = try await makeSwiftPMClones(box, in: "scratch/wbuild", source: source)
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/scratch") == nil)
@@ -252,28 +240,23 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
     @Test func buildOutputThatHoldsWorkIsBlockedAndNotDeleted() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
-        // Committed node_modules (as JavaScript GitHub Actions do), force-added past the ignore rule.
         let committed = try await project(box, "action")
         _ = try box.write("projects/action/package.json", "{}")
         _ = try box.write("projects/action/node_modules/dep/index.js", "x")
         try await git(committed, "add", "-f", ".")
-        // And one that git doesn't ignore at all.
         _ = try await project(box, "loose", ignore: "")
         _ = try box.write("projects/loose/package.json", "{}")
         _ = try box.write("projects/loose/node_modules/dep/index.js", "x")
         try await git(committed, "commit", "-q", "-m", "vendor")
-        // An editable install's clone (`pip install -e git+…` puts it in <venv>/src).
         let source = try await makeRepo(box, "upstream")
         _ = try await project(box, "py")
         _ = try box.write("projects/py/.venv/pyvenv.cfg", "home = /usr/bin")
         try await git(box.root, "clone", "-q", source, "\(box.root)/projects/py/.venv/src/lib")
-        // An edited SwiftPM checkout.
         let dep = try await makeRepo(box, "dep")
         _ = try await project(box, "pkg")
         _ = try box.write("projects/pkg/Package.swift", "// swift-tools-version:5.9")
         _ = try await makeSwiftPMClones(box, in: "projects/pkg/.build", source: dep)
         _ = try box.write("projects/pkg/.build/checkouts/dep/README", "edited")
-        // Ordinary ignored build output.
         _ = try await project(box, "web")
         _ = try box.write("projects/web/package.json", "{}")
         _ = try box.write("projects/web/node_modules/dep/index.js", "x")
@@ -356,7 +339,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         try await git(repo, "commit", "-q", "-m", "keep scratch")
         let wt = "\(box.root)/projects/app.done"
         try await git(repo, "worktree", "add", "-q", "-b", "done", wt)
-        // `git ls-files --directory` lists scratch's parts, not scratch/, since it holds a tracked file.
         try await git(wt, "init", "-q", "--bare", "scratch")
 
         let c = try await scanWorktree(box, repo: repo, path: wt)
@@ -379,13 +361,11 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         try await git(repo, "worktree", "add", "-q", "-b", "done", wt)
         let source = try await makeRepo(box, "upstream")
 
-        // A nested checkout whose git directory lives elsewhere, with an uncommitted edit.
         try await git(box.root, "clone", "-q", "--separate-git-dir=\(box.root)/sep", source, "\(wt)/scratch/sub")
         _ = try box.write("projects/app.done/scratch/sub/README", "edited")
         let nested = try await scanWorktree(box, repo: repo, path: wt)
         #expect(nested.blockers.contains { $0.contains("scratch/sub/") }, "\(nested.blockers)")
 
-        // A .git file in the partly ignored folder itself, which git doesn't list.
         try FileManager.default.removeItem(atPath: "\(wt)/scratch/sub")
         _ = try box.write("projects/app.done/scratch/notes.txt", "x")
         _ = try box.write("projects/app.done/scratch/.git", "gitdir: \(box.root)/sep\n")
@@ -456,7 +436,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         """
         #expect(MiseRule.unloadableConfigs(in: output) == [config])
         #expect(MiseRule.unloadableConfigs(in: "mise would remove node@20.1.0").isEmpty)
-        // A path with ": " in it still resolves.
         let odd = try box.write("odd: name/mise.toml", "x")
         #expect(MiseRule.unloadableConfigs(in: "error loading tracked config file \(odd): bad") == [odd])
     }
@@ -485,7 +464,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         _ = try box.write("tmp/dd/info.plist", "<plist/>")
         _ = try box.write("tmp/tagged/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55\n")
         _ = try box.write("tmp/agent-scratch/notes.md", "plan")
-        // Only the start of a README is read; a large one doesn't change the answer.
         _ = try box.write("tmp/bigreadme/README", String(repeating: "x", count: 4 << 20))
         _ = try box.write("tmp/bigreadme/trim.txt", "1")
         #expect(TempRule.recognizedCache("\(box.root)/tmp/bigreadme") == nil)
@@ -573,7 +551,6 @@ private func scanWorktree(_ box: Sandbox, repo: String, path: String) async thro
         let skipped = await Executor(guardrails: box.guardrails).clean(kept, state: .empty)
         #expect(skipped.status == .skipped, "\(skipped.message)")
 
-        // An edit made after the scan stops the delete too.
         _ = try box.write("\(dd)/App-clean/SourcePackages/checkouts/dep/README", "edited later")
         let rechecked = await Executor(guardrails: box.guardrails).clean(orphaned, state: .empty)
         #expect(rechecked.status == .skipped, "\(rechecked.message)")

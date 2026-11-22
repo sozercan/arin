@@ -1,6 +1,5 @@
 import Foundation
 
-/// Old Codex standalone releases. Keeps `current` and any release a running session still uses.
 struct CodexReleasesRule: Rule {
     let id = "tools.codex-releases"
     let name = "Old Codex releases"
@@ -19,7 +18,6 @@ struct CodexReleasesRule: Rule {
     }
 }
 
-/// Old Claude Code versions. Keeps the one `~/.local/bin/claude` points at and any running one.
 struct ClaudeVersionsRule: Rule {
     let id = "tools.claude-versions"
     let name = "Old Claude Code versions"
@@ -72,7 +70,6 @@ enum OldVersions {
     }
 }
 
-/// Rust toolchains other than the default. Some projects pin versions, so these need a look.
 struct RustToolchainRule: Rule {
     let id = "tools.rust-toolchains"
     let name = "Extra Rust toolchains"
@@ -106,8 +103,6 @@ struct RustToolchainRule: Rule {
     }
 }
 
-/// Tool versions mise installed that no tracked config or tool stub selects. `mise prune` makes
-/// that call itself at cleanup time and keeps versions a running process uses.
 struct MiseRule: Rule {
     let id = "tools.mise"
     let name = "Unused mise tool versions"
@@ -125,7 +120,6 @@ struct MiseRule: Rule {
         }
         let env = ProcessInfo.processInfo.environment
         let dataDir = env["MISE_DATA_DIR"] ?? env["XDG_DATA_HOME"].map { "\($0)/mise" } ?? ctx.path(".local/share/mise")
-        // mise leaves out a tracked config it can't load, so a version only that config pins looks unused.
         let unloadable = await Self.unloadableConfigs()
         var found: [Candidate] = []
         for (tool, entries) in tools.sorted(by: { $0.key < $1.key }) where !entries.isEmpty {
@@ -151,10 +145,6 @@ struct MiseRule: Rule {
         return found
     }
 
-    /// Why `mise prune` can't be trusted right now, or nil. mise logs "error loading tracked config
-    /// file <path>: <error>" for a tracked config it can't parse and then ignores it, so a version that
-    /// config pins counts as unused. Configs that no longer exist are fine. A dry run that fails, or a
-    /// path that can't be checked, also refuses.
     static func unloadableConfigs(tool: String? = nil) async -> String? {
         let result = await Shell.run(
             "mise", ["prune", "--tools", "--dry-run"] + (tool.map { [$0] } ?? []),
@@ -168,13 +158,11 @@ struct MiseRule: Rule {
         return "mise can't load the tracked config \(first)\(more), so it could prune a version that config pins"
     }
 
-    /// The tracked configs in mise output that failed to load and may still exist.
     static func unloadableConfigs(in output: String) -> [String] {
         let marker = "error loading tracked config file "
         return output.split(separator: "\n").compactMap { line -> String? in
             guard let range = line.range(of: marker) else { return nil }
             let text = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
-            // The path is followed by ": <error>", and a path can itself contain ": ". Try each split.
             var candidates: [String] = []
             var search = text.startIndex
             while let colon = text.range(of: ": ", range: search ..< text.endIndex) {
@@ -190,7 +178,6 @@ struct MiseRule: Rule {
                 var info = stat()
                 if lstat(path, &info) == 0 || errno != ENOENT { return candidate }
             }
-            // Text that isn't a path can't be shown to be gone.
             return sawPath ? nil : text
         }
     }

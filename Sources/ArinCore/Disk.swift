@@ -2,9 +2,7 @@ import Foundation
 
 public struct DiskStatus: Codable, Sendable, Hashable {
     public var totalBytes: Int64
-    /// Space that is free right now.
     public var freeBytes: Int64
-    /// Free plus purgeable space macOS says it can reclaim on demand.
     public var availableForImportantUsage: Int64
 
     public var usedFraction: Double {
@@ -29,7 +27,6 @@ public enum Disk {
         )
     }
 
-    /// Local APFS snapshots. While one exists, deleted files keep occupying space.
     public static func localSnapshots() async -> [String] {
         var names = Set<String>()
         for volume in ["/", "/System/Volumes/Data"] {
@@ -43,8 +40,6 @@ public enum Disk {
 }
 
 public enum ByteSize {
-    /// Parses sizes such as `20GiB`, `20G`, `500MB`, or `1.5 TiB`. `KiB`/`MiB`/`GiB`/`TiB` and the bare
-    /// letters are powers of 1024; `KB`/`MB`/`GB`/`TB` are powers of 1000. A plain number is bytes.
     public static func parse(_ text: String) -> Int64? {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard let match = trimmed.wholeMatch(of: /([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)/),
@@ -63,13 +58,9 @@ public enum ByteSize {
     }
 }
 
-/// One low-space alert per drop below the threshold. After alerting, it re-arms only once free space is
-/// back above the threshold by a margin, so free space hovering around the line doesn't alert each dip.
 public enum LowSpacePolicy {
-    /// 10% of the threshold, at least 2 GB.
     public static func rearmMargin(threshold: Int64) -> Int64 { max(2_000_000_000, threshold / 10) }
 
-    /// Whether to alert now, and whether an alert stays outstanding.
     public static func evaluate(free: Int64, threshold: Int64, alerted: Bool) -> (notify: Bool, alerted: Bool) {
         if free < threshold { return (!alerted, true) }
         if alerted, free < threshold + rearmMargin(threshold: threshold) { return (false, true) }

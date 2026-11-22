@@ -1,19 +1,15 @@
 import Foundation
 
-/// Hard limits on what the executor may touch, regardless of rules or agent output.
 public struct Guardrails: Sendable {
     public var home: String
     public var allowedRoots: [String]
     public var protectedPaths: [String]
-    /// Where an uninstall may take an app bundle from. Cleanups never touch these.
     public var applicationRoots: [String]
-    /// Where volumes are mounted right now. Nil when they can't be listed, which refuses every path.
     public var mountPoints: @Sendable () -> [String]? = Guardrails.currentMountPoints
 
     public init(home: String = NSHomeDirectory(), tmpDir: String = NSTemporaryDirectory()) {
         let home = Self.canonical((home as NSString).standardizingPath)
         self.home = home
-        // $TMPDIR is /var/folders/xx/yyyy/T; its parent also holds C (cache) and X (code-sign clones).
         let tmp = Self.canonical((tmpDir as NSString).standardizingPath)
         let perUser = (tmp as NSString).deletingLastPathComponent
         allowedRoots = [home, "/private/tmp", perUser]
@@ -47,9 +43,6 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// Validates a path for deletion or trashing. Symlinked ancestors are resolved and the real
-    /// location is checked too, so `~/Library/Caches/X -> ~/Documents/X` can't smuggle a delete
-    /// into a protected folder.
     public func check(_ rawPath: String) throws(Violation) {
         guard rawPath.hasPrefix("/") else { throw .notAbsolute(rawPath) }
         let path = Self.canonical((rawPath as NSString).standardizingPath)
@@ -61,8 +54,6 @@ public struct Guardrails: Sendable {
         try checkNoMount(path, real: real)
     }
 
-    /// Refuses a path that is a mount point or has one below it. Deleting, chmod-ing or removing a
-    /// worktree there would reach into another volume, such as a disk image or a network share.
     func checkNoMount(_ path: String, real: String) throws(Violation) {
         guard let mounts = mountPoints() else { throw .mountInside(path) }
         let targets = Set([path, real].flatMap { [$0, "/System/Volumes/Data" + $0] }.map { $0.lowercased() })
@@ -71,7 +62,6 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// Mount points from `getfsstat`, or nil if the call fails.
     public static func currentMountPoints() -> [String]? {
         let count = getfsstat(nil, 0, MNT_NOWAIT)
         guard count > 0 else { return nil }
@@ -87,8 +77,6 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// Validates a path a native command will operate on. Commands follow a symlink at the leaf
-    /// (unlike delete, which only unlinks it), so the fully resolved target must pass too.
     public func checkTarget(_ rawPath: String) throws(Violation) {
         try check(rawPath)
         let resolved = Self.canonical(URL(fileURLWithPath: rawPath).resolvingSymlinksInPath().path)
@@ -98,39 +86,28 @@ public struct Guardrails: Sendable {
     }
 
     private func checkCanonical(_ path: String) throws(Violation) {
-        // macOS volumes are usually case-insensitive: ~/Library/messages is ~/Library/Messages.
         let folded = path.lowercased()
         guard let root = allowedRoots.first(where: { folded == $0.lowercased() || folded.hasPrefix($0.lowercased() + "/") }) else {
             throw .outsideAllowedRoots(path)
         }
-        // At least two components below home (no ~/Library, ~/projects); one below temp roots.
         let depth = path.dropFirst(root.count).split(separator: "/").count
         if depth < (root == home ? 2 : 1) { throw .tooShallow(path) }
         for protected in protectedPaths.map({ $0.lowercased() }) {
-            // Inside a protected path, or an ancestor of one.
             if folded == protected || folded.hasPrefix(protected + "/") || protected.hasPrefix(folded + "/") {
                 throw .protected(path)
             }
         }
     }
 
-    // MARK: Uninstall
 
-    /// The ~/Library folders an uninstall may take an app's own files from, one item deep.
     public static let uninstallFolders = [
         "Application Scripts", "Application Support", "Caches", "Containers", "Cookies", "Group Containers",
         "HTTPStorages", "LaunchAgents", "Logs", "Logs/DiagnosticReports", "Preferences", "Preferences/ByHost",
         "Saved Application State", "WebKit",
     ]
 
-    /// Protected folders an uninstall may take one item from: apps, their preferences and their group
-    /// containers live there. The rest of `protectedPaths` stays off limits to uninstalls too.
     static let uninstallExceptions = ["Applications", "Library/Preferences", "Library/Group Containers"]
 
-    /// Validates a path an uninstall moves to the Trash, or puts back: an app bundle in an
-    /// Applications folder (or one folder below it), or one item directly inside a per-app folder of
-    /// ~/Library. Whether the item belongs to the app is the uninstaller's check; this is the shape
-    /// every such path must have. Symlinked ancestors are resolved and checked too.
     public func checkUninstall(_ rawPath: String) throws(Violation) {
         guard rawPath.hasPrefix("/") else { throw .notAbsolute(rawPath) }
         let path = Self.canonical((rawPath as NSString).standardizingPath)
@@ -146,16 +123,13 @@ public struct Guardrails: Sendable {
         let folded = path.lowercased()
         let name = (folded as NSString).lastPathComponent
         let parent = (folded as NSString).deletingLastPathComponent
-        // Apple's own files and dotfiles (.GlobalPreferences.plist) are never an app's leftovers.
         guard !name.hasPrefix("."), !name.contains("com.apple.") else { throw .protected(path) }
 
         if name.hasSuffix(".app"), let root = applicationRoots.first(where: { folded.hasPrefix($0.lowercased() + "/") }) {
-            // `/Applications/Foo.app` or `/Applications/Vendor/Foo.app`, never a bundle inside another.
             let below = folded.dropFirst(root.count + 1).split(separator: "/")
             guard below.count <= 2, !below.dropLast().contains(where: { $0.hasSuffix(".app") }) else {
                 throw .protected(path)
             }
-            // Apple's apps (and Arin) are refused by bundle ID while the bundle is there to read.
             if FileInfo.exists(path), !AppCatalog.isUninstallable(AppCatalog.bundleID(at: path) ?? "") {
                 throw .protected(path)
             }
@@ -166,7 +140,6 @@ public struct Guardrails: Sendable {
         guard Self.uninstallFolders.contains(where: { parent == library + $0.lowercased() }) else {
             throw .outsideAllowedRoots(path)
         }
-        // `Preferences/ByHost` and `Logs/DiagnosticReports` are shared folders, not one app's item.
         if Self.uninstallFolders.contains(where: { folded == library + $0.lowercased() }) { throw .protected(path) }
         let exceptions = Self.uninstallExceptions.map { "\(home)/\($0)".lowercased() }
         for protected in protectedPaths.map({ $0.lowercased() }) where !exceptions.contains(protected) {
@@ -176,7 +149,6 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// A Homebrew cask token such as `visual-studio-code` or `ghostty@tip`. Never an option or a path.
     public static func isCaskToken(_ value: String) -> Bool {
         value.wholeMatch(of: /[a-z0-9][a-z0-9@._+-]*/) != nil && !value.contains("..")
     }
@@ -192,37 +164,30 @@ public struct Guardrails: Sendable {
         }
     }
 
-    /// Only these tools may be run by an action.
     public static let allowedExecutables: Set<String> = [
         "go", "npm", "uv", "brew", "yarn", "pnpm", "xcrun", "git", "docker", "rustup", "sqlite3", "podman",
         "tmutil", "ollama", "mise",
     ]
 
-    /// Whether an action may run this command. Tools whose other subcommands could do real damage
-    /// (turn off backups, delete every model, uninstall runtimes in use) are limited to one exact shape.
     public static func allows(_ command: CommandSpec) -> Bool {
         guard allowedExecutables.contains(command.executable) else { return false }
         let args = command.arguments
-        // A model or tool name such as `llama3.2:latest`, `hf.co/org/model:q4`, `npm:prettier`. Never an option.
         func isName(_ value: String) -> Bool {
             value.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._:\/@+-]*/) != nil && !value.contains("..")
         }
         switch command.executable {
         case "tmutil":
-            // One Time Machine snapshot, by date. Never a volume, never update snapshots.
             return args.count == 2 && args[0] == "deletelocalsnapshots"
                 && args[1].wholeMatch(of: /\d{4}-\d{2}-\d{2}-\d{6}/) != nil
         case "ollama":
             return args.count == 2 && args[0] == "rm" && isName(args[1])
         case "mise":
-            // mise decides what's unused; Arin only names the tool.
             return args.count == 4 && Array(args.prefix(3)) == ["prune", "--tools", "--yes"] && isName(args[3])
         default:
             return true
         }
     }
 
-    /// /var and /tmp are symlinks into /private; compare canonical forms.
     static func canonical(_ path: String) -> String {
         for prefix in ["/var/", "/tmp/"] where path.hasPrefix(prefix) {
             return "/private" + path

@@ -1,7 +1,5 @@
 import Foundation
 
-/// Docker build cache, unused images, and dangling volumes, via Docker's own commands.
-/// Docker's CLI can hang when Desktop is wedged, so every call has a short timeout.
 struct DockerRule: Rule {
     let id = "docker"
     let name = "Docker"
@@ -12,8 +10,6 @@ struct DockerRule: Rule {
 
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("docker") != nil else { return [] }
-        // Pin every call and saved action to the context scanned now, so switching contexts
-        // before cleaning can't aim a prune or `volume rm` at a different daemon.
         let current = await Shell.run("docker", ["context", "show"], timeout: 10)
         guard current.ok, let context = current.lines.first?.trimmingCharacters(in: .whitespaces), !context.isEmpty
         else { return [] }
@@ -21,7 +17,7 @@ struct DockerRule: Rule {
 
         let info = await Shell.run("docker", docker(["info", "--format", "{{.ServerVersion}}"]), timeout: 10)
         if info.timedOut { throw DockerUnavailable() }
-        guard info.ok else { return [] } // daemon not running
+        guard info.ok else { return [] }
 
         var result: [Candidate] = []
         let df = await Shell.run("docker", docker(["system", "df", "--format", "{{json .}}"]), timeout: 60)
@@ -62,7 +58,6 @@ struct DockerRule: Rule {
             }
         }
 
-        // `buildx ls` lists builders and their nodes. If it fails, owners are unknown: nothing is an orphan.
         let listing = await Shell.run("docker", docker(["buildx", "ls", "--format", "{{.Name}}"]), timeout: 15)
         let builders: Set<String>? = listing.ok ? Set(listing.lines.map { $0.trimmingCharacters(in: .whitespaces) }) : nil
         let dangling = await Shell.run("docker", docker(["volume", "ls", "-q", "--filter", "dangling=true"]), timeout: 20).lines
@@ -102,7 +97,6 @@ struct DockerRule: Rule {
         return sizes
     }
 
-    /// `buildx_buildkit_<builder>0_state` where `<builder>` is gone.
     static func orphanedBuildxVolume(_ volume: String, builders: Set<String>) -> Bool {
         guard volume.hasPrefix("buildx_buildkit_"), volume.hasSuffix("_state") else { return false }
         let node = String(volume.dropFirst("buildx_buildkit_".count).dropLast("_state".count))
@@ -110,7 +104,6 @@ struct DockerRule: Rule {
         return !builders.contains(builder) && !builders.contains(node)
     }
 
-    /// Parses Docker's human sizes: "6.1GB", "512MB", "1.2kB", "0B", "3.6GB (100%)".
     static func parseSize(_ text: String) -> Int64? {
         let token = text.split(separator: " ").first.map(String.init) ?? text
         let units: [(String, Double)] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("kB", 1e3), ("KB", 1e3), ("B", 1)]
@@ -122,7 +115,6 @@ struct DockerRule: Rule {
     }
 }
 
-/// SQLite databases with lots of free pages inside (Codex's log DB has shown 16 of 17 GB free).
 struct SQLiteFreePagesRule: Rule {
     let id = "agent.sqlite-free-pages"
     let name = "Bloated agent databases"
@@ -156,7 +148,6 @@ struct SQLiteFreePagesRule: Rule {
     }
 }
 
-/// Electron app caches (Slack, Notion, VS Code, Discord…): Cache, Code Cache, GPUCache, CacheStorage.
 struct ElectronCacheRule: Rule {
     let id = "apps.electron-cache"
     let name = "Electron app caches"
@@ -168,7 +159,6 @@ struct ElectronCacheRule: Rule {
         for appDir in FileInfo.children(support) {
             let app = (appDir as NSString).lastPathComponent
             if app.hasPrefix("com.apple.") || app == "Google" { continue }
-            // Notion and some others nest a partition per workspace.
             var roots = [appDir]
             roots += FileInfo.children("\(appDir)/Partitions")
             var found: [String] = []
@@ -177,7 +167,6 @@ struct ElectronCacheRule: Rule {
                     found.append("\(root)/\(dir)")
                 }
             }
-            // Require at least two Chromium cache dirs so plain "Cache" folders of other apps aren't matched.
             if found.count >= 2 { groups.append((app, found)) }
         }
         guard !groups.isEmpty else { return [] }

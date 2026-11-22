@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Builds build/Arin.app from the SwiftPM ArinApp and arin products.
-# Usage: Scripts/build-app.sh [debug|release]
-#   ARCHES="arm64 x86_64"   build a universal binary (default: host architecture)
-#   ARIN_SIGNING=adhoc      ad-hoc signature (default)
-#   ARIN_SIGNING=dev        Apple Development identity, hardened runtime
-#   ARIN_SIGNING=developer-id  Developer ID Application identity, hardened runtime, secure timestamp
-#   APP_IDENTITY=<hash|name>   identity to use; otherwise the first matching one in the keychain
 set -euo pipefail
 
 CONFIG="${1:-release}"
@@ -16,18 +9,13 @@ cd "$ROOT"
 source "$ROOT/version.env"
 
 RELEASE_BUNDLE_ID="com.sertacozercan.Arin"
-# Debug builds get their own bundle ID so they never share settings (Auto mode, agent,
-# project folders) with an installed copy.
 if [[ "$CONFIG" == "debug" ]]; then BUNDLE_ID="$RELEASE_BUNDLE_ID.debug"; else BUNDLE_ID="$RELEASE_BUNDLE_ID"; fi
 
 read -r -a ARCH_LIST <<< "${ARCHES:-$(uname -m)}"
 
-# Builds one product per architecture and stages each thin binary right away: some
-# SwiftPM layouts reuse a single products folder for every --arch build.
 build_product() {
   local product="$1" arch bin
   for arch in "${ARCH_LIST[@]}"; do
-    # One --product per invocation: SwiftPM only builds the last one when several are given.
     swift build -c "$CONFIG" --arch "$arch" --product "$product"
     bin="$(swift build -c "$CONFIG" --arch "$arch" --show-bin-path)"
     mkdir -p "$STAGE/$arch"
@@ -35,7 +23,6 @@ build_product() {
   done
 }
 
-# Installs a product into the bundle, merging architectures with lipo when needed.
 install_product() {
   local product="$1" dest="$2" inputs=() arch
   for arch in "${ARCH_LIST[@]}"; do inputs+=("$STAGE/$arch/$product"); done
@@ -47,15 +34,11 @@ rm -rf "$APP" "$STAGE"
 build_product ArinApp
 build_product arin
 
-# The CLI goes in Helpers: Contents/MacOS can't hold both Arin and arin on a case-insensitive
-# volume, and Apple expects helper tools there rather than in Resources.
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 install_product ArinApp "$APP/Contents/MacOS/Arin"
 install_product arin "$APP/Contents/Helpers/arin"
 rm -rf "$STAGE"
 
-# AppIcon.icon is an Icon Composer package. actool turns it into Assets.car (Liquid Glass
-# icon with light, dark, and tinted variants) plus AppIcon.icns for Finder and older APIs.
 xcrun actool --compile "$APP/Contents/Resources" \
   --app-icon AppIcon \
   --output-partial-info-plist "$ROOT/build/AppIconInfo.plist" \
@@ -104,7 +87,6 @@ case "$SIGNING" in
   developer-id)
     IDENTITY="${APP_IDENTITY:-$(find_identity "Developer ID Application")}"
     [[ -n "$IDENTITY" ]] || { echo "ERROR: no Developer ID Application identity found" >&2; exit 1; }
-    # Notarization requires the hardened runtime and a secure timestamp on every binary.
     CODESIGN_ARGS=(--force --options runtime --timestamp --sign "$IDENTITY")
     ;;
   *)
@@ -112,7 +94,6 @@ case "$SIGNING" in
     exit 1
     ;;
 esac
-# Innermost first: the helper, then the app that seals it.
 codesign "${CODESIGN_ARGS[@]}" --identifier "$BUNDLE_ID.cli" "$APP/Contents/Helpers/arin"
 codesign "${CODESIGN_ARGS[@]}" "$APP"
 echo "Built $APP ($BUNDLE_ID $MARKETING_VERSION ($BUILD_NUMBER), ${ARCH_LIST[*]}, $SIGNING signing)"

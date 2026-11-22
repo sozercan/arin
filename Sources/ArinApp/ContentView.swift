@@ -22,7 +22,6 @@ struct ContentView: View {
                 } else if model.sidebar == .map {
                     SpaceMapView().statusBar(model)
                 } else {
-                    // Adds the status bar itself, so it stops at the inspector.
                     CandidateList(title: model.sidebarTitle)
                 }
             }
@@ -104,7 +103,6 @@ private struct Toolbar: ToolbarContent {
             .help("Quick: caches that refill on their own. Standard: adds build output and merged worktrees. Deep: simulator data, toolchains, app data.")
         }
 
-        // Scan and Review act on the whole scan, so they share one piece of glass; Clean stands apart.
         ToolbarItemGroup(placement: .primaryAction) {
             if model.canStop {
                 Button { model.stop() } label: { Label("Stop", systemImage: "stop.fill") }
@@ -136,19 +134,15 @@ private struct Toolbar: ToolbarContent {
 }
 
 extension View {
-    /// A safe-area bar gets the system scroll edge effect, so it needs no background of its own.
-    /// The bar is hosted apart from the content, so it takes the model rather than the environment.
     func statusBar(_ model: AppModel) -> some View {
         safeAreaBar(edge: .bottom) { StatusBar(model: model) }
     }
 }
 
-/// Status only. Actions live in the toolbar and the menus.
 private struct StatusBar: View {
     var model: AppModel
 
     var body: some View {
-        // Before the first scan finishes, the welcome screen shows progress itself.
         if model.report != nil {
             HStack(spacing: 8) {
                 if model.phase.isBusy {

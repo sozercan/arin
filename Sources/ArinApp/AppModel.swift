@@ -36,7 +36,6 @@ final class AppModel {
         case apps
     }
 
-    // MARK: State
 
     var disk = Disk.status()
     var report: ScanReport?
@@ -45,14 +44,11 @@ final class AppModel {
     var phase = Phase.idle
     var sidebar: SidebarItem? = .all
     var lastCleanup: CleanupReport?
-    /// Replaces the result sheet's title, for uninstalls.
     var lastCleanupTitle: String?
     var showingConfirm = false
     var showingResult = false
     var errorMessage: String?
-    /// Filters the item list by name, path, or category.
     var searchText = ""
-    /// Items the user never wants cleaned. Nil when the file can't be read; see `keepListError`.
     var keepList: KeepList?
     var keepListError: String?
     var historyEntries: [HistoryEntry] = []
@@ -60,7 +56,6 @@ final class AppModel {
     var launchAtLoginNeedsApproval = false
     private let history = History()
 
-    // MARK: Settings
 
     var level: Level {
         didSet {
@@ -69,7 +64,6 @@ final class AppModel {
         }
     }
 
-    /// `nil` means reviews are off. Saved as `noAgent` so a relaunch doesn't pick an installed agent again.
     var agent: AgentProvider? {
         didSet { defaults.set(agent?.rawValue ?? Self.noAgent, forKey: "agent") }
     }
@@ -84,7 +78,6 @@ final class AppModel {
         didSet { defaults.set(autoMode, forKey: "autoMode") }
     }
 
-    /// Run the agent review right after each manual scan.
     var autoReview: Bool {
         didSet { defaults.set(autoReview, forKey: "autoReview") }
     }
@@ -97,7 +90,6 @@ final class AppModel {
         didSet { defaults.set(sortAscending, forKey: "sortAscending") }
     }
 
-    /// Starts hidden so the table gets the room; remembered once toggled.
     var showingInspector: Bool {
         didSet { defaults.set(showingInspector, forKey: "showingInspector") }
     }
@@ -118,7 +110,6 @@ final class AppModel {
         didSet { defaults.set(extraProjectRoots, forKey: "extraProjectRoots") }
     }
 
-    /// Per agent; an empty model means the CLI's own default.
     var reviewModels: [String: String] {
         didSet { defaults.set(reviewModels, forKey: "reviewModels") }
     }
@@ -145,7 +136,6 @@ final class AppModel {
         autoReview = defaults.object(forKey: "autoReview") as? Bool ?? true
         let column = defaults.string(forKey: "sortOrder").flatMap(SortColumn.init(rawValue:)) ?? .size
         sortColumn = column
-        // Before the direction was saved, names sorted A to Z, safety safest first, and the rest largest or newest first.
         showingInspector = defaults.bool(forKey: "showingInspector")
         sortAscending = defaults.object(forKey: "sortAscending") as? Bool ?? [.name, .safety].contains(column)
         trashInsteadOfDelete = defaults.bool(forKey: "trashInsteadOfDelete")
@@ -165,13 +155,11 @@ final class AppModel {
         refreshLaunchAtLogin()
         requestNotificationPermission()
         startMonitor()
-        // `open Arin.app --args -ScanOnLaunch YES` starts a scan right away.
         if defaults.bool(forKey: "ScanOnLaunch") {
             startScan()
         }
     }
 
-    // MARK: Derived
 
     var lowSpaceThreshold: Int64 { Int64(lowSpaceThresholdGB) * 1_000_000_000 }
     var isLowOnSpace: Bool { disk.freeBytes < lowSpaceThreshold }
@@ -202,8 +190,6 @@ final class AppModel {
         }
     }
 
-    /// What the list or map shows: the sidebar's group, narrowed by search in the list. The map
-    /// shows everything and has no search field, so a search left over from the list doesn't apply.
     var visibleCandidates: [Candidate] {
         if sidebar == .map { return candidates }
         let items = candidates(for: sidebar)
@@ -233,7 +219,6 @@ final class AppModel {
         )
     }
 
-    // MARK: Actions
 
     func refreshDisk() {
         disk = Disk.status()
@@ -249,7 +234,6 @@ final class AppModel {
         return false
     }
 
-    /// Scans and reviews can be stopped; cleaning runs to completion.
     var canStop: Bool { isScanning || isReviewing }
 
     func startScan() {
@@ -265,7 +249,6 @@ final class AppModel {
         work = Task { await review() }
     }
 
-    /// Cancels the scan or review and its subprocesses; previous results stay as they were.
     func stop() {
         work?.cancel()
     }
@@ -284,8 +267,6 @@ final class AppModel {
             phase = .idle
             return
         }
-        // A verdict judged a folder's contents at review time, and contents change. Carry over only
-        // verdicts that add caution; a stale "safe" must never pre-select new data.
         let previous = Dictionary(uniqueKeysWithValues: candidates.compactMap { c in
             c.agentVerdict.flatMap { $0.risk > c.risk ? (c.id, $0) : nil }
         })
@@ -299,8 +280,6 @@ final class AppModel {
         phase = .idle
     }
 
-    /// Items the rules couldn't settle: anything not rule-safe, and everything unclassified.
-    /// Rule-safe caches don't need an agent, which keeps reviews quick and cheap.
     var itemsNeedingReview: [Candidate] {
         candidates.filter { $0.isActionable && !$0.kept && ($0.risk != .safe || $0.category == .unclassified) }
     }
@@ -320,7 +299,6 @@ final class AppModel {
             let verdicts = try await reviewer.review(items)
             if !Task.isCancelled {
                 candidates = candidates.applying(verdicts)
-                // Only reviewed items change selection, and never ones the user changed meanwhile.
                 for candidate in candidates where verdicts[candidate.id] != nil && !editedDuringReview.contains(candidate.id) {
                     if candidate.isDefaultSelected(at: level) {
                         selection.insert(candidate.id)
@@ -353,7 +331,6 @@ final class AppModel {
         }
     }
 
-    /// Selects every safe item among `items`, at any level, and deselects the rest.
     func selectSafe(in items: [Candidate]) {
         setAll(items, selected: false)
         setAll(items.filter { $0.isDefaultSelected(at: .deep) }, selected: true)
@@ -378,8 +355,6 @@ final class AppModel {
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
         selection.subtract(cleanedIDs)
-        // A partly removed item stays listed for a retry, sized as what's left, so the retry's
-        // estimate doesn't count again what this cleanup already credited.
         for item in result.items where item.status == .partial {
             if let index = candidates.firstIndex(where: { $0.id == item.id }) {
                 candidates[index].bytes = max(0, candidates[index].bytes - item.estimatedBytes)
@@ -397,31 +372,23 @@ final class AppModel {
         }
     }
 
-    // MARK: Uninstall
 
     var apps: [InstalledApp] = []
-    /// Measured in the background after the list loads; missing until then.
     var appSizes: [String: Int64] = [:]
     var loadingApps = false
     private var sizeTask: Task<Void, Never>?
-    /// The app whose uninstall sheet is open.
     var uninstallApp: InstalledApp?
-    /// Nil while the app's files are being found.
     var uninstallFiles: [AppFile]?
     var uninstallSelection = Set<String>()
-    /// Why the app can't be uninstalled right now (it's running).
     var uninstallRefusal: String?
-    /// Only the latest `prepareUninstall` may fill the sheet.
     private var uninstallRequest = UUID()
 
     func loadApps() async {
         guard !loadingApps else { return }
         loadingApps = true
-        // Measured again: an app updated at the same path has a new size.
         sizeTask?.cancel()
         appSizes = [:]
         let found = await Task.detached { AppCatalog.installed() }.value
-        // Published with their casks, so an app picked early still shows it's Homebrew's.
         let casks = await AppCatalog.caskTokens()
         apps = found.map { app in
             var app = app
@@ -432,7 +399,6 @@ final class AppModel {
         measureApps()
     }
 
-    /// `du` over every app can take minutes (Xcode-sized bundles), so sizes fill in as they finish.
     private func measureApps() {
         sizeTask?.cancel()
         let pending = apps.map(\.path).filter { appSizes[$0] == nil }
@@ -444,7 +410,6 @@ final class AppModel {
                     group.addTask { (path, await Size.allocated(path, timeout: 600)) }
                 }
                 for await (path, bytes) in group {
-                    // A reload replaced this task; its cut-short measurements read as zero.
                     if Task.isCancelled { group.cancelAll(); return }
                     self?.appSizes[path] = bytes
                     if let next = queue.next() { group.addTask { (next, await Size.allocated(next, timeout: 600)) } }
@@ -453,7 +418,6 @@ final class AppModel {
         }
     }
 
-    /// Opens the uninstall sheet and finds the app's files.
     func prepareUninstall(_ app: InstalledApp) {
         guard !phase.isBusy else { return }
         uninstallApp = app
@@ -465,8 +429,6 @@ final class AppModel {
         let casks = Dictionary(apps.compactMap { app in app.caskToken.map { (app.path.lowercased(), $0) } }) { first, _ in first }
         Task {
             async let refusal = Uninstaller().refusal(for: app)
-            // A fresh catalog, not the list on screen: it may still be loading, or another copy of
-            // the app may have arrived since, and either decides which files start checked.
             let path = (app.path as NSString).standardizingPath
             let others = await Task.detached { AppCatalog.installed() }.value
                 .filter { ($0.path as NSString).standardizingPath != path }
@@ -479,7 +441,6 @@ final class AppModel {
         }
     }
 
-    /// For an app dropped on the window. Returns whether it's one Arin can uninstall.
     @discardableResult
     func prepareUninstall(url: URL) -> Bool {
         let path = (url.path as NSString).standardizingPath
@@ -493,7 +454,6 @@ final class AppModel {
         return true
     }
 
-    /// Takes the sheet's app and checked files now, before the sheet closes and clears them.
     func uninstall(_ app: InstalledApp) {
         guard uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
         let picked = files.filter { uninstallSelection.contains($0.id) }
@@ -515,11 +475,7 @@ final class AppModel {
         showingResult = true
     }
 
-    // MARK: Keep list
 
-    /// Reads the keep list (the CLI may have changed it) and applies it to the current results:
-    /// newly kept items, and items containing one, leave the selection. If it can't be read,
-    /// nothing stays selected.
     func reloadKeepList() {
         apply(KeepList.load(recording: report?.keptPaths ?? [:]))
     }
@@ -544,7 +500,6 @@ final class AppModel {
 
     func isKept(_ id: String) -> Bool { keepList?.contains(id) ?? false }
 
-    /// Adds or removes an item from the keep list, and updates the current results to match.
     func setKept(_ id: String, title: String, paths: [String] = [], _ kept: Bool) {
         do {
             try KeepList.update { list in
@@ -557,13 +512,11 @@ final class AppModel {
         }
     }
 
-    // MARK: History
 
     private func appendHistory(_ entry: HistoryEntry) {
         do {
             try history.append(entry)
         } catch {
-            // History is a convenience; a write failure never blocks scanning or cleaning.
         }
         historyEntries = history.load()
     }
@@ -571,7 +524,6 @@ final class AppModel {
     var scanRecords: [ScanRecord] { History.scans(historyEntries) }
     var cleanupRecords: [CleanupRecord] { History.cleanups(historyEntries) }
 
-    /// Growth from the previous scan to the latest one.
     var growthSinceLastScan: (since: Date, items: [Growth])? {
         let scans = scanRecords
         guard scans.count >= 2 else { return nil }
@@ -584,11 +536,9 @@ final class AppModel {
         } catch {
             errorMessage = (error as? StoreError)?.description ?? "Could not put it back: \(error.localizedDescription)"
         }
-        // Re-render so the button disappears.
         historyEntries = history.load()
     }
 
-    // MARK: Launch at login
 
     func refreshLaunchAtLogin() {
         guard canNotify else { return }
@@ -610,7 +560,6 @@ final class AppModel {
         refreshLaunchAtLogin()
     }
 
-    // MARK: Monitoring
 
     private func startMonitor() {
         monitor = Task { [weak self] in
@@ -630,11 +579,9 @@ final class AppModel {
         }
         if autoMode, !phase.isBusy, lastAutoClean.map({ Date().timeIntervalSince($0) > 3600 }) ?? true {
             lastAutoClean = Date()
-            // Tracked as `work` so Stop cancels it; cancellation and Auto mode are rechecked before cleaning.
             let task = Task {
                 await scan()
                 guard !Task.isCancelled, autoMode, isLowOnSpace else { return }
-                // Auto mode only touches caches that refill on their own, never projects or worktrees.
                 let autoCategories: Set<CleanupCategory> = [.devCaches, .temp, .xcode, .toolVersions]
                 let items = candidates.filter {
                     $0.isDefaultSelected(at: .quick) && autoCategories.contains($0.category) && $0.level == .quick
@@ -671,11 +618,9 @@ final class AppModel {
     }
 }
 
-/// The item table's sort column, persisted so the list opens the way it was left.
 enum SortColumn: String, CaseIterable {
     case size, name, safety, level, modified
 
-    /// Ties fall back to size, largest first.
     func comparators(ascending: Bool) -> [KeyPathComparator<Candidate>] {
         let order: SortOrder = ascending ? .forward : .reverse
         let bySize = KeyPathComparator(\Candidate.bytes, order: .reverse)
@@ -701,6 +646,5 @@ enum SortColumn: String, CaseIterable {
 }
 
 extension Candidate {
-    /// Sortable stand-in for `lastModified`; unknown dates sort as oldest.
     var modifiedSortKey: Date { lastModified ?? .distantPast }
 }

@@ -2,8 +2,6 @@ import AppKit
 import ArinCore
 import SwiftUI
 
-/// Installed apps, largest first once measured. Pick one (or drop one on the window) to see its
-/// files and move them to the Trash.
 struct AppsView: View {
     @Environment(AppModel.self) private var model
     @State private var search = ""
@@ -146,7 +144,6 @@ struct AppsView: View {
     }
 }
 
-/// A table row: the app plus its measured size (-1 until measured), so the table can sort by it.
 struct AppRow: Identifiable {
     var app: InstalledApp
     var bytes: Int64
@@ -157,7 +154,6 @@ struct AppRow: Identifiable {
     var source: String { app.caskToken != nil ? "Homebrew" : app.fromAppStore ? "App Store" : "" }
 }
 
-/// The app's files, checked unless they need a look, and the button that moves them to the Trash.
 struct UninstallSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -191,7 +187,6 @@ struct UninstallSheet: View {
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("Move to Trash", role: .destructive) {
-                    // Closes the sheet by clearing `uninstallApp`, after taking what it needs.
                     model.uninstall(app)
                 }
                 .keyboardShortcut(.defaultAction)

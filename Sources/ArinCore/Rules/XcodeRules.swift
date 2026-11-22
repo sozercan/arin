@@ -3,7 +3,6 @@ import Foundation
 struct DerivedDataRule: Rule {
     let id = "xcode.derived-data"
     let name = "Xcode DerivedData"
-    /// Builds touched within this window are treated as active.
     let activeWindow: TimeInterval = 3 * 3600
 
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
@@ -11,7 +10,6 @@ struct DerivedDataRule: Rule {
         let entries = FileInfo.children(root)
         guard !entries.isEmpty else { return [] }
         let sizes = await Size.allocated(entries)
-        // Xcode's SwiftPM clones live in SourcePackages; an edited one is work, whatever its project.
         let refusals = await concurrentMap(entries, limit: 4) { entry in
             (entry, await GitSafety.repositoryRefusal(in: entry))
         }
@@ -106,9 +104,6 @@ struct DerivedDataRule: Rule {
 }
 
 extension DerivedDataRule {
-    /// Whether the workspace or project a DerivedData folder was built for no longer exists, from the
-    /// `WorkspacePath` Xcode records in its `info.plist`. A folder without a readable path, or whose
-    /// workspace is on a volume that isn't mounted, is not orphaned.
     static func workspaceIsGone(_ folder: String) -> Bool {
         guard let data = FileManager.default.contents(atPath: (folder as NSString).appendingPathComponent("info.plist")),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
@@ -118,7 +113,6 @@ extension DerivedDataRule {
         if components.first == "Volumes", components.count > 1, !FileInfo.isDirectory("/Volumes/\(components[1])") {
             return false
         }
-        // Only a definite "no such file" counts; a folder that can't be read may still hold it.
         var info = stat()
         return lstat(workspace, &info) != 0 && errno == ENOENT
     }
@@ -147,7 +141,6 @@ enum Simctl {
         return list.devices.flatMap { runtime, devices in devices.map { (runtime, $0) } }
     }
 
-    /// "com.apple.CoreSimulator.SimRuntime.iOS-27-2" -> "iOS 27.2"
     static func runtimeName(_ identifier: String) -> String {
         let tail = identifier.components(separatedBy: "SimRuntime.").last ?? identifier
         let parts = tail.split(separator: "-")
@@ -165,7 +158,6 @@ struct SimulatorRule: Rule {
         guard !all.isEmpty else { return [] }
         var result: [Candidate] = []
 
-        // Devices whose runtime is gone. Xcode leaves them behind after every runtime upgrade.
         let unavailable = all.filter { !$0.device.isAvailable }
         let unavailableDirs = unavailable.compactMap { $0.device.dataPath.map { ($0 as NSString).deletingLastPathComponent } }
         if !unavailable.isEmpty {
@@ -184,7 +176,6 @@ struct SimulatorRule: Rule {
             ))
         }
 
-        // Data inside working simulators: installed apps, app data, downloaded assets.
         let available = all.filter { $0.device.isAvailable }
         let dataPaths = available.compactMap(\.device.dataPath)
         let sizes = await Size.allocated(dataPaths)
@@ -235,7 +226,6 @@ struct SimulatorRuntimeRule: Rule {
         let byPlatform = Dictionary(grouping: runtimes.values) { $0.platformIdentifier ?? "unknown" }
         var candidates: [Candidate] = []
         for (_, group) in byPlatform {
-            // Keep the newest runtime per platform; offer older ones and duplicate builds.
             let sorted = group.sorted { Self.isNewer($0, than: $1) }
             for runtime in sorted.dropFirst() where runtime.deletable ?? false {
                 let label = "\(Self.platformName(runtime.platformIdentifier)) \(runtime.version ?? "") (\(runtime.build ?? "?"))"
@@ -271,7 +261,6 @@ struct SimulatorRuntimeRule: Rule {
         let va = (a.version ?? "").split(separator: ".").compactMap { Int($0) }
         let vb = (b.version ?? "").split(separator: ".").compactMap { Int($0) }
         if va != vb { return va.lexicographicallyPrecedes(vb) == false }
-        // Same version: a release build (no trailing letter) beats a beta build like 24B91016s.
         let betaA = a.build?.last?.isLetter ?? false
         let betaB = b.build?.last?.isLetter ?? false
         if betaA != betaB { return !betaA }

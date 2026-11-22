@@ -3,7 +3,6 @@ import Foundation
 import Testing
 
 extension Sandbox {
-    /// A minimal app bundle in the sandbox's ~/Applications.
     func app(_ name: String, id: String, executable: String? = nil, in folder: String = "Applications") throws -> String {
         let bundle = "\(root)/\(folder)/\(name).app"
         _ = try mkdir("\(folder)/\(name).app/Contents/MacOS")
@@ -149,7 +148,6 @@ extension Sandbox {
             try box.mkdir("\(lib)/Application Support/Foo"),
             try box.mkdir("\(lib)/Group Containers/ABCDE12345.com.example.Foo"),
         ]
-        // Another app's files, look-alikes, and Apple's.
         for path in [
             "Preferences/com.example.Foo.Pro.plist", "Containers/com.example.FooBar", "Caches/com.example",
             "Application Support/Foo Pro", "Application Support/Other", "Logs/DiagnosticReports/Foo Pro-2026.ips",
@@ -164,7 +162,6 @@ extension Sandbox {
         #expect(paths(files.filter(\.needsReview).map(\.path)) == paths(review))
         #expect(files.first { $0.kind == .launchAgents }?.note == "Stays loaded until you log out")
 
-        // With a second copy installed, its files are shared: nothing but the bundle is checked.
         var copy = foo
         copy.path = "\(box.root)/Applications/Vendor/Foo.app"
         let shared = await AppFiles.find(for: foo, others: [pro, copy], guardrails: box.guardrails)
@@ -179,7 +176,6 @@ extension Sandbox {
                                     fromAppStore: false)
         #expect(AppFiles.match("Code", kind: .applicationSupport, app: code, others: [insiders]) == nil)
         #expect(AppFiles.match("Code", kind: .applicationSupport, app: code, others: []) == true)
-        // Names only count where apps use them.
         #expect(AppFiles.match("Code", kind: .containers, app: code, others: []) == nil)
     }
 
@@ -211,10 +207,8 @@ extension Sandbox {
         }
     }
 
-    /// Something always runs; an empty list means `ps` failed.
     static let system = ["/sbin/launchd"]
 
-    /// Numbers the snapshots an uninstall takes, so a test can change things between items.
     final class Snapshots: @unchecked Sendable {
         let lock = NSLock()
         var count = 0
@@ -299,7 +293,6 @@ extension Sandbox {
         let kept = await uninstaller(box, keep: url).run(app, files: [file])
         #expect(kept.items.first?.status == .skipped && FileInfo.exists(support))
 
-        // A kept folder keeps the app's items inside it too.
         let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
         var folder = KeepList()
         folder.add(id: "t:prefs", title: "Preferences", paths: ["\(box.root)/Library/Preferences"])
@@ -318,7 +311,6 @@ extension Sandbox {
         defer { box.cleanup() }
         let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
         let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
-        // A bundle Arin can't move: its folder is read-only.
         let applications = "\(box.root)/Applications"
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: applications)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: applications) }
@@ -344,7 +336,6 @@ extension Sandbox {
         try KeepList().save(to: url)
         let snapshots = Snapshots()
         let running = "\(app.path)/Contents/MacOS/Foo"
-        // Support is kept, and the app starts, while earlier items are removed.
         let uninstaller = Uninstaller(guardrails: box.guardrails, keepListURL: url, casks: { [:] }, caskroom: nil) {
             let n = snapshots.next()
             if n == 1 {
@@ -369,19 +360,16 @@ extension Sandbox {
         let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
         let files = await AppFiles.find(for: app, others: [], guardrails: box.guardrails)
         let casks = [app.path.lowercased(): "foo", helper.lowercased(): "foo"]
-        // The caller didn't know it was a cask; Homebrew is asked again.
         let report = await uninstaller(box, casks: casks).run(app, files: files)
         #expect(report.items.allSatisfy { $0.status == .skipped }, "\(report.items.map(\.message))")
         #expect(report.items[0].message.contains("also installs Foo Helper.app"))
         #expect(FileInfo.exists(app.path) && FileInfo.exists(helper) && FileInfo.exists(prefs))
 
-        // Homebrew can't be asked: a known cask isn't trashed behind its back.
         app.caskToken = "foo"
         let unanswered = await uninstaller(box, casks: nil).run(app, files: files)
         #expect(unanswered.items.allSatisfy { $0.status == .skipped } && FileInfo.exists(app.path))
         #expect(unanswered.items[0].message.contains("Homebrew didn't answer"))
 
-        // Homebrew says it's not a cask (anymore): trashed like any other app.
         let notACask = await uninstaller(box, casks: [:]).run(app, files: files)
         #expect(notACask.items.allSatisfy { $0.status == .cleaned }, "\(notACask.items.map(\.message))")
         #expect(notACask.items[0].message == "moved to Trash" && !FileInfo.exists(app.path))
@@ -391,7 +379,6 @@ extension Sandbox {
         let box = try Sandbox()
         defer { box.cleanup() }
         let real = try box.app("Foo", id: "com.example.Foo")
-        // ~/Applications/Vendor -> ~/Applications: the same bundle by another path.
         try FileManager.default.createSymbolicLink(atPath: "\(box.root)/Applications/Vendor", withDestinationPath: "\(box.root)/Applications")
         let linked = "\(box.root)/Applications/Vendor/Foo.app"
         let app = try #require(AppCatalog.app(at: linked))
@@ -399,14 +386,12 @@ extension Sandbox {
             .run(app, files: [AppFile(path: linked, kind: .app, bytes: 0, needsReview: false)])
         #expect(report.items.first?.status == .skipped && report.items.first?.message.contains("is running") == true)
         #expect(FileInfo.exists(real))
-        // Homebrew knows it by its real path; its other app keeps brew from running.
         let helper = try box.app("Foo Helper", id: "com.example.FooHelper")
         let casks = [real.lowercased(): "foo", helper.lowercased(): "foo"]
         let cask = await uninstaller(box, casks: casks)
             .run(app, files: [AppFile(path: linked, kind: .app, bytes: 0, needsReview: false)])
         #expect(cask.items.first?.message.contains("also installs Foo Helper.app") == true, "\(cask.items.map(\.message))")
         #expect(FileInfo.exists(real))
-        // And launched through the link, uninstalled by its real path.
         let state = SystemState(processPaths: ["\(linked)/Contents/MacOS/Foo"], openPaths: [], openFilesKnown: false)
         #expect(Uninstaller.isRunning(under: real, in: state))
     }
@@ -415,10 +400,8 @@ extension Sandbox {
         let box = try Sandbox()
         defer { box.cleanup() }
         let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
-        // Capitalized differently: the same Library paths on a case-insensitive volume.
         let copy = try box.app("Foo", id: "com.example.foo", in: "Applications/Vendor")
         let prefs = try box.write("Library/Preferences/com.example.Foo.plist")
-        // Picked anyway (the sheet leaves it unchecked; `--all` takes it).
         let report = await uninstaller(box, running: ["\(copy)/Contents/MacOS/Foo"])
             .run(app, files: [AppFile(path: prefs, kind: .preferences, bytes: 0, needsReview: true)])
         #expect(report.items.first?.status == .skipped, "\(report.items.map(\.message))")
@@ -442,7 +425,6 @@ extension Sandbox {
         let box = try Sandbox()
         defer { box.cleanup() }
         let app = try #require(AppCatalog.app(at: try box.app("Foo", id: "com.example.Foo")))
-        // The cask put its Foo.app in ~/Applications/Other; this one is a separate copy.
         let elsewhere = try box.app("Foo", id: "com.example.Foo", in: "Applications/Other")
         let caskroom = try box.mkdir("Caskroom/foo/1.0")
         try FileManager.default.createSymbolicLink(atPath: "\(caskroom)/Foo.app", withDestinationPath: elsewhere)

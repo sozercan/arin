@@ -8,7 +8,6 @@ struct WorktreeEntry: Equatable {
     var prunable = false
     var bare = false
 
-    /// Parses `git worktree list --porcelain`.
     static func parse(_ output: String) -> [WorktreeEntry] {
         var entries: [WorktreeEntry] = []
         var current: WorktreeEntry?
@@ -33,9 +32,6 @@ struct WorktreeEntry: Equatable {
     }
 }
 
-/// Linked git worktrees whose work is already merged, plus worktrunk trash and stale entries.
-/// "Merged" means HEAD is in the default branch, or a merged PR has the same (or a later) head,
-/// which catches squash merges.
 struct WorktreeRule: Rule {
     let id = "git.worktrees"
     let name = "Merged git worktrees"
@@ -48,7 +44,6 @@ struct WorktreeRule: Rule {
         return perRepo.flatMap { $0 }
     }
 
-    /// Main checkouts (a real `.git` directory) under the roots.
     static func repositories(roots: [String]) async -> [String] {
         var repos: [String] = []
         for root in roots {
@@ -69,7 +64,6 @@ struct WorktreeRule: Rule {
         var result: [Candidate] = []
         let repoName = (repo as NSString).abbreviatingWithTildeInPath
 
-        // worktrunk (`wt`) keeps removed worktrees in .git/wt/trash until emptied.
         let trash = "\(repo)/.git/wt/trash"
         let trashed = FileInfo.children(trash)
         if !trashed.isEmpty {

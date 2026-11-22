@@ -1,12 +1,8 @@
 import Foundation
 
-/// How cautious to be with a candidate. Ordered: a higher value is more cautious.
 public enum Risk: Int, Codable, Sendable, Comparable, CaseIterable {
-    /// Regenerable, no unique user data. Pre-selected.
     case safe = 0
-    /// The user (or their agent) should look before removing it.
     case review = 1
-    /// Holds unique work or is in active use. Never pre-selected.
     case keep = 2
 
     public static func < (lhs: Risk, rhs: Risk) -> Bool { lhs.rawValue < rhs.rawValue }
@@ -29,8 +25,6 @@ public enum Risk: Int, Codable, Sendable, Comparable, CaseIterable {
     }
 }
 
-/// Cleanup depth. Quick = caches that refill on their own; Standard = rebuild cost;
-/// Deep = loses state you might miss (simulator data, toolchains, history).
 public enum Level: Int, Codable, Sendable, Comparable, CaseIterable {
     case quick = 0
     case standard = 1
@@ -121,18 +115,11 @@ public struct CommandSpec: Codable, Sendable, Hashable {
     }
 }
 
-/// What the executor does. Actions only ever come from rules, never from agent output.
 public enum CleanupAction: Codable, Sendable, Hashable {
-    /// Permanently remove these paths (with a `chmod -R u+w` retry for read-only trees).
     case delete([String])
-    /// Move these paths to the Trash. Space is freed only when the Trash is emptied.
     case trash([String])
-    /// Run the tool's own cleanup commands, in order.
     case commands([CommandSpec])
-    /// `git worktree remove` (refuses dirty trees), falling back to a permission fix. `head` is the
-    /// commit that was judged merged; removal is refused if the worktree has moved since.
     case removeWorktree(repo: String, path: String, head: String? = nil)
-    /// Informational only.
     case none
 
     public var summary: String {
@@ -167,25 +154,18 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
     public var id: String
     public var ruleID: String
     public var title: String
-    /// Why it is (or isn't) safe, and what you lose.
     public var detail: String
     public var category: CleanupCategory
     public var level: Level
     public var risk: Risk
-    /// Estimated bytes deleting it would free (see `DiskUsage`). Snapshots and changed clones can still
-    /// make the real gain smaller; the measured change in free space is the result.
     public var bytes: Int64
     public var paths: [String]
     public var action: CleanupAction
     public var lastModified: Date?
-    /// Reasons this can't be cleaned right now (app running, files open, recently written).
     public var blockers: [String]
-    /// Processes whose presence blocks the action; re-checked right before execution.
     public var blockingProcesses: [String]
-    /// Skip if anything under the paths was written more recently than this many seconds ago.
     public var minIdleSeconds: TimeInterval?
     public var agentVerdict: AgentVerdict?
-    /// On the user's keep list: never pre-selected, never sent for review, refused by the executor.
     public var kept: Bool
 
     public init(
@@ -222,8 +202,6 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
         self.kept = false
     }
 
-    /// The agent can always raise caution. It can lower it only for items the rules
-    /// couldn't classify, and never below what a blocker implies.
     public var effectiveRisk: Risk {
         if kept { return .keep }
         var result = risk
@@ -240,13 +218,11 @@ public struct Candidate: Codable, Sendable, Identifiable, Hashable {
 
     public var isActionable: Bool { action.isDestructive }
 
-    /// Pre-select only safe, unblocked items at or below the chosen level.
     public func isDefaultSelected(at level: Level) -> Bool {
         isActionable && !kept && blockers.isEmpty && effectiveRisk == .safe && self.level <= level
     }
 }
 
-/// Something worth knowing that Arin won't act on (snapshots, pending updates, personal data).
 public struct Insight: Codable, Sendable, Identifiable, Hashable {
     public var id: String
     public var title: String
@@ -268,8 +244,6 @@ public struct ScanReport: Codable, Sendable {
     public var candidates: [Candidate]
     public var insights: [Insight]
     public var ruleErrors: [String: String]
-    /// What each kept ID covered in this scan, including items the list doesn't show. Reloading
-    /// the keep list records these again, so a failed save keeps blocking cleanups.
     public var keptPaths: [String: [String]] = [:]
 
     public var totalBytes: Int64 { candidates.reduce(0) { $0 + $1.bytes } }
@@ -282,8 +256,6 @@ public extension Int64 {
 }
 
 public enum CandidateSelection {
-    /// The candidates with these IDs, in scan order, and the IDs that match none of them. Callers
-    /// refuse the whole selection when any ID is unmatched, so a typo never cleans something else.
     public static func pick(_ ids: [String], from candidates: [Candidate]) -> (picked: [Candidate], unmatched: [String]) {
         let known = Set(candidates.map(\.id))
         var unmatched: [String] = []
