@@ -119,6 +119,10 @@ struct HashLexer {
     private var pending: [HereDocument] = []
     private var hereDocs: [HereDocument] = []
 
+    init(shell: Bool) {
+        self.shell = shell
+    }
+
     var unfinishedHereDoc: HereDocument? { hereDocs.first ?? pending.first }
 
     static func wordBoundary(_ character: Character) -> Bool {
