@@ -78,8 +78,13 @@ echo "`printf '%s' '# literal'`"
 echo "literal \` tick # quoted"
 echo "`printf '%s' '\`'`"
 BASH
+cat > parameters.sh <<'BASH'
+printf '<%s>\n' ${value:- # literal}
+printf '<%s>\n' ${value:- ${fallback:- # literal}}
+printf '<%s>\n' "${value:-'}' # literal}"
+BASH
 
-for script in build.sh quotes.sh heredocs.sh backticks.sh; do /bin/bash -n "$script"; done
+for script in build.sh quotes.sh heredocs.sh backticks.sh parameters.sh; do /bin/bash -n "$script"; done
 
 printf '// grandfathered\n' > legacy.swift
 printf '{"legacy.swift":{"// grandfathered":1}}\n' > .comment-baseline.json
@@ -123,6 +128,13 @@ echo "`printf '%s' '"'
 `" # Shell comment after multiline substitution
 BASH
 /bin/bash -n backticks.sh
+cat >> parameters.sh <<'BASH'
+printf '<%s>\n' ${value:- # literal} # Shell comment after expansion
+printf '<%s>\n' ${value:- <<literal} # Shell comment after redirection-like text
+printf '<%s>\n' ${value:-$(printf '%s' '# literal' # Shell comment inside nested command
+)} # Shell comment after nested command
+BASH
+/bin/bash -n parameters.sh
 printf 'key: "# literal" # YAML comment\n' >> .github/workflows/workflow.yml
 cat >> .github/workflows/workflow.yml <<'YAML'
 with-script:
@@ -153,6 +165,7 @@ for location in legacy.swift:2:1 legacy.swift:3:14 legacy.swift:3:40 legacy.swif
     properties.yml:4:37 properties.yml:5:34 backticks.sh:4:26 backticks.sh:5:1 backticks.sh:6:27 \
     backticks.sh:8:1 backticks.sh:9:4 .github/workflows/variants.yml:5:36 \
     .github/workflows/variants.yml:7:11 .github/workflows/variants.yml:9:11 \
+    parameters.sh:4:38 parameters.sh:5:38 parameters.sh:6:52 parameters.sh:7:4 \
     .github/workflows/workflow.yml:13:18 .github/workflows/workflow.yml:16:5 \
     .github/workflows/workflow.yml:19:11 icon.svg:2:1; do
     if ! grep -Fq "$location:" "$temp/result"; then
@@ -161,9 +174,9 @@ for location in legacy.swift:2:1 legacy.swift:3:14 legacy.swift:3:40 legacy.swif
         exit 1
     fi
 done
-test "$(wc -l < "$temp/result")" -eq 25
+test "$(wc -l < "$temp/result")" -eq 29
 
-git restore legacy.swift build.sh heredocs.sh quotes.sh quotes.yml properties.yml backticks.sh .github/workflows/workflow.yml icon.svg
+git restore legacy.swift build.sh heredocs.sh quotes.sh quotes.yml properties.yml backticks.sh parameters.sh .github/workflows/workflow.yml icon.svg
 rm .github/workflows/variants.yml
 printf '// grandfathered\n' >> legacy.swift
 if Scripts/check-comments.sh --base HEAD > "$temp/result"; then

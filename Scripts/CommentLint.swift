@@ -108,9 +108,20 @@ struct HereDocument {
 }
 
 struct HashLexer {
+    private enum SubstitutionKind: Character {
+        case command = ")", backtick = "`", parameter = "}"
+
+        static func open(_ input: inout Substring) -> Self? {
+            if input.first == "`" { input.removeFirst(); return .backtick }
+            if input.hasPrefix("$(") { input.removeFirst(2); return .command }
+            if input.hasPrefix("${") { input.removeFirst(2); return .parameter }
+            return nil
+        }
+    }
+
     private struct Substitution {
         var depth = 1
-        let backtick: Bool
+        let kind: SubstitutionKind
         let enclosingQuote: HashQuote?
     }
 
@@ -149,7 +160,8 @@ struct HashLexer {
             }
         }
         while let character = rest.first {
-            if shell, substitutions.last?.backtick == true {
+            let inParameter = substitutions.last?.kind == .parameter
+            if shell, substitutions.last?.kind == .backtick {
                 if character == "`" {
                     quote = substitutions.removeLast().enclosingQuote
                     atWordStart = false
@@ -169,18 +181,17 @@ struct HashLexer {
                 continue
             }
             if shell, quote == nil || quote == .double {
-                if rest.hasPrefix("$((") || (quote == nil && atWordStart && rest.hasPrefix("((")) {
+                let arithmeticCommand = !inParameter && quote == nil && atWordStart && rest.hasPrefix("((")
+                if rest.hasPrefix("$((") || arithmeticCommand {
                     rest.removeFirst(character == "$" ? 3 : 2)
                     arithmeticDepth = 2
                     atWordStart = character != "$"
                     continue
                 }
-                if character == "`" || rest.hasPrefix("$(") {
-                    let backtick = character == "`"
-                    rest.removeFirst(backtick ? 1 : 2)
-                    substitutions.append(Substitution(backtick: backtick, enclosingQuote: quote))
+                if let kind = SubstitutionKind.open(&rest) {
+                    substitutions.append(Substitution(kind: kind, enclosingQuote: quote))
                     quote = nil
-                    atWordStart = true
+                    atWordStart = kind != .parameter
                     continue
                 }
             }
@@ -191,7 +202,7 @@ struct HashLexer {
                 continue
             }
             let separated = rest.startIndex == row.startIndex || row[row.index(before: rest.startIndex)].isWhitespace
-            if character == "#", shell ? atWordStart : separated { return rest.startIndex }
+            if character == "#", shell ? atWordStart && !inParameter : separated { return rest.startIndex }
             if !shell, atYAMLScalarStart, let property = rest.prefixMatch(of: yamlNodeProperty) {
                 rest = rest[property.range.upperBound...]
                 continue
@@ -203,9 +214,10 @@ struct HashLexer {
                 continue
             }
             if shell {
-                if let substitution = substitutions.indices.last, !substitutions[substitution].backtick {
-                    if character == "(" { substitutions[substitution].depth += 1 }
-                    if character == ")" {
+                if let substitution = substitutions.indices.last {
+                    let kind = substitutions[substitution].kind
+                    if kind == .command, character == "(" { substitutions[substitution].depth += 1 }
+                    if character == kind.rawValue {
                         substitutions[substitution].depth -= 1
                         if substitutions[substitution].depth == 0 {
                             quote = substitutions.removeLast().enclosingQuote
@@ -215,12 +227,12 @@ struct HashLexer {
                         }
                     }
                 }
-                if rest.hasPrefix("<<<") {
+                if !inParameter, rest.hasPrefix("<<<") {
                     rest.removeFirst(3)
                     atWordStart = true
                     continue
                 }
-                if rest.hasPrefix("<<"), let hereDoc = HereDocument.parse(&rest) {
+                if !inParameter, rest.hasPrefix("<<"), let hereDoc = HereDocument.parse(&rest) {
                     pending.append(hereDoc)
                     atWordStart = false
                     continue
