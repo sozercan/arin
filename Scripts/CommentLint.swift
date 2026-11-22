@@ -36,17 +36,208 @@ func swiftComments(_ source: String, path: String) -> [Comment] {
     return comments
 }
 
-let shellPieces = try! NSRegularExpression(pattern: #"\$'(?:[^'\\]|\\.)*'|'[^']*'|"(?:[^"\\]|\\.)*"|\\.|\(\([^)]*\)\)|<<<|<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z_0-9]*)\2|(?<![^\s;&|()<>])#.*"#)
-let yamlPieces = try! NSRegularExpression(pattern: #"'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|(?<!\S)#.*"#)
 let scalar = #/(?:^|:\s+|^-\s+)[|>](?<indicators>[1-9+-]{0,2})\s*$/#
 let actionVersion = #/\s*(?:-\s+)?uses:\s+[^@\s]+@[0-9a-f]{40}\s+# v[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.-]+)?\s*/#
 
-func hashComments(_ source: String, path: String) -> [Comment] {
+enum HashQuote {
+    case single, double, ansi
+
+    static func open(_ input: inout Substring, shell: Bool) -> Self? {
+        if shell, input.hasPrefix("$'") { input.removeFirst(2); return .ansi }
+        if input.first == "'" { input.removeFirst(); return .single }
+        if input.first == "\"" { input.removeFirst(); return .double }
+        return nil
+    }
+
+    func consume(_ input: inout Substring, shell: Bool) -> (text: Character?, closed: Bool) {
+        let delimiter: Character = self == .double ? "\"" : "'"
+        let head = input.removeFirst()
+        if head == delimiter {
+            if !shell, self == .single, input.first == "'" { return (input.removeFirst(), false) }
+            return (nil, true)
+        }
+        if head == "\\", self != .single, let next = input.first {
+            if self == .double, !shell || "$`\"\\".contains(next) { return (input.removeFirst(), false) }
+            if self == .ansi {
+                let escaped: [Character: Character] = ["a": "\u{7}", "b": "\u{8}", "e": "\u{1b}", "f": "\u{c}",
+                                                       "n": "\n", "r": "\r", "t": "\t", "v": "\u{b}"]
+                if let decoded = escaped[next] { input.removeFirst(); return (decoded, false) }
+                if "\\'\"?".contains(next) { return (input.removeFirst(), false) }
+            }
+        }
+        return (head, false)
+    }
+}
+
+struct HereDocument {
+    let delimiter: String
+    let stripTabs: Bool
+
+    static func parse(_ input: inout Substring) -> Self? {
+        var rest = input.dropFirst(2)
+        let stripTabs = rest.first == "-"
+        if stripTabs { rest.removeFirst() }
+        rest = rest.drop(while: \.isWhitespace)
+        guard let head = rest.first, head != "#", !HashLexer.wordBoundary(head) else { return nil }
+        var delimiter = ""
+        while let character = rest.first, !HashLexer.wordBoundary(character) {
+            if let quote = HashQuote.open(&rest, shell: true) {
+                var closed = false
+                while !rest.isEmpty, !closed {
+                    let piece = quote.consume(&rest, shell: true)
+                    if let text = piece.text { delimiter.append(text) }
+                    closed = piece.closed
+                }
+                guard closed else { return nil }
+            } else if rest.removeFirst() == "\\" {
+                guard let escaped = rest.popFirst() else { return nil }
+                delimiter.append(escaped)
+            } else {
+                delimiter.append(character)
+            }
+        }
+        input = rest
+        return Self(delimiter: delimiter, stripTabs: stripTabs)
+    }
+
+    func ends(at row: Substring) -> Bool {
+        (stripTabs ? row.drop(while: { $0 == "\t" }) : row) == delimiter
+    }
+}
+
+struct HashLexer {
+    private struct Substitution {
+        var depth = 1
+        let enclosingQuote: HashQuote?
+    }
+
+    let shell: Bool
+    private(set) var quote: HashQuote?
+    private var arithmeticDepth = 0
+    private var substitutions: [Substitution] = []
+    private var continuedWordStart: Bool?
+    private var pending: [HereDocument] = []
+    private var hereDocs: [HereDocument] = []
+
+    var unfinishedHereDoc: HereDocument? { hereDocs.first ?? pending.first }
+
+    static func wordBoundary(_ character: Character) -> Bool {
+        character.isWhitespace || ";&|()<>".contains(character)
+    }
+
+    mutating func scan(_ row: Substring) -> String.Index? {
+        if let hereDoc = hereDocs.first {
+            if hereDoc.ends(at: row) { hereDocs.removeFirst() }
+            return nil
+        }
+
+        var rest = row
+        var atWordStart = continuedWordStart ?? true
+        var atYAMLScalarStart = true
+        continuedWordStart = nil
+        defer {
+            if quote == nil, continuedWordStart == nil, arithmeticDepth == 0 {
+                hereDocs = pending
+                pending.removeAll()
+            }
+        }
+        while let character = rest.first {
+            if shell, arithmeticDepth > 0 {
+                if character == "(" { arithmeticDepth += 1 }
+                if character == ")" { arithmeticDepth -= 1 }
+                rest.removeFirst()
+                continue
+            }
+            if shell, quote == nil || quote == .double {
+                if rest.hasPrefix("$((") || (quote == nil && atWordStart && rest.hasPrefix("((")) {
+                    rest.removeFirst(character == "$" ? 3 : 2)
+                    arithmeticDepth = 2
+                    atWordStart = character != "$"
+                    continue
+                }
+                if rest.hasPrefix("$(") {
+                    rest.removeFirst(2)
+                    substitutions.append(Substitution(enclosingQuote: quote))
+                    quote = nil
+                    atWordStart = true
+                    continue
+                }
+            }
+            if let active = quote {
+                if active.consume(&rest, shell: shell).closed { quote = nil }
+                atWordStart = false
+                atYAMLScalarStart = false
+                continue
+            }
+            let separated = rest.startIndex == row.startIndex || row[row.index(before: rest.startIndex)].isWhitespace
+            if character == "#", shell ? atWordStart : separated { return rest.startIndex }
+            if (shell || atYAMLScalarStart), let opened = HashQuote.open(&rest, shell: shell) {
+                quote = opened
+                atWordStart = false
+                atYAMLScalarStart = false
+                continue
+            }
+            if shell {
+                if let substitution = substitutions.indices.last {
+                    if character == "(" { substitutions[substitution].depth += 1 }
+                    if character == ")" {
+                        substitutions[substitution].depth -= 1
+                        if substitutions[substitution].depth == 0 {
+                            quote = substitutions.removeLast().enclosingQuote
+                            atWordStart = false
+                            rest.removeFirst()
+                            continue
+                        }
+                    }
+                }
+                if rest.hasPrefix("<<<") {
+                    rest.removeFirst(3)
+                    atWordStart = true
+                    continue
+                }
+                if rest.hasPrefix("<<"), let hereDoc = HereDocument.parse(&rest) {
+                    pending.append(hereDoc)
+                    atWordStart = false
+                    continue
+                }
+                if character == "\\" {
+                    rest.removeFirst()
+                    if rest.popFirst() == nil { continuedWordStart = atWordStart }
+                    atWordStart = false
+                    continue
+                }
+                atWordStart = Self.wordBoundary(character)
+                rest.removeFirst()
+            } else {
+                rest.removeFirst()
+                let spaceFollows = rest.first?.isWhitespace == true
+                if !character.isWhitespace {
+                    atYAMLScalarStart = "[{,".contains(character)
+                        || (character == ":" && (spaceFollows || rest.first == "\""))
+                        || ((character == "-" || character == "?") && atYAMLScalarStart && spaceFollows)
+                }
+            }
+        }
+        return nil
+    }
+}
+
+struct UnfinishedHereDocument: Error, CustomStringConvertible {
+    let path: String
+    let delimiter: String
+
+    var description: String { "\(path): could not find the end of heredoc \(delimiter.debugDescription)" }
+}
+
+func hashComments(_ source: String, path: String) throws -> [Comment] {
     let yaml = path.hasSuffix(".yml") || path.hasSuffix(".yaml")
     var block: (parent: Int, body: Int?, shell: Bool)?
-    var hereDocs: [(delimiter: String, stripTabs: Bool)] = []
+    var shellLexer = HashLexer(shell: true)
+    var yamlLexer = HashLexer(shell: false)
     var comments: [Comment] = []
-    for (index, text) in source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).enumerated() {
+    var rows = source.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+    if source.last?.isNewline == true { rows.removeLast() }
+    for (index, text) in rows.enumerated() {
         let row = String(text)
         let line = index + 1
         let indent = row.prefix(while: { $0 == " " }).count
@@ -55,44 +246,34 @@ func hashComments(_ source: String, path: String) -> [Comment] {
             continue
         }
         if !yaml, line == 1, row.hasPrefix("#!/") { continue }
-        if row.allSatisfy(\.isWhitespace) { continue }
-        if let current = block {
+        if let current = block, !row.allSatisfy(\.isWhitespace) {
             if indent < (current.body ?? current.parent + 1) {
+                if let hereDoc = shellLexer.unfinishedHereDoc {
+                    throw UnfinishedHereDocument(path: path, delimiter: hereDoc.delimiter)
+                }
                 block = nil
-                hereDocs.removeAll()
+                shellLexer = HashLexer(shell: true)
             } else if current.body == nil {
                 block?.body = indent
             }
         }
         let shell = !yaml || block?.shell == true
         if block != nil, !shell { continue }
-        if shell, let hereDoc = hereDocs.first {
-            let content = row.dropFirst(block?.body ?? 0)
-            let delimiter = hereDoc.stripTabs ? content.drop(while: { $0 == "\t" }) : content
-            if delimiter == hereDoc.delimiter { hereDocs.removeFirst() }
-            continue
+        let start = shell ? shellLexer.scan(row.dropFirst(block?.body ?? 0)) : yamlLexer.scan(row[...])
+        if let start, shell || !path.hasPrefix(".github/workflows/") || row.wholeMatch(of: actionVersion) == nil {
+            let column = row[..<start].utf8.count + 1
+            comments.append(Comment(path: path, line: line, column: column, text: String(row[start...])))
         }
-        var yamlCode = row[...]
-        let pieces = (shell ? shellPieces : yamlPieces).matches(in: row, range: NSRange(row.startIndex..., in: row))
-        for piece in pieces {
-            guard let range = Range(piece.range, in: row) else { continue }
-            let text = row[range]
-            if text.hasPrefix("#") {
-                yamlCode = row[..<range.lowerBound]
-                if shell || !path.hasPrefix(".github/workflows/") || row.wholeMatch(of: actionVersion) == nil {
-                    let column = row[..<range.lowerBound].utf8.count + 1
-                    comments.append(Comment(path: path, line: line, column: column, text: String(text)))
-                }
-            } else if shell, let delimiter = Range(piece.range(at: 3), in: row) {
-                hereDocs.append((String(row[delimiter]), piece.range(at: 1).length > 0))
-            }
-        }
-        if !shell, let marker = yamlCode.firstMatch(of: scalar) {
+        let yamlCode = row[..<(start ?? row.endIndex)]
+        if !shell, yamlLexer.quote == nil, let marker = yamlCode.firstMatch(of: scalar) {
             let code = yamlCode.dropFirst(indent)
             let parent = indent + (code.hasPrefix("- ") ? 2 : 0)
             let body = marker.output.indicators.compactMap(\.wholeNumberValue).first.map { parent + $0 }
             block = (parent, body, code.hasPrefix("run:") || code.hasPrefix("- run:"))
         }
+    }
+    if let hereDoc = shellLexer.unfinishedHereDoc {
+        throw UnfinishedHereDocument(path: path, delimiter: hereDoc.delimiter)
     }
     return comments
 }
@@ -129,7 +310,7 @@ func run() throws -> Int32 {
         switch ext {
         case "swift": comments += swiftComments(source, path: path)
         case "xml", "svg", "plist": comments += xmlComments(source, path: path)
-        default: comments += hashComments(source, path: path)
+        default: comments += try hashComments(source, path: path)
         }
     }
     if inventory {
