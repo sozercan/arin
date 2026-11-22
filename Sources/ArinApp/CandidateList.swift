@@ -2,8 +2,6 @@ import AppKit
 import ArinCore
 import SwiftUI
 
-/// The found items as a sortable table. The checkbox column picks what gets cleaned; row selection
-/// only drives the inspector, context menu, and Space-to-toggle.
 struct CandidateList: View {
     @Environment(AppModel.self) private var model
     var title: String
@@ -115,9 +113,6 @@ struct CandidateList: View {
         .onKeyPress(.space) {
             let picked = items.filter { rows.contains($0.id) }
             guard !picked.isEmpty else { return .ignored }
-            // Like Finder's tag toggle: if any could be turned on, turn them all on; otherwise all off.
-            // Only count rows that can be turned on, so a kept or informational row in the mix
-            // doesn't stop Space from deselecting the rest.
             let canTurnOn = picked.contains { $0.isActionable && !$0.kept && !model.selection.contains($0.id) }
             model.setAll(picked, selected: canTurnOn)
             return .handled
@@ -158,9 +153,6 @@ struct CandidateList: View {
     }
 }
 
-/// Whether the item will be cleaned. Kept items can only be turned off, never on.
-/// Takes the model directly: table cells are hosted lazily while scrolling and don't reliably
-/// inherit the environment, so reading `AppModel` from it crashed.
 struct CleanCheckbox: View {
     var model: AppModel
     var candidate: Candidate
@@ -201,7 +193,6 @@ private struct NameCell: View {
     }
 }
 
-/// Everything about the focused row: why it's there, what the agent said, and the exact action.
 private struct CandidateInspector: View {
     var model: AppModel
     var items: [Candidate]
@@ -326,7 +317,6 @@ private struct CandidateInspector: View {
 }
 
 extension Candidate {
-    /// "~/Library/Caches/foo and 2 more"
     var locationSummary: String {
         guard let first = paths.first else { return "" }
         let path = (first as NSString).abbreviatingWithTildeInPath

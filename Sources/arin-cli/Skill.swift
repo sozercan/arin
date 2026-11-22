@@ -1,5 +1,3 @@
-/// `arin skill` prints this. Saved as a SKILL.md, it teaches a coding agent to use arin
-/// without ever deciding or running a cleanup on its own.
 let agentSkill = """
 ---
 name: arin

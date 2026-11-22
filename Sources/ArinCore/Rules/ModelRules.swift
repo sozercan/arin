@@ -1,7 +1,5 @@
 import Foundation
 
-/// Models pulled into Ollama, removed with `ollama rm` so its manifests and shared layers stay consistent.
-/// Needs the Ollama server running; without it nothing is listed.
 struct OllamaModelRule: Rule {
     let id = "ollama.model"
     let name = "Ollama models"
@@ -30,7 +28,6 @@ struct OllamaModelRule: Rule {
         }
     }
 
-    /// Rows of `ollama list` / `ollama ps`: columns separated by two or more spaces, header first.
     static func parseTable(_ output: String) -> [(name: String, bytes: Int64)] {
         output.split(separator: "\n").dropFirst().compactMap { line in
             let columns = line.split(separator: /\s{2,}/).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -39,7 +36,6 @@ struct OllamaModelRule: Rule {
         }
     }
 
-    /// "4.7 GB", "274 MB". Ollama prints decimal units.
     static func parseSize(_ text: String) -> Int64? {
         let parts = text.split(separator: " ")
         guard parts.count == 2, let value = Double(parts[0]) else { return nil }
@@ -55,7 +51,6 @@ struct OllamaModelRule: Rule {
     }
 }
 
-/// Models downloaded by LM Studio, one folder per model under its models directory.
 struct LMStudioModelRule: Rule {
     let id = "lmstudio.model"
     let name = "LM Studio models"

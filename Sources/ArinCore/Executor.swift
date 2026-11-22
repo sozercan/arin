@@ -2,7 +2,6 @@ import Foundation
 
 public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public enum Status: String, Codable, Sendable {
-        /// `partial`: some of it was removed and the rest couldn't be; the message says what and why.
         case cleaned, partial, skipped, failed
     }
 
@@ -12,7 +11,6 @@ public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public var message: String
     public var estimatedBytes: Int64
     public var trashed: Bool
-    /// Where trashed paths went, so they can be put back.
     public var trashedPaths: [TrashedPath]?
 }
 
@@ -20,14 +18,11 @@ public struct CleanupReport: Codable, Sendable {
     public var items: [CleanupItemResult]
     public var freeBefore: Int64
     public var freeAfter: Int64
-    /// What the cleaned items were estimated to free. Not the same as space freed.
     public var estimatedBytes: Int64
     public var explanations: [String]
 
-    /// Net change in free space, measured on the volume.
     public var measuredBytes: Int64 { freeAfter - freeBefore }
     public var cleanedCount: Int { items.filter { $0.status == .cleaned }.count }
-    /// Some item failed or was only partly removed.
     public var hasFailures: Bool { items.contains { $0.status == .failed || $0.status == .partial } }
 }
 
@@ -39,10 +34,8 @@ public enum CleanupEvent: Sendable {
 
 public struct Executor: Sendable {
     public var guardrails: Guardrails
-    /// Move deleted paths to the Trash instead. Reversible, but frees nothing until the Trash is emptied.
     public var trashInsteadOfDelete: Bool
     public var commandTimeout: TimeInterval
-    /// Items on this list are refused. If the file exists but can't be read, everything is refused.
     public var keepListURL: URL?
 
     public init(
@@ -64,10 +57,7 @@ public struct Executor: Sendable {
         var results: [CleanupItemResult] = []
         for (index, candidate) in candidates.enumerated() {
             progress?(.item(index: index, title: candidate.title))
-            // A fresh snapshot per item (~0.3 s): an earlier slow item gives apps time to start
-            // using a later one.
             let state = await SystemState.capture()
-            // Re-read per item: the app or the CLI may protect something while an earlier item runs.
             let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
                 ?? .success(KeepList())
             let result: CleanupItemResult
@@ -77,7 +67,6 @@ public struct Executor: Sendable {
             case let .success(list) where list.contains(candidate.id) || candidate.kept:
                 result = Self.skipped(candidate, "on your keep list")
             case .success where !candidate.keepBlockers.isEmpty:
-                // Picking by ID overrides other blockers, never the keep list's.
                 result = Self.skipped(candidate, candidate.keepBlockers.joined(separator: "; "))
             case let .success(list):
                 let kept = KeptPaths(list.entries)
@@ -106,7 +95,6 @@ public struct Executor: Sendable {
         return withNotes
     }
 
-    /// Every path the action can remove.
     static func targets(of candidate: Candidate) -> [String] {
         switch candidate.action {
         case let .delete(paths), let .trash(paths): paths
@@ -115,7 +103,6 @@ public struct Executor: Sendable {
         }
     }
 
-    /// Checks that only make sense at the moment a command runs. Returns why it must not run.
     static func preflight(_ command: CommandSpec) async -> String? {
         if command.executable == "mise", command.arguments.first == "prune", let tool = command.arguments.last,
            let reason = await MiseRule.unloadableConfigs(tool: tool) {
@@ -131,8 +118,6 @@ public struct Executor: Sendable {
         return nil
     }
 
-    /// The rule's own safety checks, run again right before deleting: a repository can appear, or a
-    /// folder can become tracked, between the scan and the cleanup. Returns why it must not run.
     static func recheck(_ candidate: Candidate) async -> String? {
         let paths: [String]
         switch candidate.action {
@@ -190,8 +175,6 @@ public struct Executor: Sendable {
         guard candidate.isActionable else { return result(.skipped, "informational only") }
         do {
             try guardrails.check(candidate.action)
-            // Native commands act on the candidate's paths too (e.g. a GOMODCACHE moved under ~/Documents),
-            // and they follow a symlinked leaf, so its target must pass as well.
             for path in candidate.paths {
                 if case .commands = candidate.action { try guardrails.checkTarget(path) } else { try guardrails.check(path) }
             }
@@ -199,18 +182,15 @@ public struct Executor: Sendable {
             return result(.skipped, error.description)
         }
 
-        // Without the open-file snapshot, nothing shows whether an app or a build is using these files.
         if !state.openFilesKnown, !candidate.paths.isEmpty {
             return result(.skipped, "couldn't check for open files (lsof returned nothing); try again")
         }
-        // Re-check right before acting: things change between scan and clean.
         let live = state.blockers(
             paths: candidate.paths,
             processes: candidate.blockingProcesses,
             minIdle: candidate.minIdleSeconds
         )
         if !live.isEmpty { return result(.skipped, live.joined(separator: "; ")) }
-        // The snapshot only sees a path and its children; check the whole tree for recent writes.
         if let idle = candidate.minIdleSeconds {
             for path in candidate.paths where await FileInfo.hasRecentWrites(path, within: idle) {
                 return result(.skipped, "\((path as NSString).abbreviatingWithTildeInPath) was written recently (may be in use)")
@@ -244,8 +224,6 @@ public struct Executor: Sendable {
                     let tail = String((output.stderr.isEmpty ? output.stdout : output.stderr).suffix(400))
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     if output.timedOut { return result(.failed, "\(command.display) timed out") }
-                    // Tools like `brew cleanup` exit non-zero over one bad formula after cleaning
-                    // everything else. Judge by what's left on disk, not the exit code.
                     if await Self.targetsMostlyGone(candidate) {
                         warnings.append(tail)
                         continue
@@ -262,7 +240,6 @@ public struct Executor: Sendable {
         }
     }
 
-    /// True when the candidate's folders now use under a quarter of their scanned size.
     static func targetsMostlyGone(_ candidate: Candidate) async -> Bool {
         guard !candidate.paths.isEmpty, candidate.bytes > 0 else { return false }
         let remaining = await Size.total(candidate.paths)
@@ -280,26 +257,18 @@ public struct Executor: Sendable {
             _ = await Shell.run("git", ["-C", repo, "worktree", "prune"], timeout: 30)
             return result(.cleaned, "already gone; pruned entry", false)
         }
-        // git only refuses dirty trees. A clean tree with a new commit since the scan may hold
-        // unmerged work, so the commit that was judged merged must still be checked out.
         if let head {
             let current = await Shell.run("git", ["-C", path, "rev-parse", "HEAD"], timeout: 20)
             guard current.ok, current.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == head else {
                 return result(.skipped, "HEAD moved since the scan; rescan to recheck whether it's merged", false)
             }
         }
-        // git checks only what `status` shows. Ignored folders (and any clone inside them) and files
-        // marked assume-unchanged or skip-worktree would go without a word.
         if let reason = await GitSafety.worktreeRefusal(path) {
             return result(.skipped, "not removed: \(reason)", false)
         }
-        // No --force: git refuses if there are uncommitted or untracked files.
         let remove = await Shell.run("git", ["-C", repo, "worktree", "remove", path], timeout: 600)
         if remove.ok, !FileInfo.exists(path) { return result(.cleaned, "git worktree remove", false) }
         let message = remove.stderr + remove.stdout
-        // Read-only files (Go module caches, envtest binaries) make git's own removal fail midway,
-        // after it has already verified the tree is clean. Only that failure gets a manual finish;
-        // anything else (dirty, locked, not a worktree) is reported and the folder is left alone.
         let permissionFailure = message.contains("Permission denied") || message.contains("Directory not empty")
         guard permissionFailure else {
             return result(.failed, message.trimmingCharacters(in: .whitespacesAndNewlines), false)
@@ -314,10 +283,6 @@ public struct Executor: Sendable {
         return await Self.deleteResult(candidate, removal, paths: [path], done: "git worktree remove (fixed read-only files)")
     }
 
-    /// Cleaned when everything went, partial when only some of it did, failed when nothing did.
-    /// A partial estimate is the scanned size less what's left, measured the same way as the scan
-    /// (clone- and hard-link-aware). When a folder couldn't be read, what's left is unknown, and
-    /// nothing is credited: the measured change in free space is the result either way.
     static func deleteResult(_ candidate: Candidate, _ removal: TreeRemoval, paths: [String], done: String) async -> CleanupItemResult {
         var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned, message: done,
                                      estimatedBytes: candidate.bytes, trashed: false, trashedPaths: nil)
@@ -329,8 +294,6 @@ public struct Executor: Sendable {
         } else {
             item.status = .partial
             item.message = "removed \(removal.removedEntries) entries, left \(removal.problems)"
-            // A walk that times out is omitted from the sizes, like a path that's gone. Only a path
-            // whose lstat says ENOENT counts as nothing left; one that can't be reached is unknown.
             let left = await Size.allocated(paths)
             let measured = paths.allSatisfy { path in
                 var st = stat()
@@ -346,7 +309,6 @@ public struct Executor: Sendable {
         return item
     }
 
-    /// Deletes paths entry by entry (`TreeRemover`), carrying on past anything that can't be removed.
     func delete(_ paths: [String]) async -> TreeRemoval {
         var removal = TreeRemoval()
         for path in paths {
@@ -376,7 +338,6 @@ public struct Executor: Sendable {
         return (errors, moved)
     }
 
-    /// When the measured gain falls short of the estimate, say why instead of reporting the estimate.
     static func explain(_ report: CleanupReport, cleaned: [Candidate]) async -> [String] {
         var notes: [String] = []
         let trashedBytes = report.items.filter(\.trashed).reduce(0) { $0 + $1.estimatedBytes }

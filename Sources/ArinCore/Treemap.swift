@@ -1,9 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Squarified treemap layout: tiles whose areas are proportional to their values, kept close to square.
 public enum Treemap {
-    /// One rectangle per value, in the same order as `values`. Zero or negative values get `.zero`.
     public static func layout(_ values: [Double], in rect: CGRect) -> [CGRect] {
         var result = [CGRect](repeating: .zero, count: values.count)
         let total = values.filter { $0 > 0 }.reduce(0, +)
@@ -15,7 +13,6 @@ public enum Treemap {
 
         func area(_ index: Int) -> Double { values[index] * scale }
 
-        /// The worst aspect ratio in a row laid along a side of length `side`.
         func worst(_ row: [Int], side: Double) -> Double {
             let areas = row.map(area)
             let sum = areas.reduce(0, +)
@@ -26,7 +23,6 @@ public enum Treemap {
         func place(_ row: [Int]) {
             let sum = row.map(area).reduce(0, +)
             if remaining.width >= remaining.height {
-                // A column along the left edge.
                 let width = remaining.height > 0 ? CGFloat(sum) / remaining.height : 0
                 var y = remaining.minY
                 for index in row {
@@ -37,7 +33,6 @@ public enum Treemap {
                 remaining = CGRect(x: remaining.minX + width, y: remaining.minY,
                                    width: max(remaining.width - width, 0), height: remaining.height)
             } else {
-                // A row along the top edge.
                 let height = remaining.width > 0 ? CGFloat(sum) / remaining.width : 0
                 var x = remaining.minX
                 for index in row {

@@ -2,7 +2,6 @@ import ArinCore
 import SwiftUI
 
 extension CleanupCategory {
-    /// One fixed color per category, so a category keeps its color whatever else is on screen.
     var color: Color {
         switch self {
         case .devCaches: .blue
@@ -21,8 +20,6 @@ extension CleanupCategory {
     }
 }
 
-/// Everything the scan found as a treemap: one block per category, one tile per item, sized by
-/// folder size. Clicking a tile selects it for cleaning, like its checkbox.
 struct SpaceMapView: View {
     @Environment(AppModel.self) private var model
 
@@ -57,7 +54,6 @@ struct SpaceMapView: View {
     }
 }
 
-/// Small tiles drop their labels, so the colors need a key.
 private struct Legend: View {
     var groups: [(category: CleanupCategory, items: [Candidate])]
 
@@ -108,7 +104,6 @@ private struct CategoryBlock: View {
                     Tile(candidate: item, color: category.color, isSelected: selected)
                 }
                 .buttonStyle(.plain)
-                // Same rule as the list's checkbox: kept items can only be deselected.
                 .disabled(!item.isActionable || item.kept && !selected)
                 .frame(width: max(tiles[index].width - 2, 0), height: max(tiles[index].height - 2, 0))
                 .offset(x: tiles[index].minX, y: tiles[index].minY)

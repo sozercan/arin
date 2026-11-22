@@ -1,22 +1,13 @@
 import Foundation
 
-/// Finds large folders anywhere in the home folder that no rule explains, so space a fixed
-/// list of locations would miss (agent task artifacts, app logs, VM disks) still shows up.
-///
-/// One `du -k -d 5` per top-level folder gives every directory size in a single walk. A folder
-/// is reported as specifically as possible: when one subfolder holds most of it, or it contains
-/// something a rule already handles, Arin descends instead of reporting the parent.
 enum HomeOverview {
     static let minimum: Int64 = 1024 * 1024 * 1024
     static let maxDepth = 5
 
-    /// Home-relative folders the overview never reports or enters: personal data, things other
-    /// rules or insights handle, and data with its own deletion tools.
     static let skipped = [
         "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public", "Applications",
         ".Trash", ".codex/sessions", "Library/Caches", "Library/Application Support", "Library/Developer",
         ".cache", "Library/Mobile Documents", "Library/CloudStorage",
-        // Claude Code history and memory; agent history has its own retention tools.
         ".claude/projects",
     ]
 
@@ -30,7 +21,6 @@ enum HomeOverview {
             path.hasPrefix(appleContainers) || skip.contains { path == $0 || path.hasPrefix($0 + "/") }
         }
 
-        // Top-level folders in home, plus ~/Library's children (Library itself is too broad).
         var tops = FileInfo.children(home).filter { FileInfo.isDirectory($0) && !isSkipped($0) }
         tops.removeAll { $0 == "\(home)/Library" }
         tops += FileInfo.children("\(home)/Library").filter { FileInfo.isDirectory($0) && !isSkipped($0) }
@@ -44,19 +34,14 @@ enum HomeOverview {
         var sizes: [String: Int64] = [:]
         for walk in walks { sizes.merge(walk) { a, _ in a } }
 
-        // Things a reported folder must not contain: claimed paths, skipped paths, project roots.
         let avoid = claimed + skip
         let picked = tops.flatMap { top in
             pick(top, sizes: sizes, depth: 0, avoid: avoid, isSkipped: isSkipped)
         }
 
-        // A folder holding a git checkout anywhere inside, even one too small to show up in `sizes`,
-        // may hold unpushed work. Worktree rules handle checkouts; the overview leaves them alone.
         var reportable: [String] = []
         for path in picked where await GitSafety.repositoryRefusal(in: path, skipPackageCaches: true) == nil { reportable.append(path) }
 
-        // `du` finds the folders; the size shown is what deleting one would free (clones of files
-        // kept elsewhere count for little), so a folder that turns out small isn't reported.
         let measured = await Size.allocated(reportable)
         return reportable.compactMap { path -> Candidate? in
             guard let bytes = measured[path] ?? sizes[path], bytes >= minimum, (try? guardrails.check(path)) != nil else { return nil }
@@ -78,7 +63,6 @@ enum HomeOverview {
         }
     }
 
-    /// Picks the most specific folders worth reporting under `dir`.
     static func pick(
         _ dir: String,
         sizes: [String: Int64],
@@ -87,9 +71,7 @@ enum HomeOverview {
         isSkipped: (String) -> Bool
     ) -> [String] {
         guard let size = sizes[dir], size >= minimum, !isSkipped(dir) else { return [] }
-        // Already handled by a rule (or inside something that is).
         if avoid.contains(where: { dir == $0 || dir.hasPrefix($0 + "/") }) { return [] }
-        // A checkout may hold unpushed work: never report it, and never descend into its folders.
         if (dir as NSString).lastPathComponent == ".git" || FileInfo.exists("\(dir)/.git") { return [] }
         let prefix = dir + "/"
         let big = sizes.filter { path, bytes in
@@ -98,7 +80,6 @@ enum HomeOverview {
 
         let containsAvoided = avoid.contains { $0.hasPrefix(prefix) }
         let dominated = big.count == 1 && Double(sizes[big[0]] ?? 0) >= Double(size) * 0.6
-        // depth 0 is a top-level folder like ~/.t3: too broad to remove as a whole.
         let mustDescend = depth == 0 || containsAvoided || dominated || big.count > 1
 
         if mustDescend, depth < maxDepth, !big.isEmpty {

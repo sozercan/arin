@@ -2,7 +2,6 @@
 import Foundation
 import Testing
 
-/// A throwaway home directory so guardrails and the executor can be exercised for real.
 struct Sandbox {
     let root: String
 
@@ -68,7 +67,6 @@ struct CLIFailure: Error { var message: String }
         #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Documents/notes") }
         #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Library/Messages/Attachments") }
         #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw") }
-        // Deleting a parent would take the protected folder with it.
         #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Library/Application Support") }
         #expect(throws: Guardrails.Violation.self) { try g.check("/Users/test/Library/Metadata") }
     }
@@ -128,7 +126,6 @@ struct CLIFailure: Error { var message: String }
         defer { box.cleanup() }
         let cache = try box.mkdir("Library/Caches/gomod/pkg@v1")
         _ = try box.write("Library/Caches/gomod/pkg@v1/a.go")
-        // Go marks module files and dirs read-only; plain removal fails.
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: "\(cache)/a.go")
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: cache)
 
@@ -178,7 +175,6 @@ struct CLIFailure: Error { var message: String }
 }
 
 @Suite struct WorktreeTests {
-    /// main repo + three linked worktrees: merged & clean, merged & dirty, unmerged.
     @Test func classifiesAndRemovesWorktrees() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -192,13 +188,10 @@ struct CLIFailure: Error { var message: String }
         for name in ["merged", "dirty", "unmerged"] {
             try await git(repo, "worktree", "add", "-q", "-b", name, "\(box.root)/projects/app.\(name)")
         }
-        // Unmerged work.
         _ = try box.write("projects/app.unmerged/feature.txt")
         try await git("\(box.root)/projects/app.unmerged", "add", ".")
         try await git("\(box.root)/projects/app.unmerged", "commit", "-q", "-m", "feature")
-        // Uncommitted edit on a merged branch.
         _ = try box.write("projects/app.dirty/README", "edited")
-        // Read-only ignored tool binaries (envtest) inside the merged worktree.
         let k8s = try box.mkdir("projects/app.merged/bin/k8s")
         _ = try box.write("projects/app.merged/bin/k8s/etcd")
         try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: "\(k8s)/etcd")
@@ -222,7 +215,6 @@ struct CLIFailure: Error { var message: String }
         let branches = await Shell.run("git", ["-C", repo, "branch", "--list", "merged"])
         #expect(branches.stdout.contains("merged"), "branch is kept")
 
-        // Dirty worktrees are refused by git even if the user ticks them.
         let dirty = try #require(byName["app.dirty"])
         let refused = await Executor(guardrails: box.guardrails).clean(dirty, state: .empty)
         #expect(refused.status == .failed)
@@ -331,7 +323,6 @@ struct CLIFailure: Error { var message: String }
         #expect(args.contains("Read(~/.ssh/**)"))
         #expect(args.contains("Read(~/.aws)"))
         #expect(args.contains("Read(~/Library/Keychains/**)"))
-        // Nothing that can print file contents or write is pre-approved for Bash.
         let bash = args.filter { $0.hasPrefix("Bash(") }
         #expect(!bash.contains { $0.contains("head") || $0.contains("cat") || $0.contains("find") || $0.contains("rm") })
         let deny = args.firstIndex(of: "--disallowedTools")!
@@ -359,7 +350,6 @@ struct CLIFailure: Error { var message: String }
         #expect(Set(tools) == ["view", "glob", "grep", "bash", "read_bash"])
         let shell = args.filter { $0.hasPrefix("shell(") }
         #expect(shell.contains("shell(git status)"))
-        // Copilot matches git on the first subcommand, so this would also allow `git worktree remove`.
         #expect(!shell.contains { $0.contains("worktree") || $0.contains("cat") || $0.contains("rm") })
         let bare = AgentReviewer.copilotArguments(model: nil, effort: nil, dirs: [])
         #expect(!bare.contains("--model") && !bare.contains("--reasoning-effort") && !bare.contains("--add-dir"))
@@ -383,7 +373,6 @@ struct CLIFailure: Error { var message: String }
             candidate(["\(home)/go/pkg/mod", "\(home)/go/pkg/mod/", "\(home)/GO/pkg/mod"]),
             candidate([home, "\(home)/"]),
             candidate(["\(home)/.ssh", "\(home)/Library", "\(home)/Library/Keychains/x"]),
-            // Symlinks and case aliases into private folders.
             candidate(["\(home)/Library/Caches/docs/secret", "\(home)/Library/Caches/keys", "\(home)/documents/secret"]),
             candidate(["\(home)/Library/Caches/foo", "\(home)/Library/Caches/file.txt", "\(home)/missing"]),
             candidate(["docker-volume-name", "/"]),
@@ -507,7 +496,6 @@ struct CLIFailure: Error { var message: String }
     @Test func aCheckoutGitCantReadIsNotSwiftPMs() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
-        // A bare `.git` folder git can't use proves nothing about what's inside.
         _ = try box.mkdir("dd/SourcePackages/checkouts/swift-log/.git")
         #expect(await GitSafety.repositoryRefusal(in: "\(box.root)/dd", skipPackageCaches: true) != nil)
     }
@@ -568,7 +556,6 @@ struct CLIFailure: Error { var message: String }
         defer { box.cleanup() }
         let root = try box.mkdir("Library/Caches/scratch")
         _ = try box.write("Library/Caches/scratch/a/b/c/d/fresh.log")
-        // Make the top levels look old so only a deep check sees the write.
         let old = Date(timeIntervalSinceNow: -48 * 3600)
         for rel in ["Library/Caches/scratch/a/b/c/d", "Library/Caches/scratch/a/b/c", "Library/Caches/scratch/a/b", "Library/Caches/scratch/a", "Library/Caches/scratch"] {
             try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: "\(box.root)/\(rel)")
@@ -637,7 +624,6 @@ struct CLIFailure: Error { var message: String }
                                   bytes: 1, paths: [link], action: .commands([CommandSpec("sqlite3", [link, "VACUUM;"])]))
         let result = await Executor(guardrails: box.guardrails).clean(candidate, state: .empty)
         #expect(result.status == .skipped, "\(result.message)")
-        // Deleting the link itself is still fine: delete unlinks, it never follows.
         try box.guardrails.check(link)
     }
 
@@ -677,7 +663,6 @@ struct CLIFailure: Error { var message: String }
         let candidate = try #require(found.first { (($0.paths.first ?? "") as NSString).lastPathComponent == "app.feature" })
         #expect(candidate.effectiveRisk == .safe)
 
-        // New, committed (so clean) work after the scan.
         _ = try box.write("projects/app.feature/feature.txt")
         try await git(wt, "add", ".")
         try await git(wt, "commit", "-q", "-m", "feature")

@@ -1,11 +1,8 @@
 import Foundation
 
-/// Where Arin keeps its own state: the keep list and the history. The app and the CLI share it.
 public enum ArinStore {
     public static let releaseBundleID = "com.sertacozercan.Arin"
 
-    /// `~/Library/Application Support/<bundle ID>`. Debug app builds get their own folder, like their
-    /// settings. `ARIN_SUPPORT_DIR` overrides it for tests and scripted runs.
     public static var directory: URL {
         if let override = ProcessInfo.processInfo.environment["ARIN_SUPPORT_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
@@ -21,8 +18,6 @@ public enum ArinStore {
         try data.write(to: url, options: .atomic)
     }
 
-    /// Runs `body` while holding an exclusive lock shared by every Arin process (app and CLI),
-    /// so read-modify-write updates and appends from both can't interleave.
     static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
         let lockPath = url.path + ".lock"
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -34,7 +29,6 @@ public enum ArinStore {
         return try body()
     }
 
-    /// The Trash that `FileManager.trashItem` uses for items in the home folder and temp folders.
     static var trashDirectory: String {
         let url = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".Trash")
@@ -60,16 +54,12 @@ public struct StoreError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
-// MARK: - Keep list
 
-/// Items the user never wants cleaned, by candidate ID.
 public struct KeepList: Codable, Sendable, Equatable {
     public struct Entry: Codable, Sendable, Hashable {
         public var id: String
         public var title: String
         public var added: Date
-        /// What the item covered when it was kept. A cleanup whose target contains one of these is
-        /// refused too, so removing a worktree can't take a kept `node_modules` with it.
         public var paths: [String]?
     }
 
@@ -83,14 +73,10 @@ public struct KeepList: Codable, Sendable, Equatable {
 
     public func contains(_ id: String) -> Bool { entries.contains { $0.id == id } }
 
-    /// The first kept item that deleting `target` would take with it.
     public func keptEntry(insideOrAt target: String) -> Entry? {
         KeptPaths(entries).insideOrAt(target)
     }
 
-    /// Records where kept items are now, from a scan. Entries added by ID alone (the CLI, logical
-    /// IDs like `go.build-cache:go.build-cache`) get the paths they cover, so a parent's cleanup
-    /// can't take them along. Returns whether anything changed.
     @discardableResult
     public mutating func recordPaths(_ found: [String: [String]]) -> Bool {
         var changed = false
@@ -105,8 +91,6 @@ public struct KeepList: Codable, Sendable, Equatable {
         return changed
     }
 
-    /// `path` with symlinks resolved and each name spelled as it is on disk, so a case change or
-    /// a symlinked folder can't hide a kept path. Resolves the longest part that exists.
     static func canonical(_ path: String) -> String {
         var head = (path as NSString).standardizingPath
         var tail: [String] = []
@@ -130,24 +114,17 @@ public struct KeepList: Codable, Sendable, Equatable {
         entries.removeAll { $0.id == id }
     }
 
-    /// A missing file is an empty list. A file that exists but can't be read or parsed throws:
-    /// cleaning without the user's protections would be worse than not cleaning.
     public static func load(from url: URL = defaultURL) throws -> KeepList {
         do {
             let data = try Data(contentsOf: url)
             return try ArinStore.decoder.decode(KeepList.self, from: data)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            // Only a file that is really absent counts as an empty list; a folder that can't be
-            // searched reports a permission error instead, which blocks cleaning below.
             return KeepList()
         } catch {
             throw StoreError("keep list at \((url.path as NSString).abbreviatingWithTildeInPath) can't be read (\(error.localizedDescription)); fix or delete it")
         }
     }
 
-    /// Loads the list and saves the paths `found` for kept IDs (see `recordPaths`). Fails if they
-    /// can't be saved: the executor re-reads the file, so protections held only in memory wouldn't
-    /// reach it.
     public static func load(from url: URL = defaultURL, recording found: [String: [String]]) -> Result<KeepList, any Error> {
         Result {
             var list = try load(from: url)
@@ -164,8 +141,6 @@ public struct KeepList: Codable, Sendable, Equatable {
         try ArinStore.write(ArinStore.encoder.encode(self), to: url)
     }
 
-    /// Loads, changes and saves the list under the shared lock, so the app and the CLI can't
-    /// drop each other's additions.
     @discardableResult
     public static func update(at url: URL = defaultURL, _ change: (inout KeepList) -> Void) throws -> KeepList {
         try ArinStore.withLock(url) {
@@ -180,7 +155,6 @@ public struct KeepList: Codable, Sendable, Equatable {
     static let keptBlockerSuffix = ", which you chose to keep"
 }
 
-/// Kept paths resolved once, for matching many targets.
 struct KeptPaths {
     private let items: [(path: String, entry: KeepList.Entry)]
 
@@ -188,15 +162,12 @@ struct KeptPaths {
         items = entries.flatMap { entry in (entry.paths ?? []).map { (KeepList.canonical($0), entry) } }
     }
 
-    /// The kept item at `target` or inside it, compared by real path. A target that is a symlink
-    /// resolves too, which refuses more than deleting the link would need; that errs safe.
     func insideOrAt(_ target: String) -> KeepList.Entry? {
         let target = KeepList.canonical(target)
         let prefix = target.hasSuffix("/") ? target : target + "/"
         return items.first { $0.path == target || $0.path.hasPrefix(prefix) }?.entry
     }
 
-    /// The kept folder `target` is inside, compared by real path.
     func around(_ target: String) -> KeepList.Entry? {
         let target = KeepList.canonical(target)
         return items.first { target.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }?.entry
@@ -204,15 +175,12 @@ struct KeptPaths {
 }
 
 extension Candidate {
-    /// Blockers the keep list added. Unlike the others, nothing overrides these.
     var keepBlockers: [String] {
         blockers.filter { $0 == KeepList.unreadableBlocker || $0.hasSuffix(KeepList.keptBlockerSuffix) }
     }
 }
 
 public extension [Candidate] {
-    /// Marks kept items. If the list couldn't be read, nothing may be pre-selected.
-    /// Safe to call again on the same candidates: blockers it added before are replaced.
     func applying(keep: Result<KeepList, any Error>) -> [Candidate] {
         let kept = (try? keep.get()).map { KeptPaths($0.entries) }
         return map { candidate in
@@ -233,21 +201,16 @@ public extension [Candidate] {
     }
 }
 
-// MARK: - History
 
-/// A file the executor moved to the Trash, and where it went.
 public struct TrashedPath: Codable, Sendable, Hashable {
     public var original: String
     public var location: String
 
-    /// Still in the Trash, and nothing has taken its old place.
     public var canPutBack: Bool {
         (try? checkLocation()) != nil
             && FileManager.default.fileExists(atPath: location) && !FileManager.default.fileExists(atPath: original)
     }
 
-    /// The history file is ordinary user-writable data, so a record can't be trusted to name a
-    /// Trash item: the source must sit directly in the Trash and not be a symlink.
     func checkLocation(trash: String = ArinStore.trashDirectory) throws {
         let parent = URL(fileURLWithPath: (location as NSString).deletingLastPathComponent).resolvingSymlinksInPath().path
         let name = (location as NSString).lastPathComponent
@@ -256,9 +219,7 @@ public struct TrashedPath: Codable, Sendable, Hashable {
         }
     }
 
-    /// Moves the item back to where it was.
     public func putBack(guardrails: Guardrails = Guardrails()) throws {
-        // An uninstall may have moved it from an Applications folder or ~/Library/Preferences.
         do { try guardrails.check(original) } catch { try guardrails.checkUninstall(original) }
         try checkLocation()
         guard FileManager.default.fileExists(atPath: location) else {
@@ -273,13 +234,11 @@ public struct TrashedPath: Codable, Sendable, Hashable {
         do {
             try FileManager.default.moveItem(atPath: location, toPath: original)
         } catch let error as CocoaError where error.code == .fileWriteNoPermission || error.code == .fileReadNoPermission {
-            // Reading the Trash is privacy-protected.
             throw StoreError("macOS didn't let Arin take it out of the Trash. Give Arin Full Disk Access in System Settings → Privacy & Security, or drag \((location as NSString).lastPathComponent) back from the Trash in Finder.")
         }
     }
 }
 
-/// What one scan found, by rule, so growth between scans can be shown.
 public struct ScanRecord: Codable, Sendable, Hashable {
     public var date: Date
     public var freeBytes: Int64
@@ -312,7 +271,6 @@ public struct CleanupRecord: Codable, Sendable, Hashable {
     public var freeAfter: Int64
     public var estimatedBytes: Int64
     public var items: [CleanupItemResult]
-    /// The app's name when this was an uninstall rather than a cleanup.
     public var uninstalled: String?
 
     public var measuredBytes: Int64 { freeAfter - freeBefore }
@@ -340,17 +298,14 @@ public enum HistoryEntry: Codable, Sendable, Hashable {
     }
 }
 
-/// How much one rule's findings grew between two scans.
 public struct Growth: Sendable, Hashable {
     public var ruleID: String
     public var label: String
     public var bytes: Int64
 }
 
-/// An append-only log of scans and cleanups, one JSON object per line.
 public struct History: Sendable {
     public var url: URL
-    /// Past this size the oldest half is dropped.
     public var maxBytes: Int
 
     public init(url: URL = ArinStore.directory.appendingPathComponent("history.jsonl"), maxBytes: Int = 4 * 1024 * 1024) {
@@ -369,7 +324,6 @@ public struct History: Sendable {
                 defer { try? handle.close() }
                 let end = try handle.seekToEnd()
                 if end > 0 {
-                    // A torn earlier write leaves no newline; start a fresh line so this record survives.
                     try handle.seek(toOffset: end - 1)
                     if try handle.read(upToCount: 1) != Data([0x0A]) { line.insert(0x0A, at: 0) }
                     try handle.seekToEnd()
@@ -382,7 +336,6 @@ public struct History: Sendable {
         }
     }
 
-    /// Oldest first. Lines that don't parse (a newer format, a torn write) are skipped.
     public func load() -> [HistoryEntry] {
         guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = ArinStore.decoder
@@ -409,7 +362,6 @@ public struct History: Sendable {
         entries.compactMap { if case let .cleanup(record) = $0 { record } else { nil } }
     }
 
-    /// Rules whose findings grew by at least `minimum` from `previous` to `current`, largest first.
     public static func growth(from previous: ScanRecord, to current: ScanRecord, minimum: Int64 = 256 * 1024 * 1024) -> [Growth] {
         current.bytesByRule.compactMap { rule, bytes in
             let delta = bytes - (previous.bytesByRule[rule] ?? 0)
@@ -420,10 +372,7 @@ public struct History: Sendable {
     }
 }
 
-// MARK: - Saved plans
 
-/// A reviewed list of candidates to clean later, by ID. Running a plan rescans first and cleans
-/// only items whose action is unchanged and which have not become more cautious.
 public struct CleanupPlan: Codable, Sendable {
     public struct Item: Codable, Sendable, Hashable {
         public var id: String
@@ -431,8 +380,6 @@ public struct CleanupPlan: Codable, Sendable {
         public var bytes: Int64
         public var risk: Risk
         public var action: CleanupAction
-        /// What the item covered when it was reviewed. A native command can keep its arguments
-        /// while its target moves (a changed npm cache folder), so this is compared too.
         public var paths: [String]
     }
 
@@ -460,7 +407,6 @@ public struct CleanupPlan: Codable, Sendable {
 
     public func encoded() throws -> Data { try ArinStore.encoder.encode(self) }
 
-    /// Splits the plan into fresh candidates that may run and items refused with a reason.
     public func resolve(against candidates: [Candidate]) -> (ready: [Candidate], refused: [(item: Item, reason: String)]) {
         let byID = Dictionary(candidates.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var ready: [Candidate] = []

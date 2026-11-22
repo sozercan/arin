@@ -1,18 +1,7 @@
 import Darwin
 import Foundation
 
-/// What deleting a folder would free, as well as the file system can say. `du` counts every block a
-/// file uses, but on APFS a clone shares its blocks with other files, so deleting it frees only the
-/// blocks nothing else uses. APFS reports those per file as its private size.
-///
-/// A folder's size is the sum of its files' private sizes, plus the blocks a family of clones shares
-/// when every clone in the family is inside the folder (deleting all of them frees those blocks too).
-/// A hard-linked file counts once, and only when all its links are inside: a link left elsewhere keeps
-/// its data. Compressed files, and volumes that don't report a private size,
-/// use allocated blocks. Snapshots and clones changed after they were made can still keep blocks, so
-/// the measured change in free space stays the reported result.
 enum DiskUsage {
-    /// Bytes for `path`, or nil when the walk didn't finish before `deadline` or was cancelled.
     static func measure(_ path: String, deadline: Date, cancelled: CancelFlag) -> Int64? {
         guard let root = strdup(path) else { return nil }
         defer { free(root) }
@@ -33,7 +22,6 @@ enum DiskUsage {
             case FTS_D, FTS_SL, FTS_SLNONE, FTS_DEFAULT:
                 tally.add(FileSize(stat: stat))
             default:
-                // FTS_DP (a directory again, after its contents), unreadable entries: nothing to add.
                 continue
             }
         }
@@ -44,9 +32,7 @@ enum DiskUsage {
         var bytes: Int64
         var device: UInt64
         var inode: UInt64
-        /// Hard links to the file, 1 when it has no others.
         var links: UInt32
-        /// Clone family and how many files are in it; nil when the file shares no blocks.
         var family: Family?
         var clones: UInt32 = 0
         var shared: Int64 = 0
@@ -66,7 +52,6 @@ enum DiskUsage {
 
     struct Tally {
         var total: Int64 = 0
-        /// Hard-linked files by device and inode, with how many of their links were found.
         var linked: [[UInt64]: UInt32] = [:]
         var families: [Family: (found: UInt32, clones: UInt32, shared: Int64)] = [:]
 
@@ -90,20 +75,18 @@ enum DiskUsage {
         }
     }
 
-    // getattrlist(2) constants from <sys/attr.h>.
     private static let attrBitMapCount: UInt16 = 5
-    private static let commonRequested: UInt32 = 0x8000_0000 /* RETURNED_ATTRS */ | 0x0000_0002 /* DEVID */
-        | 0x0000_0008 /* OBJTYPE */ | 0x0004_0000 /* FLAGS */ | 0x0200_0000 /* FILEID */
+    private static let commonRequested: UInt32 = 0x8000_0000 | 0x0000_0002
+        | 0x0000_0008 | 0x0004_0000 | 0x0200_0000
     private static let commonRequired: UInt32 = 0x0000_0002 | 0x0000_0008 | 0x0200_0000
-    private static let fileRequested: UInt32 = 0x0000_0001 /* LINKCOUNT */ | 0x0000_0004 /* ALLOCSIZE */
-    private static let privateSize: UInt32 = 0x0000_0008 // ATTR_CMNEXT_PRIVATESIZE
-    private static let cloneID: UInt32 = 0x0000_0100 // ATTR_CMNEXT_CLONEID
-    private static let cloneRefCount: UInt32 = 0x0000_1000 // ATTR_CMNEXT_CLONE_REFCNT
-    private static let options = UInt32(0x0000_0001 /* NOFOLLOW */ | 0x0000_0008 /* PACK_INVAL_ATTRS */ | 0x0000_0020 /* ATTR_CMN_EXTENDED */)
-    private static let regularFile: UInt32 = 1 // VREG
-    private static let compressed: UInt32 = 0x20 // UF_COMPRESSED
+    private static let fileRequested: UInt32 = 0x0000_0001 | 0x0000_0004
+    private static let privateSize: UInt32 = 0x0000_0008
+    private static let cloneID: UInt32 = 0x0000_0100
+    private static let cloneRefCount: UInt32 = 0x0000_1000
+    private static let options = UInt32(0x0000_0001 | 0x0000_0008 | 0x0000_0020)
+    private static let regularFile: UInt32 = 1
+    private static let compressed: UInt32 = 0x20
 
-    /// A regular file's private size and clone family, falling back to its allocated blocks.
     static func file(_ path: UnsafeMutablePointer<CChar>, stat: stat) -> FileSize {
         var size = FileSize(stat: stat)
         var request = attrlist()
@@ -120,8 +103,6 @@ enum DiskUsage {
             func u32(_ offset: Int) -> UInt32 { raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
             func u64(_ offset: Int) -> UInt64 { raw.loadUnaligned(fromByteOffset: offset, as: UInt64.self) }
             guard Int(u32(0)) <= raw.count else { return size }
-            // After the length: the returned attribute_set_t (common, vol, dir, file, fork), then the
-            // values in bit order, each 4-byte aligned.
             let common = u32(4), file = u32(16), fork = u32(20)
             guard common & commonRequired == commonRequired, file & fileRequested == fileRequested else { return size }
             let values = 24
@@ -137,7 +118,6 @@ enum DiskUsage {
             size.inode = fileID
             size.links = max(links, 1)
             size.bytes = allocated
-            // APFS leaves a compressed file's data out of its private size.
             guard fork & privateSize != 0, flags & compressed == 0, privateBytes >= 0, privateBytes <= allocated else {
                 return size
             }
@@ -152,7 +132,6 @@ enum DiskUsage {
     }
 }
 
-/// Lets a cancelled task stop a walk running on a dispatch queue.
 final class CancelFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false

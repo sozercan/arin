@@ -1,6 +1,5 @@
 import Foundation
 
-/// Large, idle items in $TMPDIR and /private/tmp: agent build caches, test homes, DerivedData copies.
 struct TempRule: Rule {
     let id = "temp.stale"
     let name = "Stale temporary files"
@@ -31,8 +30,6 @@ struct TempRule: Rule {
         return result
     }
 
-    /// A busy folder (e.g. /tmp/claude-501 holding the current session) is split into its
-    /// children so idle siblings can still be cleaned.
     func evaluate(_ entry: String, bytes: Int64, root: String, depth: Int, ctx: ScanContext) async -> [Candidate] {
         let busy = ctx.state.isBusy(entry)
         if busy, bytes >= 1024 * 1024 * 1024, depth < 3, FileInfo.isDirectory(entry) {
@@ -52,10 +49,7 @@ struct TempRule: Rule {
             blockers.append("written in the last 3 hours (may be in use)")
         }
         let name = String(entry.dropFirst(root.count + 1))
-        // Agent scratch folders sometimes hold a git checkout with unpushed work, not just build output.
         let refusal = await GitSafety.repositoryRefusal(in: entry, skipPackageCaches: true)
-        // Being idle and holding no repository doesn't make a folder regenerable. Only a layout a tool
-        // is known to rebuild starts as Safe; anything else is for the user (or their agent) to judge.
         let cache = Self.recognizedCache(entry)
         var detail = entry.hasPrefix("/private/tmp")
             ? "Scratch data in /tmp, idle for 3+ hours."
@@ -87,9 +81,6 @@ struct TempRule: Rule {
 extension TempRule {
     static let cacheTagSignature = "Signature: 8a477f597d28d172789f06886806bc55"
 
-    /// What a temp folder is, when its layout says a tool will rebuild it: a Go build cache (one-off
-    /// `GOCACHE` runs), an Xcode DerivedData folder (`-derivedDataPath` runs), or a folder that carries
-    /// the standard `CACHEDIR.TAG`. Nil for anything else.
     static func recognizedCache(_ path: String) -> String? {
         func file(_ name: String) -> String { (path as NSString).appendingPathComponent(name) }
         if let readme = head(file("README"), 80),
@@ -108,8 +99,6 @@ extension TempRule {
         return nil
     }
 
-    /// The first `count` bytes of a regular file (not a symlink, FIFO, or device, which could block or
-    /// lead elsewhere), without reading the rest.
     static func head(_ path: String, _ count: Int) -> Data? {
         var info = stat()
         guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
@@ -119,7 +108,6 @@ extension TempRule {
     }
 }
 
-/// Code-signing clones macOS makes of running app bundles. Stale copies pile up (Chrome, Edge, Teams).
 struct CodeSignCloneRule: Rule {
     let id = "temp.code-sign-clones"
     let name = "Stale code-signing clones"

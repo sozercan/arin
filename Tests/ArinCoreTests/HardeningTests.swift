@@ -49,7 +49,6 @@ private func unlock(_ box: Sandbox) {
         #expect(!FileInfo.exists("\(box.root)/Library/Caches/tool"))
     }
 
-    /// A folder that can't be opened can't be pinned, so it's never chmod-ed by name.
     @Test func leavesFoldersItCantOpenAndCreditsNothing() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -69,7 +68,6 @@ private func unlock(_ box: Sandbox) {
         #expect(stat(unreadable, &mode) == 0 && mode.st_mode & 0o777 == 0, "left untouched")
     }
 
-    /// A second path behind an unsearchable folder can't be measured or removed: it isn't gone.
     @Test func unreachablePathsLeaveTheSizeUnknown() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -151,7 +149,6 @@ private func unlock(_ box: Sandbox) {
     }
 }
 
-/// A real disk image mounted inside the sandbox: deleting the folder around it must not reach into it.
 @Suite(.serialized) struct MountTests {
     @Test func neverDeletesIntoAMountedVolume() async throws {
         let box = try Sandbox()
@@ -170,13 +167,11 @@ private func unlock(_ box: Sandbox) {
         let victim = "\(mount)/victim.txt"
         try "keep".write(toFile: victim, atomically: true, encoding: .utf8)
 
-        // The guardrails refuse the folder and the mount point itself.
         #expect(throws: Guardrails.Violation.self) { try box.guardrails.check(tree) }
         #expect(throws: Guardrails.Violation.self) { try box.guardrails.check(mount) }
         let item = await Executor(guardrails: box.guardrails, keepListURL: nil).clean(candidate(tree), state: .empty)
         #expect(item.status == .skipped)
 
-        // Even past the guardrails, the remover stops at the volume boundary.
         let removal = await TreeRemover.remove(tree)
         #expect(removal.leftBehind.contains { $0.errno == EXDEV })
         #expect(FileManager.default.fileExists(atPath: victim))
@@ -237,10 +232,8 @@ private extension Process {
         #expect(!step(30_000_000_000))
         #expect(step(19_000_000_000))
         #expect(!step(18_000_000_000))
-        // Back just above the line, then below again: still the same drop.
         #expect(!step(20_500_000_000))
         #expect(!step(19_500_000_000))
-        // Clear of the margin (2 GB here), then below: a new alert.
         #expect(!step(22_000_000_000))
         #expect(step(19_000_000_000))
     }
@@ -301,7 +294,6 @@ private extension Process {
     }
 }
 
-/// Every tool missing, failing, printing nothing, or hanging. Records what was asked of it.
 final class FakeRunner: CommandRunner, @unchecked Sendable {
     enum Mode { case missing, failing, silent, hanging }
     let mode: Mode
@@ -327,8 +319,6 @@ final class FakeRunner: CommandRunner, @unchecked Sendable {
 }
 
 @Suite struct PortabilityTests {
-    /// A fresh Mac: an empty home, empty temp folders, and tools that are missing or misbehave.
-    /// Every rule must find nothing, throw nothing, and never fall back to the real machine.
     @Test(arguments: [FakeRunner.Mode.missing, .failing, .silent, .hanging])
     func everyRuleFindsNothingInAnEmptyHome(_ mode: FakeRunner.Mode) async throws {
         let box = try Sandbox()

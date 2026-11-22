@@ -25,8 +25,6 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
 
     public var isInstalled: Bool { Shell.which(executable) != nil }
 
-    /// Judging caches and build folders needs little reasoning, so reviews default to a cheaper
-    /// setup than a coding session. `nil` model means the CLI's own default.
     public var defaultModel: String? {
         switch self {
         case .claude: "sonnet"
@@ -48,7 +46,6 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         }
     }
 
-    /// Model aliases offered as one-click choices; anything else is a custom name.
     public var modelPresets: [(id: String, label: String)] {
         switch self {
         case .claude: [("sonnet", "Sonnet"), ("haiku", "Haiku"), ("opus", "Opus")]
@@ -56,7 +53,6 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         }
     }
 
-    /// What the CLI uses when Arin passes no model or effort, read from its own config.
     public func configuredDefaults(home: String = NSHomeDirectory()) -> (model: String?, effort: String?) {
         switch self {
         case .claude:
@@ -77,7 +73,6 @@ public enum AgentProvider: String, Codable, Sendable, CaseIterable, Identifiable
         }
     }
 
-    /// A top-level `key = "value"` from TOML, before the first [table].
     static func tomlTopLevel(_ text: String, key: String) -> String? {
         for raw in text.split(separator: "\n") {
             let line = raw.trimmingCharacters(in: .whitespaces)
@@ -96,13 +91,9 @@ public struct AgentReviewError: Error, CustomStringConvertible {
     public var description: String
 }
 
-/// Asks the user's own coding agent to judge candidates. The agent runs read-only and returns
-/// verdicts keyed by candidate ID; it cannot add, change, or run cleanup actions.
 public struct AgentReviewer: Sendable {
     public var provider: AgentProvider
-    /// Model alias or name; `nil` uses the CLI's configured default.
     public var model: String?
-    /// low, medium, high, xhigh; `nil` uses the CLI's configured default.
     public var effort: String?
     public var timeout: TimeInterval
     public var maxCandidates: Int
@@ -121,7 +112,6 @@ public struct AgentReviewer: Sendable {
         self.maxCandidates = max(maxCandidates, 0)
     }
 
-    /// Credentials and personal data the reviewer must not read. The review never needs them.
     public static let privatePaths = [
         ".ssh", ".gnupg", ".aws", ".azure", ".config/gh", ".config/gcloud", ".docker/config.json",
         ".kube/config", ".netrc", ".npmrc", ".pypirc", ".git-credentials", ".codex/auth.json",
@@ -130,21 +120,14 @@ public struct AgentReviewer: Sendable {
         "Library/Mobile Documents", "Documents", "Desktop",
     ]
 
-    /// Commands with no writing flags and that don't print file contents
-    /// (no find: -delete; no git branch: -D; no cat/head: they'd bypass the Read deny rules).
-    /// `file` (-C writes a magic db) and `git log` (--output=FILE) are excluded: prefix rules
-    /// can't stop write-capable options.
     static let readOnlyBash = ["ls", "du", "stat", "lsof", "git status", "git worktree list"]
 
-    /// Copilot matches git rules on the first subcommand only, so `git worktree list` can't be
-    /// allowed without also allowing `git worktree remove`.
     static let copilotReadOnlyShell = readOnlyBash.filter { $0 != "git worktree list" }
 
     public static let schema: String = """
     {"type":"object","additionalProperties":false,"required":["verdicts"],"properties":{"verdicts":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["id","verdict","reason"],"properties":{"id":{"type":"string"},"verdict":{"type":"string","enum":["safe","review","keep"]},"reason":{"type":"string"}}}}}}
     """
 
-    /// Reviews the largest actionable candidates and returns verdicts by candidate ID.
     public func review(_ candidates: [Candidate]) async throws -> [String: AgentVerdict] {
         guard provider.isInstalled else {
             throw AgentReviewError(description: "\(provider.label) (`\(provider.executable)`) is not installed")
@@ -205,10 +188,6 @@ public struct AgentReviewer: Sendable {
         return args
     }
 
-    /// Copilot can't deny reads by path, but it only lets tools touch directories it was given.
-    /// It gets the candidates' existing folders, never home itself or anything holding private data.
-    /// Paths are compared after resolving symlinks and ignoring case (APFS is case-insensitive by
-    /// default), so a link or a different spelling can't reach a private folder.
     static func copilotDirs(for candidates: [Candidate], home: String = NSHomeDirectory()) -> [String] {
         func resolved(_ path: String) -> String? {
             guard path.hasPrefix("/"), let real = realpath(path, nil) else { return nil }
@@ -227,7 +206,6 @@ public struct AgentReviewer: Sendable {
             return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
         }
         var seen = Set<String>()
-        // --add-dir refuses missing paths and files, which would fail the whole review.
         return candidates.flatMap { $0.paths.prefix(5) }
             .compactMap(resolved)
             .filter { key($0) != key(home) && $0 != "/" && !isPrivate($0) && isDirectory($0) }
@@ -242,7 +220,6 @@ public struct AgentReviewer: Sendable {
             "--no-custom-instructions",
             "--no-auto-update",
             "--disable-builtin-mcps",
-            // Read and list only: no edit or create tools, no web fetch, no MCP or skills.
             "--available-tools", "view", "glob", "grep", "bash", "read_bash",
             "--allow-tool",
         ] + copilotReadOnlyShell.map { "shell(\($0))" }
@@ -259,7 +236,6 @@ public struct AgentReviewer: Sendable {
         guard result.ok else {
             throw AgentReviewError(description: "Claude Code failed: \(String((result.stderr + result.stdout).suffix(400)))")
         }
-        // The JSON envelope carries `structured_output` when --json-schema is honored, else `result` text.
         if let envelope = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any] {
             if let structured = envelope["structured_output"],
                let data = try? JSONSerialization.data(withJSONObject: structured) {
@@ -366,7 +342,6 @@ public struct AgentReviewer: Sendable {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidatesJSON: [String] = {
             var options = [text]
-            // Tolerate prose or code fences around the JSON object.
             if let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"), start < end {
                 options.append(String(text[start ... end]))
             }
@@ -386,7 +361,6 @@ public struct AgentReviewer: Sendable {
 }
 
 public extension Array where Element == Candidate {
-    /// Attaches verdicts to matching candidates.
     func applying(_ verdicts: [String: AgentVerdict]) -> [Candidate] {
         map { candidate in
             var copy = candidate

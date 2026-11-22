@@ -21,7 +21,6 @@ struct ArinApp: App {
             MenuBarView()
                 .environment(model)
         } label: {
-            // Same drive in both states; filled when below the alert threshold.
             Label(model.disk.freeBytes.compactBytes, systemImage: model.isLowOnSpace ? "internaldrive.fill" : "internaldrive")
         }
         .menuBarExtraStyle(.window)
@@ -33,7 +32,6 @@ struct ArinApp: App {
     }
 }
 
-/// Menu items stay text-only, as macOS 27 menus do.
 private struct ArinCommands: Commands {
     var model: AppModel
 
@@ -84,7 +82,6 @@ private struct ArinCommands: Commands {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_: Notification) {
-        // `swift run` launches a bare executable; make it a regular app with a Dock icon and windows.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
     }
@@ -93,7 +90,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension Int64 {
-    /// "64 GB" for the menu bar.
     var compactBytes: String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .decimal

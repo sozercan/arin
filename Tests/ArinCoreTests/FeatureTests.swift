@@ -248,7 +248,6 @@ private func setModified(_ path: String, daysAgo: Double) throws {
         #expect(await ProjectArtifactRule.classify("\(p)/py/.pytest_cache") == .taggedCache)
         #expect(await ProjectArtifactRule.classify("\(p)/py/.fake_cache") == nil)
         #expect(await ProjectArtifactRule.classify("\(p)/py/data") == nil)
-        // A tagged cache that holds a checkout is still a cache, but it is blocked (see SafetyTests).
         #expect(await ProjectArtifactRule.classify("\(p)/py/.mypy_cache") == .taggedCache)
 
         let found = try await ProjectArtifactRule().discover(context(box))
@@ -316,7 +315,6 @@ private func setModified(_ path: String, daysAgo: Double) throws {
         let parent = candidate(worktree)
         let marked = [parent].applying(keep: Result { try KeepList.load(from: url) })
         #expect(marked[0].blockers == ["contains node_modules · wt, which you chose to keep"])
-        // Applying again replaces its own blockers instead of piling them up.
         #expect(marked.applying(keep: Result { try KeepList.load(from: url) })[0].blockers.count == 1)
 
         let report = await Executor(guardrails: box.guardrails, keepListURL: url).run([parent])
@@ -368,7 +366,6 @@ private func setModified(_ path: String, daysAgo: Double) throws {
     }
 
     @Test func ollamaRemovalIsRefusedWhenLoadedModelsCantBeChecked() async throws {
-        // Without a reachable Ollama, `ollama ps` fails and removal must not run.
         if await Shell.run("ollama", ["ps"], timeout: 10).ok { return }
         let reason = await Executor.preflight(CommandSpec("ollama", ["rm", "arin-test-model"]))
         #expect(reason?.contains("couldn't check") == true)
@@ -391,8 +388,6 @@ private struct FixedRule: Rule {
         let url = URL(fileURLWithPath: "\(box.root)/keep.json")
         try KeepList.update(at: url) { $0.add(id: "t:\(modules)", title: "node_modules", paths: [modules]) }
 
-        // Through a symlinked folder, with a trailing slash, and (on a case-insensitive volume, the
-        // macOS default) in another case: different IDs, same directory.
         var aliases = [candidate("\(box.root)/link/app"), candidate("\(box.root)/link/app/node_modules/")]
         let cased = "\(box.root)/projects/APP/node_modules"
         if FileManager.default.fileExists(atPath: cased) { aliases.append(candidate(cased)) }
@@ -410,13 +405,12 @@ private struct FixedRule: Rule {
         let worktree = try box.mkdir("projects/wt")
         let cache = try box.mkdir("projects/wt/.gocache")
         let url = URL(fileURLWithPath: "\(box.root)/keep.json")
-        // What `arin keep go.build-cache:go.build-cache` records: no paths.
         try KeepList.update(at: url) { $0.add(id: "go:go", title: "Go build cache") }
 
         var goCache = candidate("go", paths: [cache])
         goCache.ruleID = "go"
         goCache.id = "go:go"
-        goCache.bytes = 1 // under the size filter, so it isn't listed but must still protect itself
+        goCache.bytes = 1
         var parent = candidate(worktree)
         parent.bytes = 100
         let options = ScanOptions(home: box.root, tmpDir: box.root, projectRoots: [], minimumBytes: 10, keepListURL: url)
@@ -426,7 +420,6 @@ private struct FixedRule: Rule {
         #expect(try KeepList.load(from: url).entries[0].paths == [cache])
         #expect(report.keptPaths == ["go:go": [cache]])
 
-        // The executor re-reads the saved paths, so the worktree is refused there too.
         let result = await Executor(guardrails: box.guardrails, keepListURL: url).run([parent])
         #expect(result.items.first?.status == .skipped)
         #expect(FileInfo.exists(cache))
@@ -440,7 +433,7 @@ private struct FixedRule: Rule {
         let dir = try box.mkdir("state")
         let url = URL(fileURLWithPath: "\(dir)/keep.json")
         try KeepList.update(at: url) { $0.add(id: "go:go", title: "Go build cache") }
-        #expect(chmod(dir, 0o555) == 0) // readable, but the paths can't be saved
+        #expect(chmod(dir, 0o555) == 0)
         defer { chmod(dir, 0o755) }
 
         var goCache = candidate("go", paths: [cache])
@@ -451,12 +444,9 @@ private struct FixedRule: Rule {
         #expect(report.ruleErrors["Keep list"] != nil)
         let picked = try #require(report.candidates.first { $0.id == parent.id })
         #expect(picked.blockers == [KeepList.unreadableBlocker])
-        // The report still carries what the kept ID covers, so the app's reload stays blocked.
         #expect(report.keptPaths == ["go:go": [cache]])
         #expect(throws: StoreError.self) { try KeepList.load(from: url, recording: report.keptPaths).get() }
 
-        // Picked by ID anyway (`arin clean --ids`): the file still reads fine, but the scan's
-        // keep-list blocker stops it.
         let result = await Executor(guardrails: box.guardrails, keepListURL: url).run([picked])
         #expect(result.items.first?.status == .skipped)
         #expect(FileInfo.exists(cache))

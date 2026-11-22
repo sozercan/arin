@@ -3,17 +3,11 @@ import Foundation
 public struct ScanOptions: Sendable {
     public var home: String
     public var tmpDir: String
-    /// The temp folder shared by every user. Tests point it into their sandbox.
     public var sharedTmpDir = "/private/tmp"
-    /// Where to look for repositories, worktrees, and build output.
     public var projectRoots: [String]
-    /// Ask GitHub (via `gh`) whether branches were squash-merged.
     public var checkPullRequests: Bool
-    /// Run `git fetch --prune` first so `origin/<default>` is current. Changes remote refs only.
     public var fetchRemotes: Bool
-    /// Ignore candidates smaller than this.
     public var minimumBytes: Int64
-    /// The user's keep list. Nil skips it (tests); an unreadable file blocks every pre-selection.
     public var keepListURL: URL?
 
     public init(
@@ -41,8 +35,6 @@ public struct ScanOptions: Sendable {
         return uniqueDirectories(candidates)
     }
 
-    /// Drops duplicates that name the same directory (APFS is usually case-insensitive,
-    /// so ~/projects and ~/Projects are one folder) and roots nested inside another root.
     public static func uniqueDirectories(_ paths: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -73,7 +65,6 @@ public protocol Rule: Sendable {
     func discover(_ ctx: ScanContext) async throws -> [Candidate]
 }
 
-/// Rules that report facts the app won't act on.
 public protocol InsightRule: Sendable {
     func insights(_ ctx: ScanContext) async -> [Insight]
 }
@@ -124,7 +115,6 @@ public struct Scanner: Sendable {
             }
         }
 
-        // Unclassified runs last so it can skip anything a specific rule already claimed.
         let claimed = candidates.flatMap(\.paths)
         for rule in fallback {
             let found = await rule.discover(ctx, excluding: claimed)
@@ -142,14 +132,10 @@ public struct Scanner: Sendable {
             ))
         }
 
-        // Save what kept items cover now, from every finding (before dedupe and the size filter, so
-        // a small kept cache inside a worktree still protects itself).
         let found = Dictionary(candidates.map { ($0.id, $0.paths) }, uniquingKeysWith: { first, _ in first })
         let keep: Result<KeepList, any Error> = options.keepListURL.map { KeepList.load(from: $0, recording: found) }
             ?? .success(KeepList())
         if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
-        // From the list as stored, so the report carries the paths even when saving them failed:
-        // the app's reload then records them again and stays blocked instead of clearing.
         let keptIDs = Set((options.keepListURL.flatMap { try? KeepList.load(from: $0) }?.entries ?? []).map(\.id))
         let filtered = Self.dedupe(candidates)
             .applying(keep: keep)
@@ -166,12 +152,8 @@ public struct Scanner: Sendable {
         )
     }
 
-    /// Rules whose candidates have no measurable size but are still worth listing.
     static let sizeUnknownRules: Set<String> = ["git.worktree-prune", "snapshots.time-machine"]
 
-    /// Drop candidates whose paths are already covered by an earlier (larger) candidate.
-    /// Worktrees don't claim their contents: their build output stays listable on its own,
-    /// since a dirty or unmerged worktree is kept while its `node_modules` can still go.
     static func dedupe(_ candidates: [Candidate]) -> [Candidate] {
         var seenIDs = Set<String>()
         var claimed: [String] = []
@@ -190,7 +172,6 @@ public struct Scanner: Sendable {
 }
 
 public extension Collection<Candidate> {
-    /// Total bytes without double-counting paths nested inside other selected paths.
     var dedupedBytes: Int64 {
         let paths = Set(flatMap(\.paths))
         var total: Int64 = 0

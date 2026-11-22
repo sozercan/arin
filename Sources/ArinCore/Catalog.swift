@@ -1,7 +1,5 @@
 import Foundation
 
-/// The rule set. Each entry encodes something learned from real cleanups on developer Macs;
-/// see docs/learnings.md for the evidence behind the choices.
 public enum Catalog {
     public static var rules: [any Rule] {
         cacheRules + appCacheRules + xcodeRules + [
@@ -22,7 +20,6 @@ public enum Catalog {
         ]
     }
 
-    /// Display names by rule ID, for history labels.
     public static var ruleNames: [String: String] {
         Dictionary(rules.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     }
@@ -73,8 +70,6 @@ public enum Catalog {
             id: "npm.cache",
             name: "npm cache",
             detail: "Package tarballs npm can re-download.",
-            // `npm cache clean` empties npm's configured cache (`cache=` in .npmrc), so that is the
-            // path the guardrails must see. If npm can't say where it is, offer nothing.
             resolve: { ctx in
                 guard Shell.which("npm") != nil else { return [ctx.path(".npm/_cacache")] }
                 let result = await Shell.run("npm", ["config", "get", "cache"], timeout: 20)

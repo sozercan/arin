@@ -1,9 +1,6 @@
 import Foundation
 
 public enum Size {
-    /// What deleting each path would free, as `DiskUsage` measures it: APFS clones count only their
-    /// private blocks unless the whole clone family is inside the path. Missing paths are omitted, and
-    /// so is a path whose walk doesn't finish within `timeout`.
     public static func allocated(_ paths: [String], timeout: TimeInterval = 180) async -> [String: Int64] {
         let existing = paths.filter { FileManager.default.fileExists(atPath: $0) || FileInfo.isSymlink($0) }
         guard !existing.isEmpty else { return [:] }
@@ -37,7 +34,6 @@ public enum Size {
         await allocated(paths, timeout: timeout).values.reduce(0, +)
     }
 
-    /// Immediate children of `dir` with their allocated size.
     public static func children(of dir: String, timeout: TimeInterval = 180) async -> [(path: String, bytes: Int64)] {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return [] }
         let paths = names.map { (dir as NSString).appendingPathComponent($0) }
@@ -74,8 +70,6 @@ public enum FileInfo {
             .map { (dir as NSString).appendingPathComponent($0) }
     }
 
-    /// Newest modification time among the path and its direct children. Cheap recency signal
-    /// that catches most active build/cache directories without a full walk.
     public static func recentActivity(_ path: String) -> Date? {
         var newest = modified(path)
         for child in children(path).prefix(500) {
@@ -88,8 +82,6 @@ public enum FileInfo {
         (try? FileManager.default.attributesOfItem(atPath: path))?[.type] as? FileAttributeType == .typeSymbolicLink
     }
 
-    /// Any file under `path` modified within the window. Stops at the first hit; a walk that
-    /// can't finish (timeout, unreadable subtree) counts as recently written.
     public static func hasRecentWrites(_ path: String, within window: TimeInterval) async -> Bool {
         guard exists(path) || isSymlink(path) else { return false }
         let minutes = String(max(Int(window / 60), 1))
@@ -97,8 +89,6 @@ public enum FileInfo {
         return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// The path with each component spelled as it is on disk. APFS is usually case-insensitive,
-    /// so `Caches/Yarn` finds `Caches/yarn`; comparisons need the real spelling.
     public static func actualCase(_ path: String) -> String {
         var result = "/"
         for component in path.split(separator: "/").map(String.init) {

@@ -17,7 +17,6 @@ let package = Package(
         .executableTarget(
             name: "ArinApp",
             dependencies: ["ArinCore"],
-            // Compiled into the app bundle by Scripts/build-app.sh with actool.
             exclude: ["Resources/AppIcon.icon"]
         ),
         .executableTarget(name: "ArinCLI", dependencies: ["ArinCore"], path: "Sources/arin-cli"),

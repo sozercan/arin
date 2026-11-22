@@ -1,7 +1,5 @@
 import Foundation
 
-/// Local Time Machine snapshots, deleted one by one with `tmutil deletelocalsnapshots <date>`.
-/// macOS update snapshots are never offered: they must go through the update itself.
 struct TimeMachineSnapshotRule: Rule {
     let id = "snapshots.time-machine"
     let name = "Time Machine local snapshots"
@@ -23,7 +21,6 @@ struct TimeMachineSnapshotRule: Rule {
         )]
     }
 
-    /// `com.apple.TimeMachine.2026-11-08-101500.local` -> `2026-11-08-101500`. Anything else is skipped.
     static func dates(_ snapshots: [String]) -> [String] {
         snapshots.compactMap { name in
             name.wholeMatch(of: /com\.apple\.TimeMachine\.(\d{4}-\d{2}-\d{2}-\d{6})\.local/).map { String($0.1) }

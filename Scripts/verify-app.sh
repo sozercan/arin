@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Checks a packaged Arin.app for the settings that are easy to break when building outside Xcode.
-# Usage: Scripts/verify-app.sh [--bundle-id ID] [--version X.Y.Z] [--arches "arm64 x86_64"]
-#                              [--require-developer-id] [path/to/Arin.app]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,7 +52,6 @@ if [[ "$REQUIRE_DEVELOPER_ID" == true ]]; then
     grep -q '^Timestamp=' <<< "$details" || fail "$(basename "$binary") has no secure timestamp"
   done
 fi
-# The CLI must start; --help is read-only.
 "$APP/Contents/Helpers/arin" --help >/dev/null || fail "bundled CLI does not run"
 
 echo "Verified $APP ($BUNDLE_ID $(plist CFBundleShortVersionString), $(lipo -archs "$APP/Contents/MacOS/Arin"))"

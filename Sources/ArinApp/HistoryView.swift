@@ -2,7 +2,6 @@ import ArinCore
 import Charts
 import SwiftUI
 
-/// What grew back since the previous scan, free space over time, and past cleanups with Put Back.
 struct HistoryView: View {
     @Environment(AppModel.self) private var model
 
