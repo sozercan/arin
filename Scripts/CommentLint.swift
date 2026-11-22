@@ -37,6 +37,8 @@ func swiftComments(_ source: String, path: String) -> [Comment] {
 }
 
 let scalar = #/(?:^|:\s+|^-\s+)[|>](?<indicators>[1-9+-]{0,2})\s*$/#
+let yamlNodeProperty = #/(?:!<[^>]+>|&[^\s,\[\]{}]+|![^\s,\[\]{}]*)[ \t]+/#
+let runKey = #/^(?:-[ \t]+)?(?:run|"run"|'run')[ \t]*:/#
 let actionVersion = #/\s*(?:-\s+)?uses:\s+[^@\s]+@[0-9a-f]{40}\s+# v[0-9]+(?:\.[0-9]+)*(?:-[0-9A-Za-z.-]+)?\s*/#
 
 enum HashQuote {
@@ -108,6 +110,7 @@ struct HereDocument {
 struct HashLexer {
     private struct Substitution {
         var depth = 1
+        let backtick: Bool
         let enclosingQuote: HashQuote?
     }
 
@@ -146,6 +149,19 @@ struct HashLexer {
             }
         }
         while let character = rest.first {
+            if shell, substitutions.last?.backtick == true {
+                if character == "`" {
+                    quote = substitutions.removeLast().enclosingQuote
+                    atWordStart = false
+                    rest.removeFirst()
+                    continue
+                }
+                if rest.hasPrefix("\\`") || rest.hasPrefix("\\\\") {
+                    atWordStart = false
+                    rest.removeFirst(2)
+                    continue
+                }
+            }
             if shell, arithmeticDepth > 0 {
                 if character == "(" { arithmeticDepth += 1 }
                 if character == ")" { arithmeticDepth -= 1 }
@@ -159,9 +175,10 @@ struct HashLexer {
                     atWordStart = character != "$"
                     continue
                 }
-                if rest.hasPrefix("$(") {
-                    rest.removeFirst(2)
-                    substitutions.append(Substitution(enclosingQuote: quote))
+                if character == "`" || rest.hasPrefix("$(") {
+                    let backtick = character == "`"
+                    rest.removeFirst(backtick ? 1 : 2)
+                    substitutions.append(Substitution(backtick: backtick, enclosingQuote: quote))
                     quote = nil
                     atWordStart = true
                     continue
@@ -175,6 +192,10 @@ struct HashLexer {
             }
             let separated = rest.startIndex == row.startIndex || row[row.index(before: rest.startIndex)].isWhitespace
             if character == "#", shell ? atWordStart : separated { return rest.startIndex }
+            if !shell, atYAMLScalarStart, let property = rest.prefixMatch(of: yamlNodeProperty) {
+                rest = rest[property.range.upperBound...]
+                continue
+            }
             if (shell || atYAMLScalarStart), let opened = HashQuote.open(&rest, shell: shell) {
                 quote = opened
                 atWordStart = false
@@ -182,7 +203,7 @@ struct HashLexer {
                 continue
             }
             if shell {
-                if let substitution = substitutions.indices.last {
+                if let substitution = substitutions.indices.last, !substitutions[substitution].backtick {
                     if character == "(" { substitutions[substitution].depth += 1 }
                     if character == ")" {
                         substitutions[substitution].depth -= 1
@@ -273,7 +294,7 @@ func hashComments(_ source: String, path: String) throws -> [Comment] {
             let code = yamlCode.dropFirst(indent)
             let parent = indent + (code.hasPrefix("- ") ? 2 : 0)
             let body = marker.output.indicators.compactMap(\.wholeNumberValue).first.map { parent + $0 }
-            block = (parent, body, code.hasPrefix("run:") || code.hasPrefix("- run:"))
+            block = (parent, body, code.prefixMatch(of: runKey) != nil)
         }
     }
     if let hereDoc = shellLexer.unfinishedHereDoc {

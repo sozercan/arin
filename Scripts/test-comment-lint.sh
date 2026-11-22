@@ -68,8 +68,18 @@ double: "first\"
   last"
 plain: team's value
 YAML
+cat > properties.yml <<'YAML'
+anchored: &shared "literal # hash"
+tagged: !!str 'literal # hash'
+both: !<tag:yaml.org,2002:str> &other "literal # hash"
+YAML
+cat > backticks.sh <<'BASH'
+echo "`printf '%s' '# literal'`"
+echo "literal \` tick # quoted"
+echo "`printf '%s' '\`'`"
+BASH
 
-for script in build.sh quotes.sh heredocs.sh; do /bin/bash -n "$script"; done
+for script in build.sh quotes.sh heredocs.sh backticks.sh; do /bin/bash -n "$script"; done
 
 printf '// grandfathered\n' > legacy.swift
 printf '{"legacy.swift":{"// grandfathered":1}}\n' > .comment-baseline.json
@@ -100,6 +110,19 @@ more: 'first
   last' # YAML comment after quote
 plain_with_comment: team's value # YAML comment after plain scalar
 YAML
+cat >> properties.yml <<'YAML'
+with_anchor: &more "literal # hash" # YAML comment after anchored value
+with_tag: !!str 'literal # hash' # YAML comment after tagged value
+YAML
+cat >> backticks.sh <<'BASH'
+echo "`printf '%s' '"'`" # Shell comment after backticks
+# Shell comment after backtick line
+echo "`printf '%s' '\`'`" # Shell comment after escaped backtick
+echo "`printf '%s' '"'
+# Shell comment inside backticks
+`" # Shell comment after multiline substitution
+BASH
+/bin/bash -n backticks.sh
 printf 'key: "# literal" # YAML comment\n' >> .github/workflows/workflow.yml
 cat >> .github/workflows/workflow.yml <<'YAML'
 with-script:
@@ -109,6 +132,17 @@ with-script:
     # literal text
     last" # Workflow shell comment after quote
 YAML
+cat > .github/workflows/variants.yml <<'YAML'
+jobs:
+  job:
+    steps:
+      - "run": |
+          echo "`printf '%s' '"'`" # Workflow shell comment after backticks
+      - 'run': |
+          # Workflow shell comment in single-quoted run
+      - run : |
+          # Workflow shell comment in spaced run
+YAML
 printf '<!-- XML comment -->\n' >> icon.svg
 if Scripts/check-comments.sh --base HEAD > "$temp/result"; then
     echo 'Expected new comments to fail lint' >&2
@@ -116,6 +150,9 @@ if Scripts/check-comments.sh --base HEAD > "$temp/result"; then
 fi
 for location in legacy.swift:2:1 legacy.swift:3:14 legacy.swift:3:40 legacy.swift:4:1 \
     build.sh:7:18 build.sh:8:29 build.sh:9:27 heredocs.sh:10:1 quotes.sh:9:7 quotes.yml:10:9 quotes.yml:11:34 \
+    properties.yml:4:37 properties.yml:5:34 backticks.sh:4:26 backticks.sh:5:1 backticks.sh:6:27 \
+    backticks.sh:8:1 backticks.sh:9:4 .github/workflows/variants.yml:5:36 \
+    .github/workflows/variants.yml:7:11 .github/workflows/variants.yml:9:11 \
     .github/workflows/workflow.yml:13:18 .github/workflows/workflow.yml:16:5 \
     .github/workflows/workflow.yml:19:11 icon.svg:2:1; do
     if ! grep -Fq "$location:" "$temp/result"; then
@@ -124,9 +161,10 @@ for location in legacy.swift:2:1 legacy.swift:3:14 legacy.swift:3:40 legacy.swif
         exit 1
     fi
 done
-test "$(wc -l < "$temp/result")" -eq 15
+test "$(wc -l < "$temp/result")" -eq 25
 
-git restore legacy.swift build.sh heredocs.sh quotes.sh quotes.yml .github/workflows/workflow.yml icon.svg
+git restore legacy.swift build.sh heredocs.sh quotes.sh quotes.yml properties.yml backticks.sh .github/workflows/workflow.yml icon.svg
+rm .github/workflows/variants.yml
 printf '// grandfathered\n' >> legacy.swift
 if Scripts/check-comments.sh --base HEAD > "$temp/result"; then
     echo 'Expected a duplicate grandfathered comment to fail lint' >&2
