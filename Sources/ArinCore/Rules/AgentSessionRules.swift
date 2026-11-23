@@ -22,9 +22,10 @@ struct CodexSessionsRule: Rule {
         var attached: Int
     }
 
-    static let treeQuery = """
+    static func treeQuery(root: String? = nil) -> String {
+        """
     WITH RECURSIVE tree(root, id) AS (
-      SELECT id, id FROM threads WHERE id NOT IN (SELECT child_thread_id FROM thread_spawn_edges)
+      SELECT id, id FROM threads WHERE id NOT IN (SELECT child_thread_id FROM thread_spawn_edges)\(root.map { " AND id = '\($0)'" } ?? "")
       UNION
       SELECT tree.root, e.child_thread_id FROM thread_spawn_edges e JOIN tree ON e.parent_thread_id = tree.id
     )
@@ -34,6 +35,7 @@ struct CodexSessionsRule: Rule {
             OR EXISTS (SELECT 1 FROM threads a WHERE a.attached_thread_parent_id = c.id)) AS attached
     FROM tree JOIN threads c ON c.id = tree.id
     """
+    }
 
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("codex") != nil else { return [] }
@@ -80,11 +82,8 @@ struct CodexSessionsRule: Rule {
 
     static func sessions(codexHome: String, only root: String? = nil) async -> [Session]? {
         guard let db = stateDatabase(codexHome: codexHome) else { return nil }
-        var query = treeQuery
-        if let root {
-            guard isThreadID(root) else { return nil }
-            query += " WHERE tree.root = '\(root)'"
-        }
+        if let root, !isThreadID(root) { return nil }
+        let query = treeQuery(root: root)
         let result = await Shell.run("sqlite3", ["-readonly", "-json", db, query + ";"], timeout: 60)
         guard result.ok else { return nil }
         let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -372,7 +371,7 @@ struct AgentHistoryInsightRule: InsightRule {
             let bytes = await Size.allocated(db)
             guard bytes > 2 * gigabyte else { continue }
             result.append(Insight(
-                id: "codex-thread-history",
+                id: "codex-thread-history:\((db as NSString).lastPathComponent)",
                 title: "Codex keeps a second copy of its sessions",
                 detail: "\((db as NSString).lastPathComponent) holds the same conversations as the session files, so Codex can page through them. Deleting sessions with `codex delete` removes their rows; the file shrinks only after it's compacted, which Arin offers once enough of it is free.",
                 bytes: bytes
