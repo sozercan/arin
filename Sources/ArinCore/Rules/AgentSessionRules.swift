@@ -249,13 +249,13 @@ enum ClaudeProjects {
             let name = (folder as NSString).lastPathComponent
             let matching = recordedDirectories(in: folder).filter { folderName(for: $0) == name }
             let presences = matching.map { presence($0, mounts: mounts) }
-            let presence: Presence = presences.isEmpty ? .unknown
+            let combined: Presence = presences.isEmpty ? .unknown
                 : presences.contains(.present) ? .present
                 : presences.contains(.unknown) ? .unknown : .gone
             let memory = "\(folder)/memory"
             let hasMemory = FileInfo.children(memory).contains { !($0 as NSString).lastPathComponent.hasPrefix(".") }
                 || (FileInfo.exists(memory) && !FileInfo.isDirectory(memory))
-            return Project(folder: folder, workingDirectory: matching.first, presence: presence, hasMemory: hasMemory)
+            return Project(folder: folder, workingDirectory: matching.first, presence: combined, hasMemory: hasMemory)
         })
     }
 
