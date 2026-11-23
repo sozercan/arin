@@ -205,6 +205,43 @@ extension ClaudeProjectTests {
         #expect(await ClaudeOrphanProjectsRule.recheck(dashed, home: box.root, state: .empty) == "the folder exists again")
     }
 
+    @Test func aLivePathInAnyTranscriptKeepsTheFolder() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let dashed = "\(box.root)/x/a-b"
+        let live = try box.mkdir("x/a/b")
+        let folder = try project(box, cwd: dashed)
+        let name = (folder as NSString).lastPathComponent
+        let record = try String(decoding: JSONSerialization.data(withJSONObject: ["type": "user", "cwd": live]), as: UTF8.self)
+        let oldest = try box.write(".claude/projects/\(name)/oldest.jsonl", "\(record)\n")
+        try age(oldest, days: 30)
+        for index in 0 ..< 20 {
+            let newer = try box.write(".claude/projects/\(name)/newer-\(index).jsonl",
+                                      #"{"type":"user","cwd":"\#(dashed)"}"# + "\n")
+            try age(newer, days: 5)
+        }
+        try age(folder, days: 10)
+        let survey = ClaudeProjects.survey("\(box.root)/.claude/projects", mounts: ["/"])
+        #expect(survey.projects.first { $0.folder.hasSuffix(name) }?.presence == .present)
+        #expect(await ClaudeOrphanProjectsRule.recheck(dashed, home: box.root, state: .empty) == "the folder exists again")
+    }
+
+    @Test func aTranscriptReadOnlyInPartCountsAsUnknown() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gone = "\(box.root)/gone/app"
+        let padding = String(repeating: "x", count: 200 * 1024)
+        let long = try String(decoding: JSONSerialization.data(withJSONObject: ["type": "user", "cwd": gone, "text": padding]), as: UTF8.self)
+        let transcript = try box.write("p/long.jsonl", #"{"type":"queue-operation"}"# + "\n" + long + "\n")
+        #expect(ClaudeProjects.firstWorkingDirectory(transcript, maxBytes: 32 * 1024 * 1024) == .found(gone))
+        #expect(ClaudeProjects.firstWorkingDirectory(transcript, maxBytes: 64 * 1024) == .incomplete)
+        let empty = try box.write("p/empty.jsonl", "")
+        #expect(ClaudeProjects.firstWorkingDirectory(empty, maxBytes: 1024) == .none)
+        #expect(ClaudeProjects.firstWorkingDirectory("\(box.root)/p/missing.jsonl", maxBytes: 1024) == .incomplete)
+        #expect(ClaudeProjects.recordedDirectories(in: "\(box.root)/p", maxBytes: 64 * 1024).complete == false)
+        #expect(ClaudeProjects.recordedDirectories(in: "\(box.root)/p") == .init(directories: [gone], complete: true))
+    }
+
     @Test func nestedWritesKeepAProject() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }

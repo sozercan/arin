@@ -198,8 +198,10 @@ struct ClaudeOrphanProjectsRule: Rule {
         guard ClaudeProjects.configDirMatches(home: home) else { return "CLAUDE_CONFIG_DIR points somewhere else" }
         let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: workingDirectory))"
         let mounts = Guardrails.currentMountPoints()
-        let recorded = ClaudeProjects.recordedDirectories(in: folder).filter { ClaudeProjects.folderName(for: $0) == (folder as NSString).lastPathComponent }
-        switch ClaudeProjects.combined(Set(recorded + [workingDirectory]).map { ClaudeProjects.presence($0, mounts: mounts) }) {
+        let recorded = ClaudeProjects.recordedDirectories(in: folder)
+        guard recorded.complete else { return "can't tell whether the folder is gone" }
+        let matching = recorded.directories.filter { ClaudeProjects.folderName(for: $0) == (folder as NSString).lastPathComponent }
+        switch ClaudeProjects.combined(Set(matching + [workingDirectory]).map { ClaudeProjects.presence($0, mounts: mounts) }) {
         case .present: return "the folder exists again"
         case .unknown: return "can't tell whether the folder is gone"
         case .gone: break
@@ -246,8 +248,9 @@ enum ClaudeProjects {
     static func survey(_ root: String, mounts: [String]?) -> Survey {
         Survey(projects: FileInfo.children(root).filter { FileInfo.isDirectory($0) && !FileInfo.isSymlink($0) }.map { folder in
             let name = (folder as NSString).lastPathComponent
-            let matching = recordedDirectories(in: folder).filter { folderName(for: $0) == name }
-            let state = combined(matching.map { presence($0, mounts: mounts) })
+            let recorded = recordedDirectories(in: folder)
+            let matching = recorded.directories.filter { folderName(for: $0) == name }
+            let state = recorded.complete ? combined(matching.map { presence($0, mounts: mounts) }) : .unknown
             let memory = "\(folder)/memory"
             let hasMemory = FileInfo.children(memory).contains { !($0 as NSString).lastPathComponent.hasPrefix(".") }
                 || (FileInfo.exists(memory) && !FileInfo.isDirectory(memory))
@@ -261,24 +264,48 @@ enum ClaudeProjects {
             : presences.contains(.unknown) ? .unknown : .gone
     }
 
-    static func recordedDirectories(in folder: String, limit: Int = 20) -> [String] {
-        let transcripts = FileInfo.children(folder)
-            .filter { $0.hasSuffix(".jsonl") && !FileInfo.isSymlink($0) }
-            .sorted { (FileInfo.modified($0) ?? .distantPast) > (FileInfo.modified($1) ?? .distantPast) }
-            .prefix(limit)
+    struct Recorded: Equatable {
+        var directories: [String]
+        var complete: Bool
+    }
+
+    static func recordedDirectories(in folder: String, maxBytes: Int = 32 * 1024 * 1024) -> Recorded {
+        let transcripts = FileInfo.children(folder).filter { $0.hasSuffix(".jsonl") && !FileInfo.isSymlink($0) }
         var found: [String] = []
+        var complete = true
         for transcript in transcripts {
-            guard let handle = FileHandle(forReadingAtPath: transcript) else { continue }
-            let data = (try? handle.read(upToCount: 64 * 1024)) ?? Data()
-            try? handle.close()
-            for line in data.split(separator: UInt8(ascii: "\n")) {
-                guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      let cwd = object["cwd"] as? String else { continue }
-                if cwd.hasPrefix("/"), !found.contains(cwd) { found.append(cwd) }
-                break
+            switch firstWorkingDirectory(transcript, maxBytes: maxBytes) {
+            case let .found(cwd): if !found.contains(cwd) { found.append(cwd) }
+            case .none: break
+            case .incomplete: complete = false
             }
         }
-        return found
+        return Recorded(directories: found, complete: complete)
+    }
+
+    enum FirstRecord: Equatable { case found(String), none, incomplete }
+
+    static func firstWorkingDirectory(_ transcript: String, maxBytes: Int) -> FirstRecord {
+        guard let handle = FileHandle(forReadingAtPath: transcript) else { return .incomplete }
+        defer { try? handle.close() }
+        var buffer = Data()
+        var read = 0
+        while true {
+            let chunk: Data
+            do { chunk = try handle.read(upToCount: min(256 * 1024, maxBytes - read)) ?? Data() } catch { return .incomplete }
+            if chunk.isEmpty, read >= maxBytes { return .incomplete }
+            let atEnd = chunk.isEmpty
+            read += chunk.count
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) ?? (atEnd && !buffer.isEmpty ? buffer.endIndex : nil) {
+                let line = buffer[buffer.startIndex ..< newline]
+                buffer = newline < buffer.endIndex ? Data(buffer[buffer.index(after: newline)...]) : Data()
+                guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      let cwd = object["cwd"] as? String else { continue }
+                return cwd.hasPrefix("/") ? .found(cwd) : .incomplete
+            }
+            if atEnd { return .none }
+        }
     }
 
     static func presence(_ path: String, mounts: [String]?) -> Presence {
