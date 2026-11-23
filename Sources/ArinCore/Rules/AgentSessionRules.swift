@@ -143,8 +143,15 @@ struct CodexSessionsRule: Rule {
         let name = (path as NSString).lastPathComponent
         let roots = ["sessions", "archived_sessions"].map { "\(home)/\($0)/" }
         guard roots.contains(where: { path.hasPrefix($0) }), name.hasPrefix("rollout-"), name.contains(id) else { return nil }
+        let realHome = Guardrails.canonical(URL(fileURLWithPath: home).resolvingSymlinksInPath().path)
+        let realRoots = ["sessions", "archived_sessions"].map { "\(realHome)/\($0)/" }
         let plain = path.hasSuffix(".zst") ? String(path.dropLast(4)) : path
-        return [plain, plain + ".zst"].filter { FileInfo.exists($0) }
+        let files = [plain, plain + ".zst"].filter { FileInfo.exists($0) || FileInfo.isSymlink($0) }
+        for file in files {
+            let real = Guardrails.canonical(URL(fileURLWithPath: file).resolvingSymlinksInPath().path)
+            guard !FileInfo.isSymlink(file), realRoots.contains(where: { real.hasPrefix($0) }) else { return nil }
+        }
+        return files
     }
 
     static func isThreadID(_ value: String) -> Bool {

@@ -434,6 +434,28 @@ extension ClaudeProjectTests {
         #expect(result.message.contains("its ~/.claude.json entry is still there after claude purge"))
     }
 
+    @Test func aSymlinkedProjectsFolderIsRefused() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gonePath = "\(box.root)/.t3/worktrees/app/t3-1"
+        try project(box, cwd: gonePath)
+        let real = "\(box.root)/elsewhere-projects"
+        try FileManager.default.moveItem(atPath: "\(box.root)/.claude/projects", toPath: real)
+        try FileManager.default.createSymbolicLink(atPath: "\(box.root)/.claude/projects", withDestinationPath: real)
+        let folder = "\(box.root)/.claude/projects/\(ClaudeProjects.folderName(for: gonePath))"
+        let candidate = Candidate(
+            ruleID: ClaudeOrphanProjectsRule.ruleID, key: "orphaned", title: "Claude", detail: "",
+            category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [folder],
+            action: .commands([ClaudeOrphanProjectsRule.purgeCommand(gonePath)])
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(!runner.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
+        #expect(result.message.contains("its folder is reached through a symlink"), "\(result.message)")
+    }
+
     @Test func staleOpenFileStateIsRefreshedBeforeEachCommand() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -628,6 +650,30 @@ extension ClaudeProjectTests {
         #expect(failing.calls.filter { $0.arguments.first == "delete" }.count == 1)
         #expect(failed.status == .failed, "\(failed.message)")
         #expect(failed.message.contains("also removed 1 other thread"))
+    }
+
+    @Test func onlyReviewedRealFilesAreDeleted() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let (ids, files) = try idleSessions(box, count: 2)
+        let outside = try box.write("projects/app/notes.jsonl", "keep me")
+        try FileManager.default.removeItem(atPath: files[1])
+        try FileManager.default.createSymbolicLink(atPath: files[1], withDestinationPath: outside)
+        let sessions = try #require(await CodexSessionsRule.sessions(codexHome: "\(box.root)/.codex"))
+        #expect(CodexSessionsRule.idle(sessions, state: .empty, now: Date()).map(\.id) == [ids[0]])
+
+        let candidate = Candidate(
+            ruleID: CodexSessionsRule.ruleID, key: "idle", title: "Codex", detail: "",
+            category: .agentData, level: .deep, risk: .review, bytes: 100, paths: [],
+            action: .commands([CodexSessionsRule.deleteCommand(ids[0])])
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(!runner.calls.contains { $0.arguments.first == "delete" })
+        #expect(result.message.contains("it now covers files that weren't in the scan"))
+        #expect(FileInfo.exists(outside))
     }
 
     @Test func aMissingSchemaColumnOffersNothing() async throws {

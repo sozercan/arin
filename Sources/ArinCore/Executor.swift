@@ -271,7 +271,18 @@ public struct Executor: Sendable {
         case ready(PerItem)
     }
 
-    func prepare(_ command: CommandSpec, state: SystemState) async -> PerItemCheck {
+    func pathRefusal(_ paths: [String], scanned: [String]) -> String? {
+        let reviewed = Set(scanned.map { Guardrails.canonical(($0 as NSString).standardizingPath) })
+        for path in paths {
+            do { try guardrails.checkTarget(path) } catch { return error.description }
+            guard reviewed.contains(Guardrails.canonical((path as NSString).standardizingPath)) else {
+                return "it now covers files that weren't in the scan"
+            }
+        }
+        return nil
+    }
+
+    func prepare(_ command: CommandSpec, state: SystemState, scanned: [String]) async -> PerItemCheck {
         guard Guardrails.allows(command), let target = command.arguments.last else { return .refused("refusing to run \(command.display)") }
         switch command.executable {
         case "codex":
@@ -280,12 +291,17 @@ public struct Executor: Sendable {
             guard let session = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)?.first,
                   let before = await CodexSessionsRule.threadIDs(codexHome: codexHome)
             else { return .refused("couldn't read Codex's session database") }
+            if let reason = pathRefusal(session.files, scanned: scanned) { return .refused(reason) }
             return .ready(PerItem(backup: session.files, backupName: "Codex session \(target)", restoreTo: nil,
                                   otherThreads: before.subtracting(session.threadIDs), tree: Set(session.threadIDs)))
         case "claude":
             if let reason = await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state) { return .refused(reason) }
             if let reason = await ClaudeOrphanProjectsRule.dryRunRefusal(target, home: guardrails.home) { return .refused(reason) }
             let folder = "\(guardrails.home)/.claude/projects/\(ClaudeProjects.folderName(for: target))"
+            if let reason = pathRefusal([folder], scanned: scanned) { return .refused(reason) }
+            guard !FileInfo.isSymlink(folder),
+                  Guardrails.canonical(URL(fileURLWithPath: folder).resolvingSymlinksInPath().path) == Guardrails.canonical(folder)
+            else { return .refused("its folder is reached through a symlink") }
             return .ready(PerItem(backup: [folder], backupName: ClaudeProjects.folderName(for: target), restoreTo: folder))
         default:
             return .refused("refusing to run \(command.display)")
@@ -392,7 +408,7 @@ public struct Executor: Sendable {
                 continue
             }
             let planned: PerItem
-            switch await prepare(command, state: state) {
+            switch await prepare(command, state: state, scanned: candidate.paths) {
             case let .refused(reason):
                 skipped[reason, default: 0] += 1
                 continue
@@ -413,7 +429,7 @@ public struct Executor: Sendable {
                 captured = Date()
             }
             let item: PerItem
-            switch state.openFilesKnown ? await prepare(command, state: state) : .refused("couldn't check for open files") {
+            switch state.openFilesKnown ? await prepare(command, state: state, scanned: candidate.paths) : .refused("couldn't check for open files") {
             case let .refused(reason):
                 skipped["\(reason) (its copy is in the Trash)", default: 0] += 1
                 continue
