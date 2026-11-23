@@ -39,6 +39,7 @@ public struct Executor: Sendable {
     public var keepListURL: URL?
     var stateMaxAge: TimeInterval = 5
     var backupDirectory: String?
+    var afterBackup: (@Sendable () -> Void)?
 
     public init(
         guardrails: Guardrails = Guardrails(),
@@ -375,21 +376,39 @@ public struct Executor: Sendable {
                 skipped["couldn't check for open files", default: 0] += 1
                 continue
             }
-            let item: PerItem
+            let planned: PerItem
             switch await prepare(command, state: state) {
             case let .refused(reason):
                 skipped[reason, default: 0] += 1
                 continue
             case let .ready(ready):
-                item = ready
+                planned = ready
             }
-            switch backUp(item) {
+            let trashed: TrashedPath?
+            switch backUp(planned) {
             case let .failed(reason):
                 skipped[reason, default: 0] += 1
                 continue
-            case let .done(trashed):
-                if let trashed { backups.append(trashed) }
+            case let .done(copy):
+                trashed = copy
             }
+            afterBackup?()
+            if Date().timeIntervalSince(captured) >= stateMaxAge {
+                state = await SystemState.capture()
+                captured = Date()
+            }
+            let item: PerItem
+            switch state.openFilesKnown ? await prepare(command, state: state) : .refused("couldn't check for open files") {
+            case let .refused(reason):
+                skipped["\(reason) (its copy is in the Trash)", default: 0] += 1
+                continue
+            case let .ready(ready) where Set(ready.backup) == Set(planned.backup):
+                item = ready
+            case .ready:
+                skipped["its files changed while it was copied (its copy is in the Trash)", default: 0] += 1
+                continue
+            }
+            if let trashed { backups.append(trashed) }
             let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
             let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
                                          environment: environment, timeout: min(commandTimeout, 300))

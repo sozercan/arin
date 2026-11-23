@@ -33,7 +33,8 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
             guard let home = environment["HOME"], let dir = arguments.last else { return ok() }
             let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: dir))"
             if arguments[1] == "--dry-run" {
-                let lines = ["  dir:    \(folder)", "           project transcripts", "  config: projects[\"\(dir)\"]"] + (extraPlanLine.map { [$0] } ?? [])
+                let entry = ClaudeOrphanProjectsRule.configHasEntry(dir, home: home) == true ? ["  config: projects[\"\(dir)\"]"] : []
+                let lines = ["  dir:    \(folder)", "           project transcripts"] + entry + (extraPlanLine.map { [$0] } ?? [])
                 return ok("Purge plan for \(dir):\n\n" + lines.joined(separator: "\n") + "\nDry run: \(lines.count - 1) item(s) would be deleted.\n")
             }
             try? FileManager.default.removeItem(atPath: folder)
@@ -205,7 +206,7 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
         executor.backupDirectory = try box.mkdir("backups")
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
-        #expect(runner.calls.filter { $0.executable == "claude" }.map(\.arguments) == [["purge", "--dry-run", gonePath], ["purge", "--yes", gonePath]])
+        #expect(runner.calls.filter { $0.executable == "claude" }.map(\.arguments) == [["purge", "--dry-run", gonePath], ["purge", "--dry-run", gonePath], ["purge", "--yes", gonePath]])
         let backup = try #require(result.trashedPaths?.first)
         #expect(backup.original == Guardrails.canonical(goneFolder) && !FileInfo.exists(goneFolder))
         #expect(FileInfo.children(backup.location).contains { $0.hasSuffix(".jsonl") })
@@ -325,13 +326,53 @@ extension ClaudeProjectTests {
         Purging deletes data only on this computer, not anything stored by Anthropic.
         Dry run: 2 item(s) would be deleted.
         """
-        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan, workingDirectory: dir, home: home) == nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan, workingDirectory: dir, home: home, configHasEntry: true) == nil)
         let extra = plan.replacingOccurrences(of: "  config:", with: "  file:   /private/var/folders/x/home/.claude/history.jsonl\n  config:")
             .replacingOccurrences(of: "Dry run: 2", with: "Dry run: 3")
-        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(extra, workingDirectory: dir, home: home) != nil)
-        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "-gone-app", with: "-other"), workingDirectory: dir, home: home) != nil)
-        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "Dry run: 2", with: "Dry run: 5"), workingDirectory: dir, home: home) != nil)
-        #expect(ClaudeOrphanProjectsRule.dryRunMismatch("", workingDirectory: dir, home: home) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(extra, workingDirectory: dir, home: home, configHasEntry: true) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "-gone-app", with: "-other"), workingDirectory: dir, home: home, configHasEntry: true) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "Dry run: 2", with: "Dry run: 5"), workingDirectory: dir, home: home, configHasEntry: true) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch("", workingDirectory: dir, home: home, configHasEntry: true) != nil)
+
+        let folderOnly = "  dir:    /private/var/folders/x/home/.claude/projects/-gone-app\nDry run: 1 item(s) would be deleted.\n"
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(folderOnly, workingDirectory: dir, home: home, configHasEntry: false) == nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(folderOnly, workingDirectory: dir, home: home, configHasEntry: true) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan, workingDirectory: dir, home: home, configHasEntry: false) != nil)
+        let twice = plan.replacingOccurrences(of: "  config: projects[\"/gone/app\"]", with: "  config: projects[\"/gone/app\"]\n  config: projects[\"/gone/app\"]")
+            .replacingOccurrences(of: "Dry run: 2", with: "Dry run: 3")
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(twice, workingDirectory: dir, home: home, configHasEntry: true) != nil)
+    }
+
+    @Test func theConfigEntryIsReadFromTheScannedHome() throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        #expect(ClaudeOrphanProjectsRule.configHasEntry("/gone/app", home: box.root) == false)
+        _ = try box.write(".claude.json", #"{"projects":{"/gone/app":{}}}"#)
+        #expect(ClaudeOrphanProjectsRule.configHasEntry("/gone/app", home: box.root) == true)
+        #expect(ClaudeOrphanProjectsRule.configHasEntry("/other", home: box.root) == false)
+        _ = try box.write(".claude.json", "{not json")
+        #expect(ClaudeOrphanProjectsRule.configHasEntry("/gone/app", home: box.root) == nil)
+    }
+
+    @Test func aChangeDuringTheBackupStopsThePurge() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gonePath = "\(box.root)/.t3/worktrees/app/t3-1"
+        let folder = try project(box, cwd: gonePath)
+        let candidate = Candidate(
+            ruleID: ClaudeOrphanProjectsRule.ruleID, key: "orphaned", title: "Claude", detail: "",
+            category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [folder],
+            action: .commands([ClaudeOrphanProjectsRule.purgeCommand(gonePath)])
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let worktree = "\(box.root)/.t3/worktrees/app/t3-1"
+        executor.afterBackup = { try? FileManager.default.createDirectory(atPath: worktree, withIntermediateDirectories: true) }
+        let runner = RecordingRunner()
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(!runner.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
+        #expect(result.status == .skipped && result.message.contains("the folder exists again (its copy is in the Trash)"))
+        #expect(FileInfo.exists(folder))
     }
 
     @Test func purgeIsRefusedWhenTheDryRunOrBackupDisagrees() async throws {

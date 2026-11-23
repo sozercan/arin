@@ -219,10 +219,22 @@ struct ClaudeOrphanProjectsRule: Rule {
     static func dryRunRefusal(_ workingDirectory: String, home: String) async -> String? {
         let output = await Shell.run("claude", ["purge", "--dry-run", workingDirectory], environment: ["HOME": home], timeout: 60)
         guard output.ok else { return "claude purge --dry-run didn't find it" }
-        return dryRunMismatch(output.stdout, workingDirectory: workingDirectory, home: home)
+        guard let hasEntry = configHasEntry(workingDirectory, home: home) else { return "couldn't read ~/.claude.json" }
+        return dryRunMismatch(output.stdout, workingDirectory: workingDirectory, home: home, configHasEntry: hasEntry)
     }
 
-    static func dryRunMismatch(_ plan: String, workingDirectory: String, home: String) -> String? {
+    static func configHasEntry(_ workingDirectory: String, home: String) -> Bool? {
+        let path = "\(home)/.claude.json"
+        guard FileInfo.exists(path) else { return false }
+        guard let data = FileManager.default.contents(atPath: path),
+              let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        guard let projects = config["projects"] else { return false }
+        guard let entries = projects as? [String: Any] else { return nil }
+        return entries[workingDirectory] != nil
+    }
+
+    static func dryRunMismatch(_ plan: String, workingDirectory: String, home: String, configHasEntry: Bool) -> String? {
         let folder = Guardrails.canonical("\(home)/.claude/projects/\(ClaudeProjects.folderName(for: workingDirectory))")
         let entry = "projects[\"\(workingDirectory)\"]"
         var items: [(kind: String, value: String)] = []
@@ -240,7 +252,8 @@ struct ClaudeOrphanProjectsRule: Rule {
         let expected = items.allSatisfy { item in
             (item.kind == "dir" && Guardrails.canonical(item.value) == folder) || (item.kind == "config" && item.value == entry)
         }
-        guard expected, items.filter({ $0.kind == "dir" }).count == 1, total == items.count else {
+        guard expected, items.filter({ $0.kind == "dir" }).count == 1,
+              items.filter({ $0.kind == "config" }).count == (configHasEntry ? 1 : 0), total == items.count else {
             return "claude purge --dry-run listed something other than this project"
         }
         return nil
