@@ -95,6 +95,7 @@ The same engine runs headless. Everything is read-only or a dry run until you pa
 arin scan --level standard                 # find candidates
 arin review --agent claude                 # scan, then ask your agent
 arin clean --level quick                   # dry run: show what would go
+arin clean --level deep --older-than 90    # dry run: agent sessions untouched for 90+ days
 arin clean --level quick --yes             # clean the pre-selected items
 arin clean --ids 'go.build-cache:go.build-cache' --yes
 arin plan --level quick --out plan.json    # save what clean would pick
@@ -107,7 +108,7 @@ arin uninstall Slack --yes                 # move them to the Trash
 arin disk --warn-below 20GiB               # print a warning only when free space is low
 ```
 
-A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Run `arin --help` for every option.
+A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Pass the same `--older-than` to `clean --plan` that made the plan, or its agent session items count as changed. Run `arin --help` for every option.
 
 ### From your agent
 

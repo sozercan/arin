@@ -41,14 +41,15 @@ struct CodexSessionsRule: Rule {
         guard Shell.which("codex") != nil else { return [] }
         let codexHome = ctx.path(".codex")
         guard let sessions = await Self.sessions(codexHome: codexHome) else { return [] }
-        let idle = Self.idle(sessions, state: ctx.state, now: ctx.now)
+        let days = ctx.options.agentHistoryDays ?? Self.idleDays
+        let idle = Self.idle(sessions, state: ctx.state, now: ctx.now, days: days)
         guard !idle.isEmpty else { return [] }
         let files = idle.flatMap(\.files)
         let subagents = files.count - idle.count
         return [Candidate(
             ruleID: id,
             key: "idle",
-            title: "Codex sessions idle for \(Self.idleDays)+ days (\(idle.count))",
+            title: "Codex sessions idle for \(days)+ days (\(idle.count))",
             detail: "Removed with `codex delete`, which also clears their history, index and log entries\(subagents > 0 ? " and \(subagents) subagent threads" : ""). They can't be resumed afterwards. Pinned sessions, sessions with attached threads, and any session used since the scan are kept. Codex's thread history database frees its share once it's compacted, which Arin offers when enough of it is free.",
             category: .agentData,
             level: .deep,
@@ -60,8 +61,8 @@ struct CodexSessionsRule: Rule {
         )]
     }
 
-    static func idle(_ sessions: [Session], state: SystemState, now: Date) -> [Session] {
-        let cutoff = now.addingTimeInterval(-Double(idleDays) * 86400)
+    static func idle(_ sessions: [Session], state: SystemState, now: Date, days: Int = idleDays) -> [Session] {
+        let cutoff = now.addingTimeInterval(-Double(days) * 86400)
         return sessions.filter { session in
             !session.keep && !session.files.isEmpty && session.lastActivity < cutoff
                 && session.files.allSatisfy { !state.isBusy($0) && (FileInfo.modified($0) ?? .distantFuture) < cutoff }
@@ -152,9 +153,10 @@ struct ClaudeOrphanProjectsRule: Rule {
         guard Shell.which("claude") != nil, ClaudeProjects.configDirMatches(home: ctx.home) else { return [] }
         let survey = ClaudeProjects.survey(ctx.path(".claude/projects"), mounts: Guardrails.currentMountPoints())
         guard !survey.looksLikeWrongHost else { return [] }
+        let window = ctx.options.agentHistoryDays.map { Double($0) * 86400 } ?? Self.minIdle
         var gone: [ClaudeProjects.Project] = []
         for project in survey.projects where project.presence == .gone && !ctx.state.isBusy(project.folder) {
-            if await !FileInfo.hasRecentWrites(project.folder, within: Self.minIdle) { gone.append(project) }
+            if await !FileInfo.hasRecentWrites(project.folder, within: window) { gone.append(project) }
         }
         guard !gone.isEmpty else { return [] }
         let sizes = await Size.allocated(gone.map(\.folder))
@@ -177,13 +179,14 @@ struct ClaudeOrphanProjectsRule: Rule {
             )
         }
         let purge = "Removed with `claude purge`, which also drops each project's entry in ~/.claude.json and its prompt history. Each folder's path comes from its transcripts, and only folders that are gone (not on an unmounted disk or behind a folder Arin can't read) are listed."
+        let age = ctx.options.agentHistoryDays.map { ", untouched for \($0)+ days" } ?? ""
         return [
             make(gone.filter { !$0.hasMemory }, key: "orphaned",
-                 title: "Claude Code data for deleted folders",
+                 title: "Claude Code data for deleted folders\(age)",
                  detail: "Transcripts, file history and tasks of sessions whose working folder no longer exists, often a removed worktree. \(purge)",
                  risk: .safe),
             make(gone.filter(\.hasMemory), key: "orphaned-memory",
-                 title: "Claude Code data and memory for deleted folders",
+                 title: "Claude Code data and memory for deleted folders\(age)",
                  detail: "As above, but these projects also have auto memory: notes Claude kept about the project, which `claude purge` deletes too. Look before removing them if you might recreate the folder. \(purge)",
                  risk: .review),
         ].compactMap { $0 }
@@ -385,7 +388,7 @@ struct AgentHistoryInsightRule: InsightRule {
                 result.append(Insight(
                     id: "copilot-sessions",
                     title: "Copilot CLI session history",
-                    detail: "Run `/session prune --older-than 30` in Copilot CLI (add `--dry-run` first to see the list). It skips sessions open in other windows and keeps its search index in step. Deleting the folders yourself leaves the index out of date until `/chronicle reindex`.",
+                    detail: "Run `/session prune --older-than \(ctx.options.agentHistoryDays ?? 30)` in Copilot CLI (add `--dry-run` first to see the list). It skips sessions open in other windows and keeps its search index in step. Deleting the folders yourself leaves the index out of date until `/chronicle reindex`.",
                     bytes: bytes
                 ))
             }

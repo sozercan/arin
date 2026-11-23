@@ -242,6 +242,26 @@ extension ClaudeProjectTests {
         #expect(ClaudeProjects.recordedDirectories(in: "\(box.root)/p") == .init(directories: [gone], complete: true))
     }
 
+    @Test func anAgeLimitKeepsNewerDataForDeletedFolders() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        for index in 0 ..< 3 { try project(box, cwd: try box.mkdir("projects/p\(index)")) }
+        try project(box, cwd: "\(box.root)/.t3/worktrees/app/t3-1")
+        func found(_ days: Int?) async throws -> [Candidate] {
+            let options = ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil, agentHistoryDays: days)
+            let ctx = ScanContext(options: options, state: .empty, now: Date())
+            return try await Shell.$runner.withValue(RecordingRunner()) { try await ClaudeOrphanProjectsRule().discover(ctx) }
+        }
+        #expect(try await found(nil).count == 1)
+        #expect(try await found(30).isEmpty)
+        let old = try project(box, cwd: "\(box.root)/.t3/worktrees/app/t3-2")
+        for file in FileInfo.children(old) { try age(file, days: 40) }
+        try age(old, days: 40)
+        let offered = try await found(30)
+        #expect(offered.map(\.title) == ["Claude Code data for deleted folders, untouched for 30+ days (1)"])
+        #expect(ScanOptions(home: box.root, agentHistoryDays: 7).agentHistoryDays == 30)
+    }
+
     @Test func nestedWritesKeepAProject() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -329,6 +349,8 @@ extension ClaudeProjectTests {
         let idle = CodexSessionsRule.idle(sessions, state: .empty, now: Date())
         #expect(idle.map(\.id) == [ids[0]])
         #expect(Set(idle[0].files) == [Guardrails.canonical(a), Guardrails.canonical(b) + ".zst"])
+        #expect(CodexSessionsRule.idle(sessions, state: .empty, now: Date(), days: 45).map(\.id) == [ids[0]])
+        #expect(CodexSessionsRule.idle(sessions, state: .empty, now: Date(), days: 90).isEmpty)
 
         let busy = SystemState(processPaths: [], openPaths: [Guardrails.canonical(a)])
         #expect(CodexSessionsRule.idle(sessions, state: busy, now: Date()).isEmpty)
