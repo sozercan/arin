@@ -11,7 +11,7 @@ struct CodexSessionsRule: Rule {
         var lastActivity: Date
         var files: [String]
         var keep: Bool
-        var threads = 0
+        var threadIDs: [String] = []
     }
 
     static let minimumVersion = [0, 170, 0]
@@ -28,11 +28,11 @@ struct CodexSessionsRule: Rule {
         return result.ok && versionSupported(result.stdout)
     }
 
-    static func threadCount(codexHome: String) async -> Int? {
+    static func threadIDs(codexHome: String) async -> Set<String>? {
         guard let db = stateDatabase(codexHome: codexHome) else { return nil }
-        let result = await Shell.run("sqlite3", ["-readonly", db, "SELECT count(*) FROM threads;"], timeout: 60)
+        let result = await Shell.run("sqlite3", ["-readonly", db, "SELECT id FROM threads;"], timeout: 60)
         guard result.ok else { return nil }
-        return Int(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+        return Set(result.lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
     }
 
     struct Row: Decodable {
@@ -125,7 +125,7 @@ struct CodexSessionsRule: Rule {
                 byRoot[row.root] = Session(id: row.root, lastActivity: .distantPast, files: [], keep: !isThreadID(row.root))
             }
             var session = byRoot[row.root]!
-            session.threads += 1
+            session.threadIDs.append(row.id)
             session.lastActivity = max(session.lastActivity, Date(timeIntervalSince1970: row.last))
             if row.pinned != 0 || row.attached != 0 || !isThreadID(row.id) { session.keep = true }
             switch rolloutFiles(row.path, id: row.id, codexHome: codexHome) {

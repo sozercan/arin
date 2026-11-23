@@ -11,6 +11,8 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
     private var recorded: [(executable: String, arguments: [String], environment: [String: String])] = []
     var codexVersion = "codex-cli 0.170.0"
     var deleteEveryThread = false
+    var addThreadOnDelete = false
+    var alsoDelete: String?
     var extraPlanLine: String?
 
     var calls: [(executable: String, arguments: [String], environment: [String: String])] { lock.withLock { recorded } }
@@ -27,8 +29,9 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
             return ok(codexVersion)
         case ("codex", "delete"):
             guard let home = environment["CODEX_HOME"], let id = arguments.last else { return ok() }
-            let condition = deleteEveryThread ? "" : " WHERE id = '\(id)'"
-            return await run("sqlite3", ["\(home)/state_5.sqlite", "DELETE FROM threads\(condition);"], cwd: nil, input: nil, environment: [:], timeout: timeout)
+            let condition = deleteEveryThread ? "" : " WHERE id IN ('\(id)', '\(alsoDelete ?? id)')"
+            let added = addThreadOnDelete ? " INSERT INTO threads (id) VALUES ('\(UUID().uuidString.lowercased())');" : ""
+            return await run("sqlite3", ["\(home)/state_5.sqlite", "DELETE FROM threads\(condition);\(added)"], cwd: nil, input: nil, environment: [:], timeout: timeout)
         case ("claude", "purge"):
             guard let home = environment["HOME"], let dir = arguments.last else { return ok() }
             let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: dir))"
@@ -532,7 +535,9 @@ extension ClaudeProjectTests {
         runner.deleteEveryThread = true
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
         #expect(runner.calls.filter { $0.arguments.first == "delete" }.count == 1)
-        #expect(result.message.contains("stopped: codex delete removed 3 threads instead of 1"))
+        #expect(result.status == .failed, "\(result.message)")
+        #expect(result.message.contains("removed 0 of 3 sessions"))
+        #expect(result.message.contains("codex delete for \(ids[0]) also removed 2 other threads"))
         #expect(result.message.contains("2 (stopped after an unexpected result)"))
 
         let older = RecordingRunner()
@@ -540,6 +545,25 @@ extension ClaudeProjectTests {
         let refused = await Shell.$runner.withValue(older) { await executor.clean(candidate, state: .empty) }
         #expect(!older.calls.contains { $0.arguments.first == "delete" })
         #expect(refused.status == .skipped && refused.message.contains("this Codex version hasn't been checked with Arin"))
+    }
+
+    @Test func aLostThreadIsCaughtEvenWhenANewOneAppears() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let (ids, files) = try idleSessions(box, count: 3)
+        let candidate = Candidate(
+            ruleID: CodexSessionsRule.ruleID, key: "idle", title: "Codex", detail: "",
+            category: .agentData, level: .deep, risk: .review, bytes: 100, paths: files,
+            action: .commands(ids.map(CodexSessionsRule.deleteCommand))
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        runner.addThreadOnDelete = true
+        runner.alsoDelete = ids[2]
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(result.status == .failed, "\(result.message)")
+        #expect(result.message.contains("also removed 1 other thread"))
     }
 
     @Test func aMissingSchemaColumnOffersNothing() async throws {

@@ -262,8 +262,7 @@ public struct Executor: Sendable {
         var backup: [String]
         var backupName: String
         var restoreTo: String?
-        var threadsBefore = 0
-        var treeSize = 0
+        var otherThreads: Set<String> = []
     }
 
     enum PerItemCheck {
@@ -278,10 +277,10 @@ public struct Executor: Sendable {
             let codexHome = "\(guardrails.home)/.codex"
             if let reason = await CodexSessionsRule.recheck(target, codexHome: codexHome, state: state, now: Date()) { return .refused(reason) }
             guard let session = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)?.first,
-                  let before = await CodexSessionsRule.threadCount(codexHome: codexHome)
+                  let before = await CodexSessionsRule.threadIDs(codexHome: codexHome)
             else { return .refused("couldn't read Codex's session database") }
             return .ready(PerItem(backup: session.files, backupName: "Codex session \(target)", restoreTo: nil,
-                                  threadsBefore: before, treeSize: session.threads))
+                                  otherThreads: before.subtracting(session.threadIDs)))
         case "claude":
             if let reason = await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state) { return .refused(reason) }
             if let reason = await ClaudeOrphanProjectsRule.dryRunRefusal(target, home: guardrails.home) { return .refused(reason) }
@@ -331,11 +330,16 @@ public struct Executor: Sendable {
         switch command.executable {
         case "codex":
             let codexHome = "\(guardrails.home)/.codex"
-            guard let after = await CodexSessionsRule.threadCount(codexHome: codexHome),
+            guard let after = await CodexSessionsRule.threadIDs(codexHome: codexHome),
                   let left = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)
-            else { return (nil, "couldn't read Codex's session database after a delete") }
-            if after < item.threadsBefore - item.treeSize {
-                return (nil, "codex delete removed \(item.threadsBefore - after) threads instead of \(item.treeSize)")
+            else {
+                let reason = "couldn't read Codex's session database after deleting \(target)"
+                return (reason, reason)
+            }
+            let lost = item.otherThreads.subtracting(after)
+            if !lost.isEmpty {
+                let reason = "codex delete for \(target) also removed \(lost.count) other thread\(lost.count == 1 ? "" : "s")"
+                return (reason, reason)
             }
             return (left.isEmpty ? nil : "\(target): still listed after codex delete", nil)
         case "claude":
@@ -350,6 +354,7 @@ public struct Executor: Sendable {
         var skipped: [String: Int] = [:]
         var failures: [String] = []
         var backups: [TrashedPath] = []
+        var copied = 0
         var stopped: String?
         var state = state
         var captured = Date()
@@ -409,6 +414,7 @@ public struct Executor: Sendable {
                 continue
             }
             if let trashed { backups.append(trashed) }
+            copied += 1
             let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
             let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
                                          environment: environment, timeout: min(commandTimeout, 300))
@@ -424,8 +430,8 @@ public struct Executor: Sendable {
         }
         let noun = commands.first?.executable == "codex" ? "sessions" : "projects"
         var parts = ["removed \(done) of \(commands.count) \(noun)"]
-        if done > 0 { parts.append("copies are in the Trash") }
-        if let stopped { parts.append("stopped: \(stopped)") }
+        if copied > 0 { parts.append("copies are in the Trash") }
+        if let stopped { parts.append(stopped == failures.first ? "stopped" : "stopped: \(stopped)") }
         if !skipped.isEmpty {
             parts.append("skipped " + skipped.sorted { $0.value > $1.value }.map { "\($0.value) (\($0.key))" }.joined(separator: ", "))
         }
@@ -434,14 +440,17 @@ public struct Executor: Sendable {
         }
         var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned,
                                      message: parts.joined(separator: "; "), estimatedBytes: candidate.bytes,
-                                     trashed: done > 0, trashedPaths: backups.isEmpty ? nil : backups)
+                                     trashed: copied > 0, trashedPaths: backups.isEmpty ? nil : backups)
         if done == commands.count { return item }
-        if done == 0 {
+        if done == 0 || stopped != nil {
             item.status = failures.isEmpty && stopped == nil ? .skipped : .failed
-            item.estimatedBytes = 0
-            return item
+            if done == 0 {
+                item.estimatedBytes = 0
+                return item
+            }
+        } else {
+            item.status = .partial
         }
-        item.status = .partial
         let left = await Size.total(candidate.paths)
         item.estimatedBytes = max(0, candidate.bytes - left)
         return item
