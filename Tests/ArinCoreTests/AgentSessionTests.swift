@@ -17,9 +17,9 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
     func run(_ executable: String, _ arguments: [String], cwd: String?, input: String?,
              environment: [String: String], timeout: TimeInterval) async -> ShellResult {
         lock.withLock { recorded.append((executable, arguments, environment)) }
-        guard executable == "sqlite3" else { return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false) }
+        guard ["sqlite3", "find"].contains(executable) else { return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false) }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/\(executable)")
         process.arguments = arguments
         let out = Pipe()
         process.standardOutput = out
@@ -96,7 +96,8 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         let transcript = try box.write(".claude/projects/\(name)/\(UUID().uuidString).jsonl", "\(summary)\n\(record)\n")
         try age(transcript, days: 10)
         if memory {
-            _ = try box.write(".claude/projects/\(name)/memory/MEMORY.md", "notes")
+            let notes = try box.write(".claude/projects/\(name)/memory/MEMORY.md", "notes")
+            try age(notes, days: 10)
             try age("\(box.root)/.claude/projects/\(name)/memory", days: 10)
         }
         let dir = "\(box.root)/.claude/projects/\(name)"
@@ -179,11 +180,67 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         let runner = RecordingRunner()
         let executor = Executor(guardrails: box.guardrails, keepListURL: nil)
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
-        #expect(runner.calls.map(\.arguments) == [["purge", "--yes", gonePath]])
+        #expect(runner.calls.filter { $0.executable == "claude" }.map(\.arguments) == [["purge", "--yes", gonePath]])
+        #expect(runner.calls.first { $0.executable == "claude" }?.environment["HOME"] == Guardrails.canonical(box.root))
         #expect(result.status == .partial)
         #expect(result.message.contains("removed 1 of 2 projects"))
         #expect(result.message.contains("the folder exists again"))
         #expect(result.estimatedBytes == 0)
+    }
+}
+
+extension ClaudeProjectTests {
+    @Test func everyPathSharingAFolderMustBeGone() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let dashed = "\(box.root)/x/a-b"
+        let nested = "\(box.root)/x/a/b"
+        let folder = try project(box, cwd: dashed)
+        let record = try String(decoding: JSONSerialization.data(withJSONObject: ["type": "user", "cwd": nested]), as: UTF8.self)
+        let second = try box.write(".claude/projects/\((folder as NSString).lastPathComponent)/\(UUID().uuidString).jsonl", "\(record)\n")
+        try age(second, days: 10)
+        try age(folder, days: 10)
+        #expect(await ClaudeOrphanProjectsRule.recheck(dashed, home: box.root, state: .empty) == nil)
+        _ = try box.mkdir("x/a/b")
+        #expect(await ClaudeOrphanProjectsRule.recheck(dashed, home: box.root, state: .empty) == "the folder exists again")
+    }
+
+    @Test func nestedWritesKeepAProject() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        for index in 0 ..< 3 { try project(box, cwd: try box.mkdir("projects/p\(index)")) }
+        let gonePath = "\(box.root)/projects/old-app"
+        let folder = try project(box, cwd: gonePath, memory: true)
+        #expect(await ClaudeOrphanProjectsRule.recheck(gonePath, home: box.root, state: .empty) == nil)
+        try "more notes".write(toFile: "\(folder)/memory/MEMORY.md", atomically: false, encoding: .utf8)
+        try age("\(folder)/memory", days: 10)
+        try age(folder, days: 10)
+
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        let found = try await Shell.$runner.withValue(RecordingRunner()) { try await ClaudeOrphanProjectsRule().discover(ctx) }
+        #expect(found.isEmpty)
+        #expect(await ClaudeOrphanProjectsRule.recheck(gonePath, home: box.root, state: .empty) == "a session wrote to it within the last day")
+    }
+
+    @Test func staleOpenFileStateIsRefreshedBeforeEachCommand() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gonePath = "\(box.root)/.t3/worktrees/app/t3-1"
+        let folder = try project(box, cwd: gonePath)
+        let candidate = Candidate(
+            ruleID: ClaudeOrphanProjectsRule.ruleID, key: "orphaned", title: "Claude", detail: "",
+            category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [folder],
+            action: .commands([ClaudeOrphanProjectsRule.purgeCommand(gonePath)])
+        )
+        let runner = RecordingRunner()
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.stateMaxAge = 0
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(runner.calls.contains { $0.executable == "lsof" })
+        #expect(!runner.calls.contains { $0.executable == "claude" })
+        #expect(result.status == .skipped)
+        #expect(result.message.contains("couldn't check for open files"))
     }
 }
 

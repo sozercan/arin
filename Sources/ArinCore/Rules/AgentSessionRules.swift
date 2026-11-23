@@ -153,10 +153,9 @@ struct ClaudeOrphanProjectsRule: Rule {
         guard Shell.which("claude") != nil, ClaudeProjects.configDirMatches(home: ctx.home) else { return [] }
         let survey = ClaudeProjects.survey(ctx.path(".claude/projects"), mounts: Guardrails.currentMountPoints())
         guard !survey.looksLikeWrongHost else { return [] }
-        let gone = survey.projects.filter { project in
-            guard project.presence == .gone, !ctx.state.isBusy(project.folder) else { return false }
-            let recent = FileInfo.recentActivity(project.folder) ?? .distantFuture
-            return ctx.now.timeIntervalSince(recent) >= Self.minIdle
+        var gone: [ClaudeProjects.Project] = []
+        for project in survey.projects where project.presence == .gone && !ctx.state.isBusy(project.folder) {
+            if await !FileInfo.hasRecentWrites(project.folder, within: Self.minIdle) { gone.append(project) }
         }
         guard !gone.isEmpty else { return [] }
         let sizes = await Size.allocated(gone.map(\.folder))
@@ -195,18 +194,18 @@ struct ClaudeOrphanProjectsRule: Rule {
         CommandSpec("claude", ["purge", "--yes", workingDirectory])
     }
 
-    static func recheck(_ workingDirectory: String, home: String, state: SystemState, now: Date) -> String? {
+    static func recheck(_ workingDirectory: String, home: String, state: SystemState) async -> String? {
         guard ClaudeProjects.configDirMatches(home: home) else { return "CLAUDE_CONFIG_DIR points somewhere else" }
-        switch ClaudeProjects.presence(workingDirectory, mounts: Guardrails.currentMountPoints()) {
+        let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: workingDirectory))"
+        let mounts = Guardrails.currentMountPoints()
+        let recorded = ClaudeProjects.recordedDirectories(in: folder).filter { ClaudeProjects.folderName(for: $0) == (folder as NSString).lastPathComponent }
+        switch ClaudeProjects.combined(Set(recorded + [workingDirectory]).map { ClaudeProjects.presence($0, mounts: mounts) }) {
         case .present: return "the folder exists again"
         case .unknown: return "can't tell whether the folder is gone"
         case .gone: break
         }
-        let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: workingDirectory))"
         if state.isBusy(folder) { return "its transcripts are open" }
-        if let recent = FileInfo.recentActivity(folder), now.timeIntervalSince(recent) < minIdle {
-            return "a session wrote to it within the last day"
-        }
+        if await FileInfo.hasRecentWrites(folder, within: minIdle) { return "a session wrote to it within the last day" }
         return nil
     }
 }
@@ -248,15 +247,18 @@ enum ClaudeProjects {
         Survey(projects: FileInfo.children(root).filter { FileInfo.isDirectory($0) && !FileInfo.isSymlink($0) }.map { folder in
             let name = (folder as NSString).lastPathComponent
             let matching = recordedDirectories(in: folder).filter { folderName(for: $0) == name }
-            let presences = matching.map { presence($0, mounts: mounts) }
-            let combined: Presence = presences.isEmpty ? .unknown
-                : presences.contains(.present) ? .present
-                : presences.contains(.unknown) ? .unknown : .gone
+            let state = combined(matching.map { presence($0, mounts: mounts) })
             let memory = "\(folder)/memory"
             let hasMemory = FileInfo.children(memory).contains { !($0 as NSString).lastPathComponent.hasPrefix(".") }
                 || (FileInfo.exists(memory) && !FileInfo.isDirectory(memory))
-            return Project(folder: folder, workingDirectory: matching.first, presence: combined, hasMemory: hasMemory)
+            return Project(folder: folder, workingDirectory: matching.first, presence: state, hasMemory: hasMemory)
         })
+    }
+
+    static func combined(_ presences: [Presence]) -> Presence {
+        presences.isEmpty ? .unknown
+            : presences.contains(.present) ? .present
+            : presences.contains(.unknown) ? .unknown : .gone
     }
 
     static func recordedDirectories(in folder: String, limit: Int = 20) -> [String] {

@@ -37,6 +37,7 @@ public struct Executor: Sendable {
     public var trashInsteadOfDelete: Bool
     public var commandTimeout: TimeInterval
     public var keepListURL: URL?
+    var stateMaxAge: TimeInterval = 5
 
     public init(
         guardrails: Guardrails = Guardrails(),
@@ -261,7 +262,7 @@ public struct Executor: Sendable {
         case "codex":
             return await CodexSessionsRule.recheck(target, codexHome: "\(guardrails.home)/.codex", state: state, now: Date())
         case "claude":
-            return ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state, now: Date())
+            return await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state)
         default:
             return "refusing to run \(command.display)"
         }
@@ -271,16 +272,26 @@ public struct Executor: Sendable {
         var done = 0
         var skipped: [String: Int] = [:]
         var failures: [String] = []
+        var state = state
+        var captured = Date()
         for command in commands {
             if Task.isCancelled {
                 skipped["cancelled", default: 0] += 1
+                continue
+            }
+            if Date().timeIntervalSince(captured) >= stateMaxAge {
+                state = await SystemState.capture()
+                captured = Date()
+            }
+            if !state.openFilesKnown {
+                skipped["couldn't check for open files", default: 0] += 1
                 continue
             }
             if let reason = await perItemRefusal(command, state: state) {
                 skipped[reason, default: 0] += 1
                 continue
             }
-            let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : [:]
+            let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
             let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
                                          environment: environment, timeout: min(commandTimeout, 300))
             if output.ok {
