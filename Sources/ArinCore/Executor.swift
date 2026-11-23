@@ -38,6 +38,7 @@ public struct Executor: Sendable {
     public var commandTimeout: TimeInterval
     public var keepListURL: URL?
     var stateMaxAge: TimeInterval = 5
+    var backupDirectory: String?
 
     public init(
         guardrails: Guardrails = Guardrails(),
@@ -256,15 +257,90 @@ public struct Executor: Sendable {
         }
     }
 
-    func perItemRefusal(_ command: CommandSpec, state: SystemState) async -> String? {
-        guard Guardrails.allows(command), let target = command.arguments.last else { return "refusing to run \(command.display)" }
+    struct PerItem {
+        var backup: [String]
+        var backupName: String
+        var restoreTo: String?
+        var threadsBefore = 0
+        var treeSize = 0
+    }
+
+    enum PerItemCheck {
+        case refused(String)
+        case ready(PerItem)
+    }
+
+    func prepare(_ command: CommandSpec, state: SystemState) async -> PerItemCheck {
+        guard Guardrails.allows(command), let target = command.arguments.last else { return .refused("refusing to run \(command.display)") }
         switch command.executable {
         case "codex":
-            return await CodexSessionsRule.recheck(target, codexHome: "\(guardrails.home)/.codex", state: state, now: Date())
+            let codexHome = "\(guardrails.home)/.codex"
+            if let reason = await CodexSessionsRule.recheck(target, codexHome: codexHome, state: state, now: Date()) { return .refused(reason) }
+            guard let session = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)?.first,
+                  let before = await CodexSessionsRule.threadCount(codexHome: codexHome)
+            else { return .refused("couldn't read Codex's session database") }
+            return .ready(PerItem(backup: session.files, backupName: "Codex session \(target)", restoreTo: nil,
+                                  threadsBefore: before, treeSize: session.threads))
         case "claude":
-            return await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state)
+            if let reason = await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state) { return .refused(reason) }
+            if let reason = await ClaudeOrphanProjectsRule.dryRunRefusal(target, home: guardrails.home) { return .refused(reason) }
+            let folder = "\(guardrails.home)/.claude/projects/\(ClaudeProjects.folderName(for: target))"
+            return .ready(PerItem(backup: [folder], backupName: ClaudeProjects.folderName(for: target), restoreTo: folder))
         default:
-            return "refusing to run \(command.display)"
+            return .refused("refusing to run \(command.display)")
+        }
+    }
+
+    enum BackedUp {
+        case done(TrashedPath?)
+        case failed(String)
+    }
+
+    func backUp(_ item: PerItem) -> BackedUp {
+        let fm = FileManager.default
+        let staging = (NSTemporaryDirectory() as NSString).appendingPathComponent("arin-backup-\(UUID().uuidString)")
+        let copy = (staging as NSString).appendingPathComponent(item.backupName)
+        defer { try? fm.removeItem(atPath: staging) }
+        do {
+            if let original = item.restoreTo {
+                try fm.createDirectory(atPath: staging, withIntermediateDirectories: true)
+                try fm.copyItem(atPath: original, toPath: copy)
+            } else {
+                try fm.createDirectory(atPath: copy, withIntermediateDirectories: true)
+                for file in item.backup {
+                    try fm.copyItem(atPath: file, toPath: (copy as NSString).appendingPathComponent((file as NSString).lastPathComponent))
+                }
+            }
+            if let backupDirectory {
+                let destination = (backupDirectory as NSString).appendingPathComponent("\(item.backupName)-\(UUID().uuidString)")
+                try fm.moveItem(atPath: copy, toPath: destination)
+                return .done(item.restoreTo.map { TrashedPath(original: $0, location: destination) })
+            }
+            var location: NSURL?
+            try fm.trashItem(at: URL(fileURLWithPath: copy), resultingItemURL: &location)
+            guard let path = location?.path else { return .failed("couldn't copy it to the Trash first") }
+            return .done(item.restoreTo.map { TrashedPath(original: $0, location: path) })
+        } catch {
+            return .failed("couldn't copy it to the Trash first")
+        }
+    }
+
+    func verify(_ command: CommandSpec, _ item: PerItem) async -> (failure: String?, stop: String?) {
+        guard let target = command.arguments.last else { return ("refusing to run \(command.display)", nil) }
+        switch command.executable {
+        case "codex":
+            let codexHome = "\(guardrails.home)/.codex"
+            guard let after = await CodexSessionsRule.threadCount(codexHome: codexHome),
+                  let left = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)
+            else { return (nil, "couldn't read Codex's session database after a delete") }
+            if after < item.threadsBefore - item.treeSize {
+                return (nil, "codex delete removed \(item.threadsBefore - after) threads instead of \(item.treeSize)")
+            }
+            return (left.isEmpty ? nil : "\(target): still listed after codex delete", nil)
+        case "claude":
+            return (item.restoreTo.map(FileInfo.exists) == true ? "\(target): still there after claude purge" : nil, nil)
+        default:
+            return ("refusing to run \(command.display)", nil)
         }
     }
 
@@ -272,11 +348,23 @@ public struct Executor: Sendable {
         var done = 0
         var skipped: [String: Int] = [:]
         var failures: [String] = []
+        var backups: [TrashedPath] = []
+        var stopped: String?
         var state = state
         var captured = Date()
+        let codexSupported = commands.first?.executable == "codex"
+            ? await CodexSessionsRule.installedVersionSupported(codexHome: "\(guardrails.home)/.codex") : true
         for command in commands {
             if Task.isCancelled {
                 skipped["cancelled", default: 0] += 1
+                continue
+            }
+            if stopped != nil {
+                skipped["stopped after an unexpected result", default: 0] += 1
+                continue
+            }
+            if !codexSupported {
+                skipped["this Codex version hasn't been checked with Arin", default: 0] += 1
                 continue
             }
             if Date().timeIntervalSince(captured) >= stateMaxAge {
@@ -287,23 +375,38 @@ public struct Executor: Sendable {
                 skipped["couldn't check for open files", default: 0] += 1
                 continue
             }
-            if let reason = await perItemRefusal(command, state: state) {
+            let item: PerItem
+            switch await prepare(command, state: state) {
+            case let .refused(reason):
                 skipped[reason, default: 0] += 1
                 continue
+            case let .ready(ready):
+                item = ready
+            }
+            switch backUp(item) {
+            case let .failed(reason):
+                skipped[reason, default: 0] += 1
+                continue
+            case let .done(trashed):
+                if let trashed { backups.append(trashed) }
             }
             let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
             let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
                                          environment: environment, timeout: min(commandTimeout, 300))
-            if output.ok {
-                done += 1
-            } else {
+            guard output.ok else {
                 let tail = (output.timedOut ? "timed out" : (output.stderr.isEmpty ? output.stdout : output.stderr))
                     .trimmingCharacters(in: .whitespacesAndNewlines).suffix(200)
                 failures.append("\(command.arguments.last ?? command.display): \(tail)")
+                continue
             }
+            let check = await verify(command, item)
+            if let failure = check.failure { failures.append(failure) } else { done += 1 }
+            if let stop = check.stop { stopped = stop }
         }
         let noun = commands.first?.executable == "codex" ? "sessions" : "projects"
         var parts = ["removed \(done) of \(commands.count) \(noun)"]
+        if done > 0 { parts.append("copies are in the Trash") }
+        if let stopped { parts.append("stopped: \(stopped)") }
         if !skipped.isEmpty {
             parts.append("skipped " + skipped.sorted { $0.value > $1.value }.map { "\($0.value) (\($0.key))" }.joined(separator: ", "))
         }
@@ -312,10 +415,10 @@ public struct Executor: Sendable {
         }
         var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned,
                                      message: parts.joined(separator: "; "), estimatedBytes: candidate.bytes,
-                                     trashed: false, trashedPaths: nil)
+                                     trashed: done > 0, trashedPaths: backups.isEmpty ? nil : backups)
         if done == commands.count { return item }
         if done == 0 {
-            item.status = failures.isEmpty ? .skipped : .failed
+            item.status = failures.isEmpty && stopped == nil ? .skipped : .failed
             item.estimatedBytes = 0
             return item
         }

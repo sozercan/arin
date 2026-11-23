@@ -11,6 +11,28 @@ struct CodexSessionsRule: Rule {
         var lastActivity: Date
         var files: [String]
         var keep: Bool
+        var threads = 0
+    }
+
+    static let minimumVersion = [0, 170, 0]
+
+    static func versionSupported(_ output: String) -> Bool {
+        guard let token = output.split(whereSeparator: \.isWhitespace).last else { return false }
+        let parts = token.split(separator: ".").map { Int($0.prefix { $0.isNumber }) }
+        guard parts.count >= 3, parts.allSatisfy({ $0 != nil }) else { return false }
+        return parts.prefix(3).map { $0! }.lexicographicallyPrecedes(minimumVersion) == false
+    }
+
+    static func installedVersionSupported(codexHome: String) async -> Bool {
+        let result = await Shell.run("codex", ["--version"], environment: ["CODEX_HOME": codexHome], timeout: 20)
+        return result.ok && versionSupported(result.stdout)
+    }
+
+    static func threadCount(codexHome: String) async -> Int? {
+        guard let db = stateDatabase(codexHome: codexHome) else { return nil }
+        let result = await Shell.run("sqlite3", ["-readonly", db, "SELECT count(*) FROM threads;"], timeout: 60)
+        guard result.ok else { return nil }
+        return Int(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     struct Row: Decodable {
@@ -40,6 +62,7 @@ struct CodexSessionsRule: Rule {
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("codex") != nil else { return [] }
         let codexHome = ctx.path(".codex")
+        guard await Self.installedVersionSupported(codexHome: codexHome) else { return [] }
         guard let sessions = await Self.sessions(codexHome: codexHome) else { return [] }
         let days = ctx.options.agentHistoryDays ?? Self.idleDays
         let idle = Self.idle(sessions, state: ctx.state, now: ctx.now, days: days)
@@ -50,7 +73,7 @@ struct CodexSessionsRule: Rule {
             ruleID: id,
             key: "idle",
             title: "Codex sessions idle for \(days)+ days (\(idle.count))",
-            detail: "Removed with `codex delete`, which also clears their history, index and log entries\(subagents > 0 ? " and \(subagents) subagent threads" : ""). They can't be resumed afterwards. Pinned sessions, sessions with attached threads, and any session used since the scan are kept. Codex's thread history database frees its share once it's compacted, which Arin offers when enough of it is free.",
+            detail: "Removed with `codex delete`, which also clears their history, index and log entries\(subagents > 0 ? " and \(subagents) subagent threads" : ""). They can't be resumed afterwards. A copy of each session's files goes to the Trash first, so the space is freed once you empty it. Pinned sessions, sessions with attached threads, and any session used since the scan are kept. Codex's thread history database frees its share once it's compacted, which Arin offers when enough of it is free.",
             category: .agentData,
             level: .deep,
             risk: .review,
@@ -102,6 +125,7 @@ struct CodexSessionsRule: Rule {
                 byRoot[row.root] = Session(id: row.root, lastActivity: .distantPast, files: [], keep: !isThreadID(row.root))
             }
             var session = byRoot[row.root]!
+            session.threads += 1
             session.lastActivity = max(session.lastActivity, Date(timeIntervalSince1970: row.last))
             if row.pinned != 0 || row.attached != 0 || !isThreadID(row.id) { session.keep = true }
             switch rolloutFiles(row.path, id: row.id, codexHome: codexHome) {
@@ -178,7 +202,7 @@ struct ClaudeOrphanProjectsRule: Rule {
                 lastModified: folders.compactMap(FileInfo.recentActivity).max()
             )
         }
-        let purge = "Removed with `claude purge`, which also drops each project's entry in ~/.claude.json and its prompt history. Each folder's path comes from its transcripts, and only folders that are gone (not on an unmounted disk or behind a folder Arin can't read) are listed."
+        let purge = "Removed with `claude purge`, which also drops each project's entry in ~/.claude.json and its prompt history. Each project folder goes to the Trash first, so it can be put back, and the space is freed once you empty the Trash. Each folder's path comes from its transcripts, and only folders that are gone (not on an unmounted disk or behind a folder Arin can't read) are listed."
         let age = ctx.options.agentHistoryDays.map { ", untouched for \($0)+ days" } ?? ""
         return [
             make(gone.filter { !$0.hasMemory }, key: "orphaned",
@@ -190,6 +214,36 @@ struct ClaudeOrphanProjectsRule: Rule {
                  detail: "As above, but these projects also have auto memory: notes Claude kept about the project, which `claude purge` deletes too. Look before removing them if you might recreate the folder. \(purge)",
                  risk: .review),
         ].compactMap { $0 }
+    }
+
+    static func dryRunRefusal(_ workingDirectory: String, home: String) async -> String? {
+        let output = await Shell.run("claude", ["purge", "--dry-run", workingDirectory], environment: ["HOME": home], timeout: 60)
+        guard output.ok else { return "claude purge --dry-run didn't find it" }
+        return dryRunMismatch(output.stdout, workingDirectory: workingDirectory, home: home)
+    }
+
+    static func dryRunMismatch(_ plan: String, workingDirectory: String, home: String) -> String? {
+        let folder = Guardrails.canonical("\(home)/.claude/projects/\(ClaudeProjects.folderName(for: workingDirectory))")
+        let entry = "projects[\"\(workingDirectory)\"]"
+        var items: [(kind: String, value: String)] = []
+        var total: Int?
+        for line in plan.split(separator: "\n").map(String.init) {
+            if line.hasPrefix("Dry run: ") {
+                total = Int(line.dropFirst("Dry run: ".count).prefix { $0.isNumber })
+                continue
+            }
+            guard line.hasPrefix("  "), !line.hasPrefix("   "), let colon = line.firstIndex(of: ":") else { continue }
+            let kind = String(line[line.index(line.startIndex, offsetBy: 2) ..< colon])
+            guard !kind.isEmpty, kind.allSatisfy(\.isLetter) else { continue }
+            items.append((kind, line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)))
+        }
+        let expected = items.allSatisfy { item in
+            (item.kind == "dir" && Guardrails.canonical(item.value) == folder) || (item.kind == "config" && item.value == entry)
+        }
+        guard expected, items.filter({ $0.kind == "dir" }).count == 1, total == items.count else {
+            return "claude purge --dry-run listed something other than this project"
+        }
+        return nil
     }
 
     static func purgeCommand(_ workingDirectory: String) -> CommandSpec {

@@ -9,15 +9,39 @@ private func age(_ path: String, days: Double) throws {
 private final class RecordingRunner: CommandRunner, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [(executable: String, arguments: [String], environment: [String: String])] = []
+    var codexVersion = "codex-cli 0.170.0"
+    var deleteEveryThread = false
+    var extraPlanLine: String?
 
     var calls: [(executable: String, arguments: [String], environment: [String: String])] { lock.withLock { recorded } }
 
     func which(_ name: String) -> String? { "/fake/bin/\(name)" }
 
+    private func ok(_ stdout: String = "") -> ShellResult { ShellResult(status: 0, stdout: stdout, stderr: "", timedOut: false) }
+
     func run(_ executable: String, _ arguments: [String], cwd: String?, input: String?,
              environment: [String: String], timeout: TimeInterval) async -> ShellResult {
         lock.withLock { recorded.append((executable, arguments, environment)) }
-        guard ["sqlite3", "find"].contains(executable) else { return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false) }
+        switch (executable, arguments.first) {
+        case ("codex", "--version"):
+            return ok(codexVersion)
+        case ("codex", "delete"):
+            guard let home = environment["CODEX_HOME"], let id = arguments.last else { return ok() }
+            let condition = deleteEveryThread ? "" : " WHERE id = '\(id)'"
+            return await run("sqlite3", ["\(home)/state_5.sqlite", "DELETE FROM threads\(condition);"], cwd: nil, input: nil, environment: [:], timeout: timeout)
+        case ("claude", "purge"):
+            guard let home = environment["HOME"], let dir = arguments.last else { return ok() }
+            let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: dir))"
+            if arguments[1] == "--dry-run" {
+                let lines = ["  dir:    \(folder)", "           project transcripts", "  config: projects[\"\(dir)\"]"] + (extraPlanLine.map { [$0] } ?? [])
+                return ok("Purge plan for \(dir):\n\n" + lines.joined(separator: "\n") + "\nDry run: \(lines.count - 1) item(s) would be deleted.\n")
+            }
+            try? FileManager.default.removeItem(atPath: folder)
+            return ok()
+        default:
+            break
+        }
+        guard ["sqlite3", "find"].contains(executable) else { return ok() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/\(executable)")
         process.arguments = arguments
@@ -178,9 +202,14 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         _ = try box.mkdir(".t3/worktrees/app/t3-2")
 
         let runner = RecordingRunner()
-        let executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
-        #expect(runner.calls.filter { $0.executable == "claude" }.map(\.arguments) == [["purge", "--yes", gonePath]])
+        #expect(runner.calls.filter { $0.executable == "claude" }.map(\.arguments) == [["purge", "--dry-run", gonePath], ["purge", "--yes", gonePath]])
+        let backup = try #require(result.trashedPaths?.first)
+        #expect(backup.original == Guardrails.canonical(goneFolder) && !FileInfo.exists(goneFolder))
+        #expect(FileInfo.children(backup.location).contains { $0.hasSuffix(".jsonl") })
+        #expect(result.trashed && result.message.contains("copies are in the Trash"))
         #expect(runner.calls.first { $0.executable == "claude" }?.environment["HOME"] == Guardrails.canonical(box.root))
         #expect(result.status == .partial)
         #expect(result.message.contains("removed 1 of 2 projects"))
@@ -280,6 +309,58 @@ extension ClaudeProjectTests {
         #expect(await ClaudeOrphanProjectsRule.recheck(gonePath, home: box.root, state: .empty) == "a session wrote to it within the last day")
     }
 
+    @Test func theDryRunMustListOnlyThisProject() {
+        let home = "/private/var/folders/x/home"
+        let dir = "/gone/app"
+        let plan = """
+        Purge plan for /gone/app:
+
+          dir:    /private/var/folders/x/home/.claude/projects/-gone-app
+                   project transcripts (.jsonl) and memory/
+          config: projects["/gone/app"]
+                   project entry in ~/.claude.json (trust, history, MCP servers)
+
+        backups/ may still contain this project entry in old .claude.json snapshots (/private/var/folders/x/home/.claude/backups); at most 5 are kept and they rotate out automatically
+
+        Purging deletes data only on this computer, not anything stored by Anthropic.
+        Dry run: 2 item(s) would be deleted.
+        """
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan, workingDirectory: dir, home: home) == nil)
+        let extra = plan.replacingOccurrences(of: "  config:", with: "  file:   /private/var/folders/x/home/.claude/history.jsonl\n  config:")
+            .replacingOccurrences(of: "Dry run: 2", with: "Dry run: 3")
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(extra, workingDirectory: dir, home: home) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "-gone-app", with: "-other"), workingDirectory: dir, home: home) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch(plan.replacingOccurrences(of: "Dry run: 2", with: "Dry run: 5"), workingDirectory: dir, home: home) != nil)
+        #expect(ClaudeOrphanProjectsRule.dryRunMismatch("", workingDirectory: dir, home: home) != nil)
+    }
+
+    @Test func purgeIsRefusedWhenTheDryRunOrBackupDisagrees() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gonePath = "\(box.root)/.t3/worktrees/app/t3-1"
+        let folder = try project(box, cwd: gonePath)
+        let candidate = Candidate(
+            ruleID: ClaudeOrphanProjectsRule.ruleID, key: "orphaned", title: "Claude", detail: "",
+            category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [folder],
+            action: .commands([ClaudeOrphanProjectsRule.purgeCommand(gonePath)])
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+
+        let surprising = RecordingRunner()
+        surprising.extraPlanLine = "  dir:    \(box.root)/.claude/projects/-something-else"
+        let refused = await Shell.$runner.withValue(surprising) { await executor.clean(candidate, state: .empty) }
+        #expect(!surprising.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
+        #expect(refused.status == .skipped && refused.message.contains("listed something other than this project"))
+
+        executor.backupDirectory = "\(box.root)/no-such-folder"
+        let noBackup = RecordingRunner()
+        let unsaved = await Shell.$runner.withValue(noBackup) { await executor.clean(candidate, state: .empty) }
+        #expect(!noBackup.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
+        #expect(unsaved.status == .skipped && unsaved.message.contains("couldn't copy it to the Trash first"))
+        #expect(FileInfo.exists(folder))
+    }
+
     @Test func staleOpenFileStateIsRefreshedBeforeEachCommand() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -366,6 +447,60 @@ extension ClaudeProjectTests {
         #expect(await CodexSessionsRule.recheck(ids[0], codexHome: home, state: .empty, now: Date()) == "written since the scan")
     }
 
+    @Test func onlyCheckedCodexVersionsAreUsed() {
+        #expect(CodexSessionsRule.versionSupported("codex-cli 0.170.0"))
+        #expect(CodexSessionsRule.versionSupported("codex-cli 0.171.2\n"))
+        #expect(CodexSessionsRule.versionSupported("codex-cli 1.0.0-alpha.1"))
+        #expect(!CodexSessionsRule.versionSupported("codex-cli 0.169.9"))
+        #expect(!CodexSessionsRule.versionSupported("codex-cli"))
+        #expect(!CodexSessionsRule.versionSupported(""))
+    }
+
+    private func idleSessions(_ box: Sandbox, count: Int) throws -> (ids: [String], files: [String]) {
+        let home = "\(box.root)/.codex"
+        let old = Int(Date().addingTimeInterval(-60 * 86400).timeIntervalSince1970)
+        let ids = (0 ..< count).map { _ in UUID().uuidString.lowercased() }
+        var files: [String] = []
+        for id in ids {
+            let file = try box.write(".codex/sessions/2026/09/01/rollout-2026-09-01T00-00-00-\(id).jsonl")
+            try age(file, days: 60)
+            files.append(file)
+        }
+        let values = zip(ids, files).map { "('\($0)', '\($1)', \(old), \(old), 0, 0, NULL)" }.joined(separator: ", ")
+        try sqlite("\(home)/state_5.sqlite", """
+        CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, created_at INTEGER, updated_at INTEGER,
+          recency_at INTEGER, is_pinned INTEGER, attached_thread_parent_id TEXT);
+        CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT PRIMARY KEY, status TEXT);
+        INSERT INTO threads VALUES \(values);
+        """)
+        return (ids, files)
+    }
+
+    @Test func aDeleteThatRemovesTooMuchStopsTheRun() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let (ids, files) = try idleSessions(box, count: 3)
+        let candidate = Candidate(
+            ruleID: CodexSessionsRule.ruleID, key: "idle", title: "Codex", detail: "",
+            category: .agentData, level: .deep, risk: .review, bytes: 100, paths: files,
+            action: .commands(ids.map(CodexSessionsRule.deleteCommand))
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        runner.deleteEveryThread = true
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(runner.calls.filter { $0.arguments.first == "delete" }.count == 1)
+        #expect(result.message.contains("stopped: codex delete removed 3 threads instead of 1"))
+        #expect(result.message.contains("2 (stopped after an unexpected result)"))
+
+        let older = RecordingRunner()
+        older.codexVersion = "codex-cli 0.160.0"
+        let refused = await Shell.$runner.withValue(older) { await executor.clean(candidate, state: .empty) }
+        #expect(!older.calls.contains { $0.arguments.first == "delete" })
+        #expect(refused.status == .skipped && refused.message.contains("this Codex version hasn't been checked with Arin"))
+    }
+
     @Test func aMissingSchemaColumnOffersNothing() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -401,9 +536,14 @@ extension ClaudeProjectTests {
         try sqlite("\(home)/state_5.sqlite", "UPDATE threads SET updated_at = \(Int(Date().timeIntervalSince1970)) WHERE id = '\(resumed)';")
 
         let runner = RecordingRunner()
-        let executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        let backups = try box.mkdir("backups")
+        executor.backupDirectory = backups
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
-        let deletes = runner.calls.filter { $0.executable == "codex" }
+        let deletes = runner.calls.filter { $0.executable == "codex" && $0.arguments.first == "delete" }
+        let copied = try FileManager.default.contentsOfDirectory(atPath: backups)
+        #expect(copied.count == 1 && copied[0].hasPrefix("Codex session \(idle)"))
+        #expect(FileInfo.exists("\(backups)/\(copied[0])/\((files[0] as NSString).lastPathComponent)"))
         #expect(deletes.map(\.arguments) == [["delete", "--force", idle]])
         #expect(deletes.first?.environment["CODEX_HOME"] == Guardrails.canonical(home))
         #expect(result.status == .partial, "\(result.message)")
@@ -413,7 +553,7 @@ extension ClaudeProjectTests {
         try FileManager.default.removeItem(atPath: "\(home)/state_5.sqlite")
         let none = RecordingRunner()
         let refused = await Shell.$runner.withValue(none) { await executor.clean(candidate, state: .empty) }
-        #expect(!none.calls.contains { $0.executable == "codex" })
+        #expect(!none.calls.contains { $0.executable == "codex" && $0.arguments.first == "delete" })
         #expect(refused.status == .skipped)
         #expect(refused.message.contains("couldn't read Codex's session database"))
     }
