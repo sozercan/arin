@@ -13,6 +13,9 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
     var deleteEveryThread = false
     var addThreadOnDelete = false
     var alsoDelete: String?
+    var failDelete = false
+    var leaveFiles = false
+    var leaveConfigEntry = false
     var extraPlanLine: String?
 
     var calls: [(executable: String, arguments: [String], environment: [String: String])] { lock.withLock { recorded } }
@@ -31,7 +34,11 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
             guard let home = environment["CODEX_HOME"], let id = arguments.last else { return ok() }
             let condition = deleteEveryThread ? "" : " WHERE id IN ('\(id)', '\(alsoDelete ?? id)')"
             let added = addThreadOnDelete ? " INSERT INTO threads (id) VALUES ('\(UUID().uuidString.lowercased())');" : ""
-            return await run("sqlite3", ["\(home)/state_5.sqlite", "DELETE FROM threads\(condition);\(added)"], cwd: nil, input: nil, environment: [:], timeout: timeout)
+            let removed = await run("sqlite3", ["\(home)/state_5.sqlite", "DELETE FROM threads\(condition);\(added)"], cwd: nil, input: nil, environment: [:], timeout: timeout)
+            if !leaveFiles, let names = FileManager.default.enumerator(atPath: "\(home)/sessions")?.allObjects as? [String] {
+                for name in names where name.contains(id) { try? FileManager.default.removeItem(atPath: "\(home)/sessions/\(name)") }
+            }
+            return failDelete ? ShellResult(status: 1, stdout: "", stderr: "boom", timedOut: false) : removed
         case ("claude", "purge"):
             guard let home = environment["HOME"], let dir = arguments.last else { return ok() }
             let folder = "\(home)/.claude/projects/\(ClaudeProjects.folderName(for: dir))"
@@ -41,6 +48,7 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
                 return ok("Purge plan for \(dir):\n\n" + lines.joined(separator: "\n") + "\nDry run: \(lines.count - 1) item(s) would be deleted.\n")
             }
             try? FileManager.default.removeItem(atPath: folder)
+            if !leaveConfigEntry { try? FileManager.default.removeItem(atPath: "\(home)/.claude.json") }
             return ok()
         default:
             break
@@ -405,6 +413,27 @@ extension ClaudeProjectTests {
         #expect(FileInfo.exists(folder))
     }
 
+    @Test func aPurgeThatLeavesTheConfigEntryIsNotCounted() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let gonePath = "\(box.root)/.t3/worktrees/app/t3-1"
+        let folder = try project(box, cwd: gonePath)
+        _ = try box.write(".claude.json", #"{"projects":{"\#(gonePath)":{}}}"#)
+        let candidate = Candidate(
+            ruleID: ClaudeOrphanProjectsRule.ruleID, key: "orphaned", title: "Claude", detail: "",
+            category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [folder],
+            action: .commands([ClaudeOrphanProjectsRule.purgeCommand(gonePath)])
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        runner.leaveConfigEntry = true
+        let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
+        #expect(runner.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
+        #expect(result.status == .failed, "\(result.message)")
+        #expect(result.message.contains("its ~/.claude.json entry is still there after claude purge"))
+    }
+
     @Test func staleOpenFileStateIsRefreshedBeforeEachCommand() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }
@@ -564,6 +593,41 @@ extension ClaudeProjectTests {
         let result = await Shell.$runner.withValue(runner) { await executor.clean(candidate, state: .empty) }
         #expect(result.status == .failed, "\(result.message)")
         #expect(result.message.contains("also removed 1 other thread"))
+    }
+
+    @Test func everyCommandIsCheckedEvenWhenItFailsOrLeavesSomethingBehind() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let (ids, files) = try idleSessions(box, count: 3)
+        let candidate = Candidate(
+            ruleID: CodexSessionsRule.ruleID, key: "idle", title: "Codex", detail: "",
+            category: .agentData, level: .deep, risk: .review, bytes: 100, paths: files,
+            action: .commands(ids.map(CodexSessionsRule.deleteCommand))
+        )
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+
+        let partly = RecordingRunner()
+        partly.leaveFiles = true
+        let leftBehind = await Shell.$runner.withValue(partly) { await executor.clean(candidate, state: .empty) }
+        #expect(leftBehind.status == .failed, "\(leftBehind.message)")
+        #expect(leftBehind.message.contains("removed 0 of 3 sessions"))
+        #expect(leftBehind.message.contains("files still there after codex delete"))
+
+        try FileManager.default.removeItem(atPath: "\(box.root)/.codex")
+        let (fresh, freshFiles) = try idleSessions(box, count: 3)
+        let again = Candidate(
+            ruleID: CodexSessionsRule.ruleID, key: "idle", title: "Codex", detail: "",
+            category: .agentData, level: .deep, risk: .review, bytes: 100, paths: freshFiles,
+            action: .commands(fresh.map(CodexSessionsRule.deleteCommand))
+        )
+        let failing = RecordingRunner()
+        failing.failDelete = true
+        failing.alsoDelete = fresh[2]
+        let failed = await Shell.$runner.withValue(failing) { await executor.clean(again, state: .empty) }
+        #expect(failing.calls.filter { $0.arguments.first == "delete" }.count == 1)
+        #expect(failed.status == .failed, "\(failed.message)")
+        #expect(failed.message.contains("also removed 1 other thread"))
     }
 
     @Test func aMissingSchemaColumnOffersNothing() async throws {

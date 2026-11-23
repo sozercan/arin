@@ -263,6 +263,7 @@ public struct Executor: Sendable {
         var backupName: String
         var restoreTo: String?
         var otherThreads: Set<String> = []
+        var tree: Set<String> = []
     }
 
     enum PerItemCheck {
@@ -280,7 +281,7 @@ public struct Executor: Sendable {
                   let before = await CodexSessionsRule.threadIDs(codexHome: codexHome)
             else { return .refused("couldn't read Codex's session database") }
             return .ready(PerItem(backup: session.files, backupName: "Codex session \(target)", restoreTo: nil,
-                                  otherThreads: before.subtracting(session.threadIDs)))
+                                  otherThreads: before.subtracting(session.threadIDs), tree: Set(session.threadIDs)))
         case "claude":
             if let reason = await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state) { return .refused(reason) }
             if let reason = await ClaudeOrphanProjectsRule.dryRunRefusal(target, home: guardrails.home) { return .refused(reason) }
@@ -330,9 +331,7 @@ public struct Executor: Sendable {
         switch command.executable {
         case "codex":
             let codexHome = "\(guardrails.home)/.codex"
-            guard let after = await CodexSessionsRule.threadIDs(codexHome: codexHome),
-                  let left = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)
-            else {
+            guard let after = await CodexSessionsRule.threadIDs(codexHome: codexHome) else {
                 let reason = "couldn't read Codex's session database after deleting \(target)"
                 return (reason, reason)
             }
@@ -341,9 +340,20 @@ public struct Executor: Sendable {
                 let reason = "codex delete for \(target) also removed \(lost.count) other thread\(lost.count == 1 ? "" : "s")"
                 return (reason, reason)
             }
-            return (left.isEmpty ? nil : "\(target): still listed after codex delete", nil)
+            let threadsLeft = item.tree.intersection(after).count
+            if threadsLeft > 0 { return ("\(target): \(threadsLeft) of its threads still listed after codex delete", nil) }
+            let filesLeft = item.backup.filter { FileInfo.exists($0) || FileInfo.isSymlink($0) }.count
+            if filesLeft > 0 { return ("\(target): \(filesLeft) of its files still there after codex delete", nil) }
+            return (nil, nil)
         case "claude":
-            return (item.restoreTo.map(FileInfo.exists) == true ? "\(target): still there after claude purge" : nil, nil)
+            if item.restoreTo.map({ FileInfo.exists($0) || FileInfo.isSymlink($0) }) == true {
+                return ("\(target): its folder is still there after claude purge", nil)
+            }
+            switch ClaudeOrphanProjectsRule.configHasEntry(target, home: guardrails.home) {
+            case false?: return (nil, nil)
+            case true?: return ("\(target): its ~/.claude.json entry is still there after claude purge", nil)
+            case nil: return ("couldn't read ~/.claude.json after purging \(target)", "couldn't read ~/.claude.json after a purge")
+            }
         default:
             return ("refusing to run \(command.display)", nil)
         }
@@ -418,15 +428,17 @@ public struct Executor: Sendable {
             let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
             let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
                                          environment: environment, timeout: min(commandTimeout, 300))
-            guard output.ok else {
+            let check = await verify(command, item)
+            if let stop = check.stop { stopped = stop }
+            if !output.ok {
                 let tail = (output.timedOut ? "timed out" : (output.stderr.isEmpty ? output.stdout : output.stderr))
                     .trimmingCharacters(in: .whitespacesAndNewlines).suffix(200)
-                failures.append("\(command.arguments.last ?? command.display): \(tail)")
-                continue
+                failures.append(check.stop ?? "\(command.arguments.last ?? command.display): \(tail)")
+            } else if let failure = check.failure {
+                failures.append(failure)
+            } else {
+                done += 1
             }
-            let check = await verify(command, item)
-            if let failure = check.failure { failures.append(failure) } else { done += 1 }
-            if let stop = check.stop { stopped = stop }
         }
         let noun = commands.first?.executable == "codex" ? "sessions" : "projects"
         var parts = ["removed \(done) of \(commands.count) \(noun)"]
