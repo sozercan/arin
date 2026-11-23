@@ -12,6 +12,7 @@ public struct ScanOptions: Sendable {
     public var agentHistoryDays: Int?
 
     public static let minimumAgentHistoryDays = CodexSessionsRule.idleDays
+    public static let maximumAgentHistoryDays = 3650
     public static let agentHistoryDayChoices = [30, 60, 90, 180, 365]
 
     public init(
@@ -31,7 +32,7 @@ public struct ScanOptions: Sendable {
         self.fetchRemotes = fetchRemotes
         self.minimumBytes = minimumBytes
         self.keepListURL = keepListURL
-        self.agentHistoryDays = agentHistoryDays.map { max($0, Self.minimumAgentHistoryDays) }
+        self.agentHistoryDays = agentHistoryDays.map { min(max($0, Self.minimumAgentHistoryDays), Self.maximumAgentHistoryDays) }
     }
 
     public static func defaultProjectRoots(home: String) -> [String] {

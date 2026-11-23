@@ -26,7 +26,7 @@ options:
   --effort low|medium|high|xhigh  Review effort (default: low; "" = CLI default)
   --roots a,b                   Project roots to search (default: ~/projects, ~/go/src, …)
   --older-than DAYS             Agent session data: only offer Codex sessions and Claude Code data for
-                                deleted folders untouched this long (30 or more; default: 30 for Codex)
+                                deleted folders untouched this long (30 to 3650; default: 30 for Codex)
   --ids a,b                     clean/plan: exactly these candidate ids instead of the pre-selection;
                                 with --plan, only these items from the plan
   --plan FILE                   clean: run a saved plan; items that changed since are refused
@@ -88,8 +88,8 @@ struct Args {
             case "--older-than":
                 let v = try value(arg)
                 let digits = v.hasSuffix("d") ? String(v.dropLast()) : v
-                guard let n = Int(digits), n >= ScanOptions.minimumAgentHistoryDays else {
-                    throw CLIError("--older-than needs a number of days, \(ScanOptions.minimumAgentHistoryDays) or more, got \(v)")
+                guard let n = Int(digits), (ScanOptions.minimumAgentHistoryDays ... ScanOptions.maximumAgentHistoryDays).contains(n) else {
+                    throw CLIError("--older-than needs a number of days from \(ScanOptions.minimumAgentHistoryDays) to \(ScanOptions.maximumAgentHistoryDays), got \(v)")
                 }
                 olderThan = n
             case "--model": model = try value(arg)

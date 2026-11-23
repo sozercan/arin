@@ -301,6 +301,10 @@ extension ClaudeProjectTests {
         let offered = try await found(30)
         #expect(offered.map(\.title) == ["Claude Code data for deleted folders, untouched for 30+ days (1)"])
         #expect(ScanOptions(home: box.root, agentHistoryDays: 7).agentHistoryDays == 30)
+        #expect(ScanOptions(home: box.root, agentHistoryDays: Int.max).agentHistoryDays == 3650)
+        #expect(await FileInfo.hasRecentWrites(box.root, within: .greatestFiniteMagnitude))
+        #expect(await FileInfo.hasRecentWrites(box.root, within: .infinity))
+        #expect(await FileInfo.hasRecentWrites(box.root, within: .nan))
     }
 
     @Test func nestedWritesKeepAProject() async throws {
