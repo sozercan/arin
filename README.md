@@ -108,7 +108,7 @@ arin uninstall Slack --yes                 # move them to the Trash
 arin disk --warn-below 20GiB               # print a warning only when free space is low
 ```
 
-A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Pass the same `--older-than` to `clean --plan` that made the plan, or its agent session items count as changed. Run `arin --help` for every option.
+A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. `clean --plan` rescans with the `--older-than` you pass it, so pass the value that made the plan. If a different age changes which agent sessions qualify, that item is refused as changed. If it picks the same sessions, they meet both ages and the item runs. Run `arin --help` for every option.
 
 ### From your agent
 
