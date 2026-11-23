@@ -52,7 +52,7 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 | **Containers & VMs** | Docker build cache and orphaned volumes, Lima and Colima downloads |
 | **Local AI models** | Ollama and LM Studio |
 | **Tool versions** | Old Codex, Claude and Copilot CLI releases, unused mise versions, extra Rust toolchains |
-| **Agent data** | Codex sessions idle for 30 days (removed with `codex delete`), Claude Code data for folders that no longer exist (`claude purge`), Claude's Cowork VM, bloated agent databases |
+| **Agent data** | Codex sessions idle for 30 days (removed with `codex delete`), Claude Code data for folders that no longer exist (`claude purge`), bloated agent databases |
 | **System** | Stale temp folders (Go caches and DerivedData copies start as Safe; anything else as Review), Time Machine local snapshots |
 | **Everything else** | A size overview of your home folder surfaces other large folders (agent output, logs, app data) under *Unclassified* |
 

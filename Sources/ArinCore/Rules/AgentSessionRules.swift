@@ -391,6 +391,19 @@ struct AgentHistoryInsightRule: InsightRule {
             }
         }
 
+        let coworkVM = ctx.path("Library/Application Support/Claude/vm_bundles/claudevm.bundle")
+        if FileInfo.isDirectory(coworkVM) {
+            let bytes = await Size.allocated(coworkVM)
+            if bytes > gigabyte {
+                result.append(Insight(
+                    id: "claude-cowork-vm",
+                    title: "Claude's Cowork virtual machine",
+                    detail: "The Linux VM Claude's desktop app runs Cowork in: its disk, the image it came from, and a session disk that can hold files Cowork sessions left inside it. Arin doesn't remove it, since it hasn't confirmed that Claude rebuilds it cleanly. If you no longer use Cowork, quit Claude before removing it yourself.",
+                    bytes: bytes
+                ))
+            }
+        }
+
         if let insight = await claudeRetention(ctx) { result.append(insight) }
 
         if Shell.which("claude") != nil, ClaudeProjects.configDirMatches(home: ctx.home) {

@@ -194,17 +194,6 @@ public enum Catalog {
             titleForPath: { "Copilot CLI download: \(($0 as NSString).lastPathComponent)" }
         ),
         KnownPathRule(
-            id: "claude.vm-bundle",
-            name: "Claude desktop VM",
-            detail: "The Linux virtual machine Claude's desktop app runs Cowork in: a 10 GB disk, the compressed image it came from, and its session disk. Claude sets it up again the next time you use Cowork, and anything left inside the VM is lost. Claude must be quit.",
-            category: .agentData,
-            level: .deep,
-            risk: .review,
-            paths: ["Library/Application Support/Claude/vm_bundles/claudevm.bundle"],
-            blockingProcesses: ["Claude"],
-            minIdleSeconds: 3600
-        ),
-        KnownPathRule(
             id: "podman.vm-cache",
             name: "Podman VM image caches",
             detail: "Downloaded machine images. Podman re-downloads them when you create a machine.",
