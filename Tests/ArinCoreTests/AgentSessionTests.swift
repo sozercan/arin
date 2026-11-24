@@ -688,6 +688,42 @@ extension ClaudeProjectTests {
         #expect(await CodexSessionsRule.sessions(codexHome: "\(box.root)/.codex") == nil)
     }
 
+    @Test func aCodexHomeThatCantBeReadIsReportedNotHidden() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let ctx = ScanContext(options: ScanOptions(home: box.root, tmpDir: "\(box.root)/tmp", projectRoots: [], keepListURL: nil),
+                              state: .empty, now: Date())
+        func scan(_ runner: RecordingRunner = RecordingRunner()) async -> Result<[Candidate], any Error> {
+            await Shell.$runner.withValue(runner) {
+                do { return .success(try await CodexSessionsRule().discover(ctx)) } catch { return .failure(error) }
+            }
+        }
+        func failure(_ result: Result<[Candidate], any Error>) -> String? {
+            if case let .failure(error) = result { "\(error)" } else { nil }
+        }
+
+        _ = try box.mkdir(".codex")
+        #expect(try await scan().get().isEmpty)
+
+        try sqlite("\(box.root)/.codex/state_5.sqlite", """
+        CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, created_at INTEGER, updated_at INTEGER,
+          recency_at INTEGER, is_pinned INTEGER, attached_thread_parent_id TEXT);
+        CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT PRIMARY KEY, status TEXT);
+        """)
+        #expect(try await scan().get().isEmpty)
+
+        let older = RecordingRunner()
+        older.codexVersion = "codex-cli 0.160.0"
+        #expect(failure(await scan(older))?.contains("codex-cli 0.160.0 is older than 0.170.0") == true)
+
+        try Data("not a database".utf8).write(to: URL(fileURLWithPath: "\(box.root)/.codex/state_5.sqlite"))
+        #expect(failure(await scan())?.contains("Couldn't read Codex's session database (state_5.sqlite)") == true)
+    }
+
+    @Test func codexDatabaseReadsWaitWhenItIsBusy() {
+        #expect(CodexSessionsRule.readArguments == ["-readonly", "-cmd", ".timeout 5000"])
+    }
+
     @Test func deletesRunOnePerSessionPinnedToTheScannedHome() async throws {
         let box = try Sandbox()
         defer { box.cleanup() }

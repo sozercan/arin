@@ -15,6 +15,11 @@ struct CodexSessionsRule: Rule {
     }
 
     static let minimumVersion = [0, 170, 0]
+    static let readArguments = ["-readonly", "-cmd", ".timeout 5000"]
+
+    struct Unavailable: Error, CustomStringConvertible {
+        var description: String
+    }
 
     static func versionSupported(_ output: String) -> Bool {
         guard let token = output.split(whereSeparator: \.isWhitespace).last else { return false }
@@ -24,13 +29,24 @@ struct CodexSessionsRule: Rule {
     }
 
     static func installedVersionSupported(codexHome: String) async -> Bool {
+        await installedVersionRefusal(codexHome: codexHome) == nil
+    }
+
+    static func installedVersionRefusal(codexHome: String) async -> String? {
         let result = await Shell.run("codex", ["--version"], environment: ["CODEX_HOME": codexHome], timeout: 20)
-        return result.ok && versionSupported(result.stdout)
+        guard result.ok else {
+            return "Couldn't check the Codex version (`codex --version` \(result.timedOut ? "timed out" : "failed")), so its sessions weren't listed."
+        }
+        guard versionSupported(result.stdout) else {
+            let version = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(version.isEmpty ? "This Codex" : version) is older than \(minimumVersion.map(String.init).joined(separator: ".")), so its sessions weren't listed. Update Codex to clean them."
+        }
+        return nil
     }
 
     static func threadIDs(codexHome: String) async -> Set<String>? {
         guard let db = stateDatabase(codexHome: codexHome) else { return nil }
-        let result = await Shell.run("sqlite3", ["-readonly", db, "SELECT id FROM threads;"], timeout: 60)
+        let result = await Shell.run("sqlite3", readArguments + [db, "SELECT id FROM threads;"], timeout: 60)
         guard result.ok else { return nil }
         return Set(result.lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
     }
@@ -62,8 +78,11 @@ struct CodexSessionsRule: Rule {
     func discover(_ ctx: ScanContext) async throws -> [Candidate] {
         guard Shell.which("codex") != nil else { return [] }
         let codexHome = ctx.path(".codex")
-        guard await Self.installedVersionSupported(codexHome: codexHome) else { return [] }
-        guard let sessions = await Self.sessions(codexHome: codexHome) else { return [] }
+        guard let db = Self.stateDatabase(codexHome: codexHome) else { return [] }
+        if let refusal = await Self.installedVersionRefusal(codexHome: codexHome) { throw Unavailable(description: refusal) }
+        guard let sessions = await Self.sessions(codexHome: codexHome) else {
+            throw Unavailable(description: "Couldn't read Codex's session database (\((db as NSString).lastPathComponent)), so its sessions weren't listed. Scan again to retry.")
+        }
         let days = ctx.options.agentHistoryDays ?? Self.idleDays
         let idle = Self.idle(sessions, state: ctx.state, now: ctx.now, days: days)
         guard !idle.isEmpty else { return [] }
@@ -108,10 +127,10 @@ struct CodexSessionsRule: Rule {
         guard let db = stateDatabase(codexHome: codexHome) else { return nil }
         if let root, !isThreadID(root) { return nil }
         let query = treeQuery(root: root)
-        let result = await Shell.run("sqlite3", ["-readonly", "-json", db, query + ";"], timeout: 60)
+        let result = await Shell.run("sqlite3", readArguments + ["-json", db, query + ";"], timeout: 60)
         guard result.ok else { return nil }
         let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty { return root == nil ? nil : [] }
+        if text.isEmpty { return [] }
         guard let rows = try? JSONDecoder().decode([Row].self, from: Data(text.utf8)) else { return nil }
         return group(rows, codexHome: codexHome)
     }
