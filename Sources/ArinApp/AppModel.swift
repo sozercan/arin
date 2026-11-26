@@ -562,7 +562,7 @@ final class AppModel {
 
 
     func reloadKeepList() {
-        apply(KeepList.load(recording: report?.keptPaths ?? [:]))
+        apply(KeepList.load(recording: report?.keptPaths ?? [:], remoteHost: target.storageKey))
     }
 
     private func apply(_ result: Result<KeepList, any Error>) {

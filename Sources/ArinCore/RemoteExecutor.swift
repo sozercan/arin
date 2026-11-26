@@ -63,19 +63,23 @@ public struct RemoteExecutor: Sendable {
             case .success where !candidate.keepBlockers.isEmpty:
                 result = Executor.skipped(candidate, candidate.keepBlockers.joined(separator: "; "))
             case let .success(list):
-                let kept = KeptPaths(list.entries, remoteHost: host.target)
-                if let inside = Executor.targets(of: candidate).lazy.compactMap({ kept.insideOrAt($0) }).first {
-                    result = Executor.skipped(candidate, "contains \(inside.title)\(KeepList.keptBlockerSuffix)")
-                } else {
-                    do {
-                        let env = try await RemoteEnvironment.probe(transport: transport)
-                        if let expectedIdentity, env.identity != expectedIdentity {
-                            result = Executor.skipped(candidate, "SSH destination changed to \(env.identity); rescan first")
-                        } else {
-                            result = await clean(candidate, transport: transport, env: env, kept: kept)
+                switch await resolveRemoteKeptPaths(list, transport: transport) {
+                case let .failure(reason):
+                    result = Executor.skipped(candidate, reason.description)
+                case let .success(kept):
+                    if let inside = Executor.targets(of: candidate).lazy.compactMap({ kept.insideOrAt($0) }).first {
+                        result = Executor.skipped(candidate, "contains \(inside.title)\(KeepList.keptBlockerSuffix)")
+                    } else {
+                        do {
+                            let env = try await RemoteEnvironment.probe(transport: transport)
+                            if let expectedIdentity, env.identity != expectedIdentity {
+                                result = Executor.skipped(candidate, "SSH destination changed to \(env.identity); rescan first")
+                            } else {
+                                result = await clean(candidate, transport: transport, env: env, kept: kept)
+                            }
+                        } catch {
+                            result = Executor.skipped(candidate, "\(error)")
                         }
-                    } catch {
-                        result = Executor.skipped(candidate, "\(error)")
                     }
                 }
             }
@@ -434,7 +438,47 @@ public struct RemoteExecutor: Sendable {
         if let inside = kept.insideOrAt(cleanTarget) ?? kept.insideOrAt(resolvedTarget) {
             return .failure(Refusal("contains \(inside.title)\(KeepList.keptBlockerSuffix)"))
         }
-        return .success("")
+        var inline = """
+        _arin_t=$(\(resolveExpr) | head -n 1)
+        [ "$_arin_t" = \(SSHTransport.shellQuote(cleanTarget)) ] || { echo "Cache target changed" >&2; exit 78; }
+        _arin_rt=$(readlink -f -- "$_arin_t" 2>/dev/null || realpath -- "$_arin_t" 2>/dev/null)
+        [ "$_arin_rt" = \(SSHTransport.shellQuote(resolvedTarget)) ] || { echo "Cache real path changed" >&2; exit 78; }
+        """
+        if command.executable == "go", command.arguments == ["clean", "-modcache"] {
+            inline += """
+            \n[ -d "$_arin_rt/cache/download" ] && [ ! -e "$_arin_rt/.git" ] && ! find "$_arin_rt" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q . || { echo "Go modcache layout changed" >&2; exit 78; }
+            """
+        }
+        return .success(inline)
+    }
+
+    private func resolveRemoteKeptPaths(_ list: KeepList, transport: SSHTransport) async -> Result<KeptPaths, Refusal> {
+        let hostEntries = list.entries.filter { $0.remoteHost == host.target }
+        let pairs: [(id: String, path: String)] = hostEntries.flatMap { entry in
+            (entry.paths ?? []).map { (entry.id, $0) }
+        }
+        guard !pairs.isEmpty else { return .success(KeptPaths(list.entries, remoteHost: host.target)) }
+        var lines: [String] = []
+        for (idx, pair) in pairs.enumerated() {
+            let q = SSHTransport.shellQuote(pair.path)
+            lines.append("""
+            if [ -e \(q) ] || [ -L \(q) ]; then
+              _r=$(readlink -f -- \(q) 2>/dev/null || realpath -- \(q) 2>/dev/null) || exit 1
+              printf '%d\\t%s\\n' \(idx) "$_r"
+            fi
+            """)
+        }
+        let res = await transport.runScript(lines.joined(separator: "\n"), timeout: 20)
+        guard res.ok else {
+            return .failure(Refusal("couldn't verify kept paths on \(host.target); skipping cleanup"))
+        }
+        var extra: [String: [String]] = [:]
+        for line in res.lines {
+            let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let idx = Int(parts[0]), idx >= 0, idx < pairs.count, parts[1].hasPrefix("/") else { continue }
+            extra[pairs[idx].id, default: []].append(parts[1])
+        }
+        return .success(KeptPaths(list.entries, remoteHost: host.target, extraRemotePaths: extra))
     }
 
     func resolveAndValidateRemotePath(
@@ -554,7 +598,10 @@ public struct RemoteExecutor: Sendable {
                     for child in os.listdir(dir_fd):
                         if child in preserve_names:
                             continue
-                        remove_tree(dir_fd, child, root_dev)
+                        try:
+                            remove_tree(dir_fd, child, root_dev)
+                        except FileNotFoundError:
+                            continue
                 finally:
                     os.close(dir_fd)
                 if not preserve_names:
@@ -568,7 +615,7 @@ public struct RemoteExecutor: Sendable {
                 pst = os.fstat(pfd)
                 st = os.lstat(leaf, dir_fd=pfd)
                 if keep_links and stat.S_ISDIR(st.st_mode):
-                    remove_tree(pfd, leaf, st.st_dev, preserve_names=("links",))
+                    remove_tree(pfd, leaf, pst.st_dev, preserve_names=("links",))
                 else:
                     ensure_writable(pfd, pst)
                     remove_tree(pfd, leaf, pst.st_dev)

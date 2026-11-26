@@ -184,10 +184,10 @@ func chosen(_ report: ScanReport, _ args: Args) -> [Candidate]? {
     return picked
 }
 
-func printHistory(json: Bool) {
+func printHistory(json: Bool, remoteHost: String? = nil) {
     let entries = History().load()
-    let scans = History.scans(entries)
-    let cleanups = History.cleanups(entries)
+    let scans = History.scans(entries).filter { $0.remoteHost == remoteHost }
+    let cleanups = History.cleanups(entries).filter { $0.remoteHost == remoteHost }
     let growth = scans.count >= 2 ? History.growth(from: scans[scans.count - 2], to: scans[scans.count - 1]) : []
     if json {
         struct Output: Encodable {
@@ -229,7 +229,8 @@ func runKeep(_ args: Args) -> Int32 {
         try KeepList.update { list in
             for id in args.positional {
                 let key = id.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
-                if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : []) }
+                let inferredHost = args.host ?? (id.hasPrefix("remote.") ? key.split(separator: ":", maxSplits: 1).first.map(String.init) : nil)
+                if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : [], remoteHost: inferredHost) }
             }
         }
     } catch {
@@ -384,8 +385,8 @@ func main() async -> Int32 {
         eprint("unknown argument \(extra)\n\n\(usage)")
         return 2
     }
-    if args.host != nil, !["scan", "plan", "clean", "disk"].contains(args.command) {
-        eprint("--host is only supported for scan, plan, clean, and disk.")
+    if args.host != nil, !["scan", "plan", "clean", "disk", "history", "keep"].contains(args.command) {
+        eprint("--host is only supported for scan, plan, clean, disk, history, and keep.")
         return 2
     }
     if args.host != nil, args.trash {
@@ -451,7 +452,7 @@ func main() async -> Int32 {
         return runKeep(args)
 
     case "history":
-        printHistory(json: args.json)
+        printHistory(json: args.json, remoteHost: args.host)
         return 0
 
     case "skill":

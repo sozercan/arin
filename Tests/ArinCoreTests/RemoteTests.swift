@@ -55,6 +55,8 @@ import Testing
         #expect(throws: Guardrails.Violation.self) { try guardrails.check("/home/dev/.azure/tokens") }
         #expect(throws: Guardrails.Violation.self) { try guardrails.check("/etc/passwd") }
         #expect(throws: Guardrails.Violation.self) { try guardrails.check("/home/dev/mounted/cache") }
+        #expect(throws: Guardrails.Violation.self) { try guardrails.check("/home/DEV/.cache/go-build") }
+        #expect(throws: Guardrails.Violation.self) { try guardrails.check("/home/dev/Library/Messages/Attachments") }
         #expect(throws: Guardrails.Violation.self) { try guardrails.check("/tmp") }
     }
 

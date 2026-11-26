@@ -32,12 +32,12 @@ public struct Guardrails: Sendable {
         g.isRemote = true
         g.home = cleanHome
         g.allowedRoots = [cleanHome, "/tmp"]
-        g.protectedPaths = [
-            "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public",
-            ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gh", ".netrc", ".env",
-            ".gitconfig", ".bashrc", ".zshrc", ".profile", ".zshenv",
-            "Library/Keychains", "Library/Preferences",
+        let extraProtected = [
+            ".azure", ".kube", ".env", ".gitconfig", ".bashrc", ".zshrc", ".profile", ".zshenv",
         ].map { "\(cleanHome)/\($0)" }
+        for path in extraProtected where !g.protectedPaths.contains(path) {
+            g.protectedPaths.append(path)
+        }
         g.applicationRoots = []
         g.mountPoints = { mountPoints }
         return g
@@ -119,8 +119,17 @@ public struct Guardrails: Sendable {
 
     private func checkCanonical(_ path: String) throws(Violation) {
         let folded = path.lowercased()
-        guard let root = allowedRoots.first(where: { folded == $0.lowercased() || folded.hasPrefix($0.lowercased() + "/") }) else {
-            throw .outsideAllowedRoots(path)
+        let root: String
+        if isRemote {
+            guard let exactRoot = allowedRoots.first(where: { path == $0 || path.hasPrefix($0 + "/") }) else {
+                throw .outsideAllowedRoots(path)
+            }
+            root = exactRoot
+        } else {
+            guard let matched = allowedRoots.first(where: { folded == $0.lowercased() || folded.hasPrefix($0.lowercased() + "/") }) else {
+                throw .outsideAllowedRoots(path)
+            }
+            root = matched
         }
         let depth = path.dropFirst(root.count).split(separator: "/").count
         if depth < (root == home ? 2 : 1) { throw .tooShallow(path) }

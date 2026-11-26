@@ -79,10 +79,14 @@ public struct KeepList: Codable, Sendable, Equatable {
     }
 
     @discardableResult
-    public mutating func recordPaths(_ found: [String: [String]]) -> Bool {
+    public mutating func recordPaths(_ found: [String: [String]], remoteHost: String? = nil) -> Bool {
         var changed = false
         for index in entries.indices {
             guard let paths = found[entries[index].id] else { continue }
+            if let remoteHost, entries[index].remoteHost == nil {
+                entries[index].remoteHost = remoteHost
+                changed = true
+            }
             let known = entries[index].paths ?? []
             let added = paths.filter { !known.contains($0) }
             guard !added.isEmpty else { continue }
@@ -126,12 +130,12 @@ public struct KeepList: Codable, Sendable, Equatable {
         }
     }
 
-    public static func load(from url: URL = defaultURL, recording found: [String: [String]]) -> Result<KeepList, any Error> {
+    public static func load(from url: URL = defaultURL, recording found: [String: [String]], remoteHost: String? = nil) -> Result<KeepList, any Error> {
         Result {
             var list = try load(from: url)
-            guard list.recordPaths(found) else { return list }
+            guard list.recordPaths(found, remoteHost: remoteHost) else { return list }
             do {
-                return try update(at: url) { $0.recordPaths(found) }
+                return try update(at: url) { $0.recordPaths(found, remoteHost: remoteHost) }
             } catch {
                 throw StoreError("the folders that kept items cover couldn't be saved to the keep list (\(error)); nothing can be cleaned until it can be")
             }
@@ -160,11 +164,12 @@ struct KeptPaths {
     private let items: [(path: String, entry: KeepList.Entry)]
     private let isRemote: Bool
 
-    init(_ entries: [KeepList.Entry], remoteHost: String? = nil) {
+    init(_ entries: [KeepList.Entry], remoteHost: String? = nil, extraRemotePaths: [String: [String]] = [:]) {
         isRemote = remoteHost != nil
         let matching = entries.filter { $0.remoteHost == remoteHost }
         items = matching.flatMap { entry in
-            (entry.paths ?? []).map { path in
+            let allPaths = (entry.paths ?? []) + (extraRemotePaths[entry.id] ?? [])
+            return allPaths.map { path in
                 let normalized = remoteHost != nil ? (path as NSString).standardizingPath : KeepList.canonical(path)
                 return (normalized, entry)
             }

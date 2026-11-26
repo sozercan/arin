@@ -74,7 +74,7 @@ public struct RemoteScanner: Sendable {
         }
 
         let found = Dictionary(candidates.map { ($0.id, $0.paths) }, uniquingKeysWith: { first, _ in first })
-        let keep: Result<KeepList, any Error> = keepListURL.map { KeepList.load(from: $0, recording: found) }
+        let keep: Result<KeepList, any Error> = keepListURL.map { KeepList.load(from: $0, recording: found, remoteHost: host.target) }
             ?? .success(KeepList())
         if case let .failure(error) = keep { errors["Keep list"] = "\(error)" }
         let keptIDs = Set((keepListURL.flatMap { try? KeepList.load(from: $0) }?.entries ?? []).map(\.id))
