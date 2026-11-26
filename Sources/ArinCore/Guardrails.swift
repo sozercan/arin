@@ -6,6 +6,7 @@ public struct Guardrails: Sendable {
     public var protectedPaths: [String]
     public var applicationRoots: [String]
     public var mountPoints: @Sendable () -> [String]? = Guardrails.currentMountPoints
+    public var isRemote = false
 
     public init(home: String = NSHomeDirectory(), tmpDir: String = NSTemporaryDirectory()) {
         let home = Self.canonical((home as NSString).standardizingPath)
@@ -23,6 +24,23 @@ public struct Guardrails: Sendable {
             ".ssh", ".gnupg", ".aws", ".kube/config", ".config/gh", ".netrc",
         ].map { "\(home)/\($0)" }
         applicationRoots = ["/Applications", "\(home)/Applications"]
+    }
+
+    public static func remote(home: String, mountPoints: [String]?) -> Guardrails {
+        let cleanHome = (home as NSString).standardizingPath
+        var g = Guardrails(home: cleanHome, tmpDir: "/tmp")
+        g.isRemote = true
+        g.home = cleanHome
+        g.allowedRoots = [cleanHome, "/tmp"]
+        g.protectedPaths = [
+            "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public",
+            ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".config/gh", ".netrc", ".env",
+            ".gitconfig", ".bashrc", ".zshrc", ".profile", ".zshenv",
+            "Library/Keychains", "Library/Preferences",
+        ].map { "\(cleanHome)/\($0)" }
+        g.applicationRoots = []
+        g.mountPoints = { mountPoints }
+        return g
     }
 
     public enum Violation: Error, CustomStringConvertible, Equatable {
@@ -45,20 +63,30 @@ public struct Guardrails: Sendable {
 
     public func check(_ rawPath: String) throws(Violation) {
         guard rawPath.hasPrefix("/") else { throw .notAbsolute(rawPath) }
-        let path = Self.canonical((rawPath as NSString).standardizingPath)
+        let path = isRemote ? (rawPath as NSString).standardizingPath : Self.canonical((rawPath as NSString).standardizingPath)
         try checkCanonical(path)
-        let parent = (path as NSString).deletingLastPathComponent
-        let realParent = Self.canonical(URL(fileURLWithPath: parent).resolvingSymlinksInPath().path)
-        let real = (realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent)
-        if realParent != parent { try checkCanonical(real) }
-        try checkNoMount(path, real: real)
+        if !isRemote {
+            let parent = (path as NSString).deletingLastPathComponent
+            let realParent = Self.canonical(URL(fileURLWithPath: parent).resolvingSymlinksInPath().path)
+            let real = (realParent as NSString).appendingPathComponent((path as NSString).lastPathComponent)
+            if realParent != parent { try checkCanonical(real) }
+            try checkNoMount(path, real: real)
+        } else {
+            try checkNoMount(path, real: path)
+        }
     }
 
     func checkNoMount(_ path: String, real: String) throws(Violation) {
         guard let mounts = mountPoints() else { throw .mountInside(path) }
-        let targets = Set([path, real].flatMap { [$0, "/System/Volumes/Data" + $0] }.map { $0.lowercased() })
+        let targets = Set([path, real].flatMap { isRemote ? [$0] : [$0, "/System/Volumes/Data" + $0] }.map { $0.lowercased() })
+        let roots = allowedRoots.map { $0.lowercased() }
         for mount in mounts.map({ Self.canonical($0).lowercased() }) where mount != "/" {
-            if targets.contains(where: { mount == $0 || mount.hasPrefix($0 + "/") }) { throw .mountInside(path) }
+            if isRemote, roots.contains(where: { $0 == mount || $0.hasPrefix(mount + "/") }) {
+                continue
+            }
+            if targets.contains(where: { mount == $0 || mount.hasPrefix($0 + "/") || (isRemote && $0.hasPrefix(mount + "/")) }) {
+                throw .mountInside(path)
+            }
         }
     }
 
@@ -79,6 +107,7 @@ public struct Guardrails: Sendable {
 
     public func checkTarget(_ rawPath: String) throws(Violation) {
         try check(rawPath)
+        guard !isRemote else { return }
         let resolved = Self.canonical(URL(fileURLWithPath: rawPath).resolvingSymlinksInPath().path)
         if resolved != Self.canonical((rawPath as NSString).standardizingPath) {
             try check(resolved)
@@ -166,7 +195,7 @@ public struct Guardrails: Sendable {
 
     public static let allowedExecutables: Set<String> = [
         "go", "npm", "uv", "brew", "yarn", "pnpm", "xcrun", "git", "docker", "rustup", "sqlite3", "podman",
-        "tmutil", "ollama", "mise",
+        "tmutil", "ollama", "mise", "pip", "pip3", "kind",
     ]
 
     public static func allows(_ command: CommandSpec) -> Bool {
@@ -183,6 +212,10 @@ public struct Guardrails: Sendable {
             return args.count == 2 && args[0] == "rm" && isName(args[1])
         case "mise":
             return args.count == 4 && Array(args.prefix(3)) == ["prune", "--tools", "--yes"] && isName(args[3])
+        case "pip", "pip3":
+            return args == ["cache", "purge"]
+        case "kind":
+            return args.count == 4 && Array(args.prefix(3)) == ["delete", "cluster", "--name"] && isName(args[3])
         default:
             return true
         }

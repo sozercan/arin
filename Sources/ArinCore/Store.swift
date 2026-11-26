@@ -245,11 +245,13 @@ public struct ScanRecord: Codable, Sendable, Hashable {
     public var totalBytes: Int64
     public var bytesByRule: [String: Int64]
     public var labels: [String: String]
+    public var remoteHost: String?
 
     public init(_ report: ScanReport, ruleNames: [String: String] = [:]) {
         date = report.finishedAt
         freeBytes = report.disk.freeBytes
         totalBytes = report.disk.totalBytes
+        remoteHost = report.remoteHost
         var bytes: [String: Int64] = [:]
         var titles: [String: [String]] = [:]
         for candidate in report.candidates {
@@ -272,13 +274,15 @@ public struct CleanupRecord: Codable, Sendable, Hashable {
     public var estimatedBytes: Int64
     public var items: [CleanupItemResult]
     public var uninstalled: String?
+    public var remoteHost: String?
 
     public var measuredBytes: Int64 { freeAfter - freeBefore }
 
-    public init(_ report: CleanupReport, auto: Bool, uninstalled: String? = nil, date: Date = Date()) {
+    public init(_ report: CleanupReport, auto: Bool, uninstalled: String? = nil, remoteHost: String? = nil, date: Date = Date()) {
         self.date = date
         self.auto = auto
         self.uninstalled = uninstalled
+        self.remoteHost = remoteHost
         freeBefore = report.freeBefore
         freeAfter = report.freeAfter
         estimatedBytes = report.estimatedBytes
@@ -385,11 +389,15 @@ public struct CleanupPlan: Codable, Sendable {
 
     public var version: Int
     public var createdAt: Date
+    public var remoteHost: String?
+    public var remoteIdentity: String?
     public var items: [Item]
 
-    public init(_ candidates: [Candidate], now: Date = Date()) {
+    public init(_ candidates: [Candidate], remoteHost: String? = nil, remoteIdentity: String? = nil, now: Date = Date()) {
         version = 1
         createdAt = now
+        self.remoteHost = remoteHost
+        self.remoteIdentity = remoteIdentity
         items = candidates.map {
             Item(id: $0.id, title: $0.title, bytes: $0.bytes, risk: $0.effectiveRisk, action: $0.action, paths: $0.paths)
         }
