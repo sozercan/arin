@@ -361,7 +361,9 @@ public struct RemoteScanner: Sendable {
         echo "__DOCKER_BUILDX_DU__"
         _arin_timeout 12 docker --context "$ctx" buildx du --builder default 2>/dev/null || true
         echo "__DOCKER_BUILDX_LS__"
-        _arin_timeout 8 docker --context "$ctx" buildx ls --format '{{.Name}}' 2>/dev/null || true
+        if _arin_timeout 8 docker --context "$ctx" buildx ls --format '{{.Name}}' 2>/dev/null; then
+          echo "__DOCKER_BUILDX_LS_OK__=yes"
+        fi
         echo "__DOCKER_DF__"
         _arin_timeout 15 docker --context "$ctx" system df --format '{{json .}}' 2>/dev/null || echo "__DF_TIMEOUT__"
         echo "__DOCKER_VOLUMES__"
@@ -391,6 +393,7 @@ public struct RemoteScanner: Sendable {
         var infoLines: [String] = []
         var buildxDuLines: [String] = []
         var buildxLsLines: [String] = []
+        var buildxLsOK = false
         var dfLines: [String] = []
         var volumeLines: [String] = []
         var exitedCount = 0
@@ -403,6 +406,10 @@ public struct RemoteScanner: Sendable {
             }
             if line.hasPrefix("__DOCKER_ENDPOINT__=") {
                 endpoint = String(line.dropFirst("__DOCKER_ENDPOINT__=".count)).trimmingCharacters(in: .whitespaces)
+                continue
+            }
+            if line == "__DOCKER_BUILDX_LS_OK__=yes" {
+                buildxLsOK = true
                 continue
             }
             if line.hasPrefix("__DOCKER_") && line.hasSuffix("__") {
@@ -509,7 +516,7 @@ public struct RemoteScanner: Sendable {
             let volume = parts[0].trimmingCharacters(in: .whitespaces)
             let createdAt = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
             guard !volume.isEmpty, !createdAt.isEmpty else { continue }
-            let orphaned = !builders.isEmpty && DockerRule.orphanedBuildxVolume(volume, builders: builders)
+            let orphaned = buildxLsOK && !builders.isEmpty && DockerRule.orphanedBuildxVolume(volume, builders: builders)
             candidates.append(Candidate(
                 ruleID: "remote.docker.volume",
                 key: "\(host.target):\(context):\(daemonID):\(createdAt):\(volume)",

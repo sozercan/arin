@@ -145,6 +145,7 @@ import Testing
         __DOCKER_BUILDX_LS__
         default*
         dev
+        __DOCKER_BUILDX_LS_OK__=yes
         __DOCKER_DF__
         __DF_TIMEOUT__
         __DOCKER_VOLUMES__
