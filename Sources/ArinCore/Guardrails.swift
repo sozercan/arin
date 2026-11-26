@@ -8,21 +8,23 @@ public struct Guardrails: Sendable {
     public var mountPoints: @Sendable () -> [String]? = Guardrails.currentMountPoints
     public var isRemote = false
 
+    static let defaultProtectedRelativePaths = [
+        "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public", "Applications",
+        "Library/Mobile Documents", "Library/CloudStorage", "Library/Messages", "Library/Mail",
+        "Library/Photos", "Library/Keychains", "Library/Accounts", "Library/Preferences",
+        "Library/Metadata/CoreSpotlight", "Library/Application Support/MobileSync",
+        "Library/Application Support/AddressBook", "Library/Application Support/CallHistoryDB",
+        "Library/Containers/com.docker.docker", "Library/Group Containers",
+        ".ssh", ".gnupg", ".aws", ".kube/config", ".config/gh", ".netrc",
+    ]
+
     public init(home: String = NSHomeDirectory(), tmpDir: String = NSTemporaryDirectory()) {
         let home = Self.canonical((home as NSString).standardizingPath)
         self.home = home
         let tmp = Self.canonical((tmpDir as NSString).standardizingPath)
         let perUser = (tmp as NSString).deletingLastPathComponent
         allowedRoots = [home, "/private/tmp", perUser]
-        protectedPaths = [
-            "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music", "Public", "Applications",
-            "Library/Mobile Documents", "Library/CloudStorage", "Library/Messages", "Library/Mail",
-            "Library/Photos", "Library/Keychains", "Library/Accounts", "Library/Preferences",
-            "Library/Metadata/CoreSpotlight", "Library/Application Support/MobileSync",
-            "Library/Application Support/AddressBook", "Library/Application Support/CallHistoryDB",
-            "Library/Containers/com.docker.docker", "Library/Group Containers",
-            ".ssh", ".gnupg", ".aws", ".kube/config", ".config/gh", ".netrc",
-        ].map { "\(home)/\($0)" }
+        protectedPaths = Self.defaultProtectedRelativePaths.map { "\(home)/\($0)" }
         applicationRoots = ["/Applications", "\(home)/Applications"]
     }
 
@@ -32,12 +34,8 @@ public struct Guardrails: Sendable {
         g.isRemote = true
         g.home = cleanHome
         g.allowedRoots = [cleanHome, "/tmp"]
-        let extraProtected = [
-            ".azure", ".kube", ".env", ".gitconfig", ".bashrc", ".zshrc", ".profile", ".zshenv",
-        ].map { "\(cleanHome)/\($0)" }
-        for path in extraProtected where !g.protectedPaths.contains(path) {
-            g.protectedPaths.append(path)
-        }
+        let extra = [".azure", ".kube", ".env", ".gitconfig", ".bashrc", ".zshrc", ".profile", ".zshenv"]
+        g.protectedPaths = (Self.defaultProtectedRelativePaths + extra).map { "\(cleanHome)/\($0)" }
         g.applicationRoots = []
         g.mountPoints = { mountPoints }
         return g

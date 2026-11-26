@@ -425,7 +425,7 @@ public struct RemoteExecutor: Sendable {
         if command.executable == "go", command.arguments == ["clean", "-modcache"] {
             let check = """
             p=\(SSHTransport.shellQuote(resolvedTarget))
-            [ -d "$p/cache/download" ] && [ ! -e "$p/.git" ] && ! find "$p" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q .
+            [ -d "$p/cache/download" ] && [ ! -e "$p/.git" ] && _arin_extra=$(find "$p" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print 2>/dev/null) && [ -z "$_arin_extra" ]
             """
             let dedicated = await transport.runScript(check, timeout: 15)
             guard dedicated.ok else {
@@ -446,7 +446,7 @@ public struct RemoteExecutor: Sendable {
         """
         if command.executable == "go", command.arguments == ["clean", "-modcache"] {
             inline += """
-            \n[ -d "$_arin_rt/cache/download" ] && [ ! -e "$_arin_rt/.git" ] && ! find "$_arin_rt" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q . || { echo "Go modcache layout changed" >&2; exit 78; }
+            \n[ -d "$_arin_rt/cache/download" ] && [ ! -e "$_arin_rt/.git" ] && _arin_extra=$(find "$_arin_rt" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print 2>/dev/null) && [ -z "$_arin_extra" ] || { echo "Go modcache layout changed" >&2; exit 78; }
             """
         }
         return .success(inline)

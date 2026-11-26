@@ -67,6 +67,12 @@ import Testing
         #expect(throws: Guardrails.Violation.self) { try separateHome.check("/home/dev/mounted/cache") }
         #expect(throws: Guardrails.Violation.self) { try separateHome.check("/tmp/cache") }
         #expect(throws: Guardrails.Violation.self) { try separateHome.check("/tmp/cache/sub") }
+
+        let varHome = Guardrails.remote(home: "/var/lib/dev", mountPoints: ["/"])
+        try varHome.check("/var/lib/dev/.cache/go-build")
+        #expect(throws: Guardrails.Violation.self) { try varHome.check("/var/lib/dev/.ssh/id_ed25519") }
+        #expect(throws: Guardrails.Violation.self) { try varHome.check("/var/lib/dev/.aws/credentials") }
+        #expect(throws: Guardrails.Violation.self) { try varHome.check("/var/lib/dev/.gnupg/secring") }
     }
 
     @Test func failsClosedWhenRemoteMountsAreUnknown() {

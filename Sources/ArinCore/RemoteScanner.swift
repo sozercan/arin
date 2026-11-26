@@ -252,7 +252,7 @@ public struct RemoteScanner: Sendable {
             if let expr = spec.resolveExpr, let cmd = spec.nativeCommand, env.tools.contains(cmd.executable) {
                 let dedicatedCheck: String
                 if spec.id == "remote.go.mod-cache" {
-                    dedicatedCheck = "[ -d \"$p/cache/download\" ] && [ ! -e \"$p/.git\" ] && ! find \"$p\" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q ."
+                    dedicatedCheck = "[ -d \"$p/cache/download\" ] && [ ! -e \"$p/.git\" ] && _arin_extra=$(find \"$p\" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print 2>/dev/null) && [ -z \"$_arin_extra\" ]"
                 } else {
                     dedicatedCheck = "true"
                 }
