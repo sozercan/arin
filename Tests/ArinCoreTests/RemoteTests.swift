@@ -59,9 +59,12 @@ import Testing
     }
 
     @Test func allowsRemoteCachesWhenHomeIsSeparateMount() throws {
-        let separateHome = Guardrails.remote(home: "/home/dev", mountPoints: ["/", "/home", "/home/dev/mounted"])
+        let separateHome = Guardrails.remote(home: "/home/dev", mountPoints: ["/", "/home", "/home/dev/mounted", "/tmp/cache", "/var/mounted"])
         try separateHome.check("/home/dev/.cache/go-build")
+        try separateHome.check("/tmp/scratch")
         #expect(throws: Guardrails.Violation.self) { try separateHome.check("/home/dev/mounted/cache") }
+        #expect(throws: Guardrails.Violation.self) { try separateHome.check("/tmp/cache") }
+        #expect(throws: Guardrails.Violation.self) { try separateHome.check("/tmp/cache/sub") }
     }
 
     @Test func failsClosedWhenRemoteMountsAreUnknown() {
@@ -103,6 +106,7 @@ import Testing
         __ARIN_LSOF__
         p1234
         n/home/dev/.cache/go-build/00/abc
+        __ARIN_LSOF_OK__=yes
         __ARIN_END__
         """
         let env = try RemoteEnvironment.parse(sample, host: RemoteHost(target: "vm"))
@@ -208,6 +212,7 @@ import Testing
         sshd
         __ARIN_LSOF__
         n/home/dev/.bashrc
+        __ARIN_LSOF_OK__=yes
         __ARIN_END__
         """
         let runner = StubRunner { _, _, input in
@@ -254,6 +259,7 @@ import Testing
         sshd
         __ARIN_LSOF__
         n/home/dev/.bashrc
+        __ARIN_LSOF_OK__=yes
         __ARIN_END__
         """
         let runner = StubRunner { _, _, input in
@@ -300,6 +306,7 @@ import Testing
         sshd
         __ARIN_LSOF__
         n/home/dev/.bashrc
+        __ARIN_LSOF_OK__=yes
         __ARIN_END__
         """
         let runner = StubRunner { _, _, input in
@@ -309,8 +316,11 @@ import Testing
             if let input, input.contains("go env GOMODCACHE") {
                 return ShellResult(status: 0, stdout: "/mnt/shared go mod\n", stderr: "", timedOut: false)
             }
-            if let input, input.contains("docker context inspect") {
-                return ShellResult(status: 0, stdout: "ssh://other-daemon\n", stderr: "", timedOut: false)
+            if let input, input.contains("__EP__=") && input.contains("__VCREATED__=") {
+                return ShellResult(status: 0, stdout: "__EP__=ssh://other-daemon\n__ID__=daemon-1\n__VCREATED__=2026-11-01T00:00:00Z\n", stderr: "", timedOut: false)
+            }
+            if let input, input.contains("__NODES__=") {
+                return ShellResult(status: 0, stdout: "__CTX__=default\n__EP__=unix:///var/run/docker.sock\n__ID__=daemon-2\n__NODES__=abc123\n", stderr: "", timedOut: false)
             }
             if let input, input.contains("readlink -f") {
                 return ShellResult(status: 0, stdout: "/home/dev/go/pkg/mod\n", stderr: "", timedOut: false)
@@ -318,7 +328,8 @@ import Testing
             if let input, input.contains("df -Pk") {
                 return ShellResult(status: 0, stdout: "/dev/sdb1 1000000 500000 500000 50% /\n", stderr: "", timedOut: false)
             }
-            return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false)
+            Issue.record("Unexpected destructive command ran: \(input ?? "")")
+            return ShellResult(status: 1, stdout: "", stderr: "unexpected", timedOut: false)
         }
         let report = await Shell.$runner.withValue(runner) {
             let executor = RemoteExecutor(host: RemoteHost(target: "vm"), keepListURL: nil)
@@ -327,19 +338,24 @@ import Testing
                 bytes: 100, paths: ["/home/dev/go/pkg/mod"], action: .commands([CommandSpec("go", ["clean", "-modcache"])])
             )
             let dockerVol = Candidate(
-                ruleID: "remote.docker.volume", title: "Docker volume v1", detail: "", category: .containers, level: .standard, risk: .review,
+                ruleID: "remote.docker.volume", key: "vm:remote-ctx:daemon-1:2026-11-01T00:00:00Z:v1",
+                title: "Docker volume v1", detail: "", category: .containers, level: .standard, risk: .review,
                 bytes: 0, paths: [], action: .commands([CommandSpec("docker", ["--context", "remote-ctx", "volume", "rm", "v1"])])
             )
             let kindCluster = Candidate(
-                ruleID: "remote.kind.cluster", title: "kind cluster: demo", detail: "", category: .containers, level: .deep, risk: .review,
+                ruleID: "remote.kind.cluster", key: "vm:kind:default:daemon-1:abc123:demo",
+                title: "kind cluster: demo", detail: "", category: .containers, level: .deep, risk: .review,
                 bytes: 0, paths: [], action: .commands([CommandSpec("kind", ["delete", "cluster", "--name", "demo"])])
             )
             return await executor.run([goMod, dockerVol, kindCluster])
         }
         #expect(report.items.count == 3)
         #expect(report.items[0].status == .skipped)
+        #expect(report.items[0].message.contains("now targets"))
         #expect(report.items[1].status == .skipped)
+        #expect(report.items[1].message.contains("non-local endpoint"))
         #expect(report.items[2].status == .skipped)
+        #expect(report.items[2].message.contains("changed since the scan"))
     }
 
     @Test func refusesCleanupWhenRemoteHostIdentityChanges() async {
@@ -360,6 +376,7 @@ import Testing
         sshd
         __ARIN_LSOF__
         n/home/dev/.bashrc
+        __ARIN_LSOF_OK__=yes
         __ARIN_END__
         """
         let runner = StubRunner { _, _, _ in

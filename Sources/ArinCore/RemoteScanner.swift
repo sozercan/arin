@@ -80,7 +80,7 @@ public struct RemoteScanner: Sendable {
         let keptIDs = Set((keepListURL.flatMap { try? KeepList.load(from: $0) }?.entries ?? []).map(\.id))
 
         let filtered = Scanner.dedupe(candidates)
-            .applying(keep: keep)
+            .applying(keep: keep, remoteHost: host.target)
             .filter { $0.bytes >= minimumBytes || Self.sizeUnknownRules.contains($0.ruleID) }
             .sorted { $0.bytes > $1.bytes }
 
@@ -259,7 +259,7 @@ public struct RemoteScanner: Sendable {
                 block = """
                 p=$(\(expr) | head -n 1)
                 if [ -n "$p" ] && [ -e "$p" ] && \(dedicatedCheck); then
-                  sz=$(timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
+                  sz=$(_arin_timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
                   mt=$(stat -c %Y -- "$p" 2>/dev/null || stat -f %m -- "$p" 2>/dev/null || echo 0)
                   [ -n "$sz" ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$sz" "$mt" "$p"
                 fi
@@ -272,7 +272,7 @@ public struct RemoteScanner: Sendable {
                 }
                 block = """
                 { \(checks.joined(separator: "; ")); } | awk '!seen[$0]++' | while IFS= read -r p; do
-                  sz=$(timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
+                  sz=$(_arin_timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
                   mt=$(stat -c %Y -- "$p" 2>/dev/null || stat -f %m -- "$p" 2>/dev/null || echo 0)
                   [ -n "$sz" ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$sz" "$mt" "$p"
                 done
@@ -347,30 +347,30 @@ public struct RemoteScanner: Sendable {
     func scanDocker(transport: SSHTransport, env: RemoteEnvironment) async -> RuleOutput {
         guard env.tools.contains("docker") else { return RuleOutput() }
         let script = """
-        ctx=$(timeout 8 docker context show 2>/dev/null | head -n 1)
+        ctx=$(_arin_timeout 8 docker context show 2>/dev/null | head -n 1)
         echo "__DOCKER_CONTEXT__=$ctx"
         [ -n "$ctx" ] || exit 0
-        ep=$(timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+        ep=$(_arin_timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
         echo "__DOCKER_ENDPOINT__=$ep"
         case "$ep" in
           ""|unix://*) ;;
           *) exit 0 ;;
         esac
         echo "__DOCKER_INFO__"
-        timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>&1 || echo "__ERR__"
+        _arin_timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>&1 || echo "__ERR__"
         echo "__DOCKER_BUILDX_DU__"
-        timeout 12 docker --context "$ctx" buildx du --builder default 2>/dev/null || true
+        _arin_timeout 12 docker --context "$ctx" buildx du --builder default 2>/dev/null || true
         echo "__DOCKER_BUILDX_LS__"
-        timeout 8 docker --context "$ctx" buildx ls --format '{{.Name}}' 2>/dev/null || true
+        _arin_timeout 8 docker --context "$ctx" buildx ls --format '{{.Name}}' 2>/dev/null || true
         echo "__DOCKER_DF__"
-        timeout 15 docker --context "$ctx" system df --format '{{json .}}' 2>/dev/null || echo "__DF_TIMEOUT__"
+        _arin_timeout 15 docker --context "$ctx" system df --format '{{json .}}' 2>/dev/null || echo "__DF_TIMEOUT__"
         echo "__DOCKER_VOLUMES__"
-        vols=$(timeout 10 docker --context "$ctx" volume ls -q --filter dangling=true 2>/dev/null || true)
+        vols=$(_arin_timeout 10 docker --context "$ctx" volume ls -q --filter dangling=true 2>/dev/null || true)
         if [ -n "$vols" ]; then
-          printf '%s\n' "$vols" | xargs timeout 10 docker --context "$ctx" volume inspect --format '{{.Name}}	{{.CreatedAt}}' 2>/dev/null || true
+          _arin_timeout 10 docker --context "$ctx" volume inspect --format '{{.Name}}\t{{.CreatedAt}}' $vols 2>/dev/null || true
         fi
         echo "__DOCKER_EXITED__"
-        timeout 8 docker --context "$ctx" ps -a --filter status=exited --format '{{.Names}}' 2>/dev/null | wc -l
+        _arin_timeout 8 docker --context "$ctx" ps -a --filter status=exited --format '{{.Names}}' 2>/dev/null | wc -l
         """
         let res = await transport.runScript(script, timeout: 45)
         guard res.ok || !res.stdout.isEmpty else {
@@ -550,24 +550,21 @@ public struct RemoteScanner: Sendable {
         guard env.tools.contains("kind"), env.tools.contains("docker") else { return RuleOutput() }
         let script = """
         if [ -n "${DOCKER_HOST:-}" ]; then
-          case "$DOCKER_HOST" in
-            unix://*) ;;
-            *) exit 0 ;;
-          esac
+          exit 0
         fi
-        ctx=$(timeout 8 docker context show 2>/dev/null | head -n 1)
+        ctx=$(_arin_timeout 8 docker context show 2>/dev/null | head -n 1)
         [ -n "$ctx" ] || exit 0
-        ep=$(timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+        ep=$(_arin_timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
         case "$ep" in
           ""|unix://*) ;;
           *) exit 0 ;;
         esac
         echo "__KIND_CONTEXT__=$ctx"
-        did=$(timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
+        did=$(_arin_timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
         echo "__KIND_DAEMON_ID__=$did"
         [ -n "$did" ] || exit 0
-        for name in $(timeout 10 kind get clusters 2>/dev/null || true); do
-          nodes=$(timeout 8 docker --context "$ctx" ps -aq --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null | sort | paste -sd, -)
+        for name in $(_arin_timeout 10 kind get clusters 2>/dev/null || true); do
+          nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null | sort | paste -sd, -)
           [ -n "$nodes" ] && printf '%s\t%s\n' "$name" "$nodes"
         done
         """

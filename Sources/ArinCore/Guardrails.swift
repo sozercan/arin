@@ -80,7 +80,10 @@ public struct Guardrails: Sendable {
         guard let mounts = mountPoints() else { throw .mountInside(path) }
         let targets = Set([path, real].flatMap { isRemote ? [$0] : [$0, "/System/Volumes/Data" + $0] }.map { $0.lowercased() })
         let roots = allowedRoots.map { $0.lowercased() }
-        for mount in mounts.map({ Self.canonical($0).lowercased() }) where mount != "/" {
+        let normalizedMounts = mounts.map {
+            (isRemote ? ($0 as NSString).standardizingPath : Self.canonical($0)).lowercased()
+        }
+        for mount in normalizedMounts where mount != "/" {
             if isRemote, roots.contains(where: { $0 == mount || $0.hasPrefix(mount + "/") }) {
                 continue
             }

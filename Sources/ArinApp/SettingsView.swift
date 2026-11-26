@@ -119,6 +119,7 @@ struct SettingsView: View {
                             model.removeRemoteHost(host)
                         } label: { Image(systemName: "minus.circle") }
                             .buttonStyle(.borderless)
+                            .disabled(model.phase.isBusy && model.target == .remote(host))
                             .help("Remove host")
                             .accessibilityLabel("Remove \(host.displayName)")
                     }

@@ -269,6 +269,7 @@ final class AppModel {
     }
 
     func removeRemoteHost(_ host: RemoteHost) {
+        guard !phase.isBusy || target != .remote(host) else { return }
         remoteHosts.removeAll { $0.target == host.target }
         if target == .remote(host) {
             selectTarget(.local)
@@ -359,7 +360,7 @@ final class AppModel {
     }
 
     func review() async {
-        guard let agent, !phase.isBusy else { return }
+        guard !target.isRemote, let agent, !phase.isBusy else { return }
         let items = itemsNeedingReview
         guard !items.isEmpty else { return }
         editedDuringReview = []
@@ -573,7 +574,7 @@ final class AppModel {
             keepList = nil
             keepListError = "\(error)"
         }
-        candidates = candidates.applying(keep: result)
+        candidates = candidates.applying(keep: result, remoteHost: target.storageKey)
         if keepList == nil {
             selection = []
         } else {
@@ -586,8 +587,9 @@ final class AppModel {
 
     func setKept(_ id: String, title: String, paths: [String] = [], _ kept: Bool) {
         do {
+            let hostKey = target.storageKey
             try KeepList.update { list in
-                if kept { list.add(id: id, title: title, paths: paths) } else { list.remove(id: id) }
+                if kept { list.add(id: id, title: title, paths: paths, remoteHost: hostKey) } else { list.remove(id: id) }
             }
             reloadKeepList()
         } catch {

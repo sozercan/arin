@@ -63,7 +63,7 @@ public struct RemoteExecutor: Sendable {
             case .success where !candidate.keepBlockers.isEmpty:
                 result = Executor.skipped(candidate, candidate.keepBlockers.joined(separator: "; "))
             case let .success(list):
-                let kept = KeptPaths(list.entries)
+                let kept = KeptPaths(list.entries, remoteHost: host.target)
                 if let inside = Executor.targets(of: candidate).lazy.compactMap({ kept.insideOrAt($0) }).first {
                     result = Executor.skipped(candidate, "contains \(inside.title)\(KeepList.keptBlockerSuffix)")
                 } else {
@@ -72,7 +72,7 @@ public struct RemoteExecutor: Sendable {
                         if let expectedIdentity, env.identity != expectedIdentity {
                             result = Executor.skipped(candidate, "SSH destination changed to \(env.identity); rescan first")
                         } else {
-                            result = await clean(candidate, transport: transport, env: env)
+                            result = await clean(candidate, transport: transport, env: env, kept: kept)
                         }
                     } catch {
                         result = Executor.skipped(candidate, "\(error)")
@@ -83,12 +83,19 @@ public struct RemoteExecutor: Sendable {
             progress?(.finished(result))
         }
 
-        let after = await RemoteEnvironment.diskStatus(transport: transport, home: initialEnv.home).freeBytes
+        let afterStatus = await RemoteEnvironment.diskStatus(transport: transport, home: initialEnv.home)
         let cleaned = results.filter { $0.status == .cleaned || $0.status == .partial }
         let estimated = cleaned.reduce(0) { $0 + $1.estimatedBytes }
         var notes: [String] = []
-        if estimated > 512 * 1024 * 1024, Double(after - before) < Double(estimated) * 0.6 {
-            notes.append("Measured free space on \(host.displayName) changed by less than the folder estimate. Shared container layers, open unlinked files, or concurrent writes can account for the difference.")
+        let after: Int64
+        if afterStatus.totalBytes > 0 {
+            after = afterStatus.freeBytes
+            if estimated > 512 * 1024 * 1024, Double(after - before) < Double(estimated) * 0.6 {
+                notes.append("Measured free space on \(host.displayName) changed by less than the folder estimate. Shared container layers, open unlinked files, or concurrent writes can account for the difference.")
+            }
+        } else {
+            after = before
+            notes.append("Could not measure free space on \(host.displayName) after cleanup; free-space change is unavailable.")
         }
         return CleanupReport(
             items: results,
@@ -99,7 +106,7 @@ public struct RemoteExecutor: Sendable {
         )
     }
 
-    func clean(_ candidate: Candidate, transport: SSHTransport, env: RemoteEnvironment) async -> CleanupItemResult {
+    func clean(_ candidate: Candidate, transport: SSHTransport, env: RemoteEnvironment, kept: KeptPaths) async -> CleanupItemResult {
         func makeResult(_ status: CleanupItemResult.Status, _ message: String) -> CleanupItemResult {
             CleanupItemResult(
                 id: candidate.id,
@@ -126,17 +133,28 @@ public struct RemoteExecutor: Sendable {
 
         let isCommandAction: Bool
         if case .commands = candidate.action { isCommandAction = true } else { isCommandAction = false }
+        var resolvedPaths: [String] = []
         for path in Executor.targets(of: candidate) {
-            if let refusal = await validateRemoteRealPath(path, resolveLeaf: isCommandAction, transport: transport, guardrails: guardrails) {
-                return makeResult(.skipped, refusal)
+            switch await resolveAndValidateRemotePath(path, resolveLeaf: isCommandAction, transport: transport, guardrails: guardrails) {
+            case let .failure(reason):
+                return makeResult(.skipped, reason.description)
+            case let .success(resolved):
+                if let resolved {
+                    resolvedPaths.append(resolved)
+                }
             }
         }
 
+        let allCheckPaths = Array(Set(candidate.paths + resolvedPaths))
+        if let inside = allCheckPaths.lazy.compactMap({ kept.insideOrAt($0) }).first {
+            return makeResult(.skipped, "contains \(inside.title)\(KeepList.keptBlockerSuffix)")
+        }
+
         let state = env.systemState
-        if !state.openFilesKnown, !candidate.paths.isEmpty {
+        if !state.openFilesKnown, !allCheckPaths.isEmpty {
             return makeResult(.skipped, "couldn't check for open files on \(host.target) (lsof returned nothing); try again")
         }
-        let live = state.blockers(paths: candidate.paths, processes: candidate.blockingProcesses, minIdle: nil)
+        let live = state.blockers(paths: allCheckPaths, processes: candidate.blockingProcesses, minIdle: nil)
         if !live.isEmpty {
             return makeResult(.skipped, live.joined(separator: "; "))
         }
@@ -159,12 +177,18 @@ public struct RemoteExecutor: Sendable {
                 guard Guardrails.allows(command) else {
                     return makeResult(.skipped, "refusing to run \(command.display)")
                 }
-                if let refusal = await preflightRemoteCommand(command, candidate: candidate, transport: transport, env: env, guardrails: guardrails) {
-                    return makeResult(.skipped, refusal)
+                let inlineGuard: String
+                switch await preflightRemoteCommand(command, candidate: candidate, transport: transport, env: env, guardrails: guardrails, kept: kept) {
+                case let .failure(reason):
+                    return makeResult(.skipped, reason.description)
+                case let .success(guardSnippet):
+                    inlineGuard = guardSnippet
                 }
                 let joined = ([command.executable] + command.arguments).map(SSHTransport.shellQuote).joined(separator: " ")
                 let cmdLine = command.cwd.map { "cd \(SSHTransport.shellQuote($0)) && \(joined)" } ?? joined
-                let guardedScript = identityGuardScript(expected: expectedIdentity ?? env.identity) + "\n" + cmdLine
+                let guardedScript = identityGuardScript(expected: expectedIdentity ?? env.identity)
+                    + (inlineGuard.isEmpty ? "" : "\n" + inlineGuard)
+                    + "\n" + cmdLine
                 let output = await transport.runScript(guardedScript, timeout: commandTimeout)
                 if !output.ok {
                     if output.timedOut { return makeResult(.failed, "\(command.display) timed out on \(host.target)") }
@@ -178,64 +202,70 @@ public struct RemoteExecutor: Sendable {
         }
     }
 
+    struct Refusal: Error, CustomStringConvertible {
+        var description: String
+        init(_ description: String) { self.description = description }
+    }
+
     func preflightRemoteCommand(
         _ command: CommandSpec,
         candidate: Candidate,
         transport: SSHTransport,
         env: RemoteEnvironment,
-        guardrails: Guardrails
-    ) async -> String? {
+        guardrails: Guardrails,
+        kept: KeptPaths
+    ) async -> Result<String, Refusal> {
         if command.executable == "docker" {
             guard command.arguments.count >= 2, command.arguments[0] == "--context" else {
-                return "refusing docker command without a pinned --context"
+                return .failure(Refusal("refusing docker command without a pinned --context"))
             }
             let ctx = command.arguments[1]
             let prefix = "\(candidate.ruleID):\(host.target):\(ctx):"
             guard candidate.id.hasPrefix(prefix) else {
-                return "docker candidate is not bound to a scanned daemon ID on \(host.target)"
+                return .failure(Refusal("docker candidate is not bound to a scanned daemon ID on \(host.target)"))
             }
             let rest = String(candidate.id.dropFirst(prefix.count))
             guard let colonIdx = rest.lastIndex(of: ":") else {
-                return "docker candidate is missing its scanned daemon ID"
+                return .failure(Refusal("docker candidate is missing its scanned daemon ID"))
             }
             let head = String(rest[..<colonIdx])
             let scannedDaemonID: String
             let scannedCreatedAt: String?
             if candidate.ruleID == "remote.docker.volume" {
                 guard let firstSep = head.firstIndex(of: ":") else {
-                    return "docker volume candidate is missing its creation timestamp"
+                    return .failure(Refusal("docker volume candidate is missing its creation timestamp"))
                 }
                 scannedDaemonID = String(head[..<firstSep])
                 scannedCreatedAt = String(head[head.index(after: firstSep)...])
                 guard !(scannedCreatedAt ?? "").isEmpty else {
-                    return "docker volume candidate has an empty creation timestamp"
+                    return .failure(Refusal("docker volume candidate has an empty creation timestamp"))
                 }
             } else {
                 scannedDaemonID = head
                 scannedCreatedAt = nil
             }
             guard !scannedDaemonID.isEmpty else {
-                return "docker candidate has an empty daemon ID"
+                return .failure(Refusal("docker candidate has an empty daemon ID"))
             }
             let volumeCheck: String
             if let volumeName = command.arguments.last, candidate.ruleID == "remote.docker.volume" {
                 volumeCheck = """
-                vcreated=$(timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) volume inspect \(SSHTransport.shellQuote(volumeName)) --format '{{.CreatedAt}}' 2>/dev/null | head -n 1)
+                vcreated=$(_arin_timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) volume inspect \(SSHTransport.shellQuote(volumeName)) --format '{{.CreatedAt}}' 2>/dev/null | head -n 1)
                 echo "__VCREATED__=$vcreated"
                 """
             } else {
                 volumeCheck = ""
             }
             let script = """
-            ep=$(timeout 8 docker context inspect \(SSHTransport.shellQuote(ctx)) --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+            ep=$(_arin_timeout 8 docker context inspect \(SSHTransport.shellQuote(ctx)) --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
             echo "__EP__=$ep"
-            did=$(timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) info --format '{{.ID}}' 2>/dev/null | head -n 1)
+            did=$(_arin_timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) info --format '{{.ID}}' 2>/dev/null | head -n 1)
             echo "__ID__=$did"
             \(volumeCheck)
             """
             let res = await transport.runScript(script, timeout: 15)
             guard res.ok else {
-                return "couldn't verify Docker context \(ctx) on \(host.target)"
+                return .failure(Refusal("couldn't verify Docker context \(ctx) on \(host.target)"))
             }
             var endpoint = ""
             var currentDaemonID = ""
@@ -246,15 +276,27 @@ public struct RemoteExecutor: Sendable {
                 else if line.hasPrefix("__VCREATED__=") { currentCreatedAt = String(line.dropFirst("__VCREATED__=".count)) }
             }
             guard RemoteScanner.isLocalDockerEndpoint(endpoint) else {
-                return "Docker context \(ctx) on \(host.target) points to non-local endpoint \(endpoint)"
+                return .failure(Refusal("Docker context \(ctx) on \(host.target) points to non-local endpoint \(endpoint)"))
             }
             guard currentDaemonID == scannedDaemonID else {
-                return "Docker daemon for context \(ctx) on \(host.target) changed since the scan; rescan first"
+                return .failure(Refusal("Docker daemon for context \(ctx) on \(host.target) changed since the scan; rescan first"))
             }
             if let scannedCreatedAt, currentCreatedAt != scannedCreatedAt {
-                return "Docker volume on \(host.target) was recreated since the scan; rescan first"
+                return .failure(Refusal("Docker volume on \(host.target) was recreated since the scan; rescan first"))
             }
-            return nil
+            var inline = """
+            _arin_ep=$(_arin_timeout 8 docker context inspect \(SSHTransport.shellQuote(ctx)) --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+            case "$_arin_ep" in ""|unix://*) ;; *) echo "Docker endpoint changed" >&2; exit 78 ;; esac
+            _arin_did=$(_arin_timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) info --format '{{.ID}}' 2>/dev/null | head -n 1)
+            [ "$_arin_did" = \(SSHTransport.shellQuote(scannedDaemonID)) ] || { echo "Docker daemon changed" >&2; exit 78; }
+            """
+            if let scannedCreatedAt, let volumeName = command.arguments.last, candidate.ruleID == "remote.docker.volume" {
+                inline += """
+                \n_arin_vc=$(_arin_timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) volume inspect \(SSHTransport.shellQuote(volumeName)) --format '{{.CreatedAt}}' 2>/dev/null | head -n 1)
+                [ "$_arin_vc" = \(SSHTransport.shellQuote(scannedCreatedAt)) ] || { echo "Docker volume recreated" >&2; exit 78; }
+                """
+            }
+            return .success(inline)
         }
 
         if command.executable == "kind" {
@@ -262,38 +304,38 @@ public struct RemoteExecutor: Sendable {
             let clusterName = command.arguments.last ?? ""
             let suffix = ":\(clusterName)"
             guard candidate.id.hasPrefix(prefix), candidate.id.hasSuffix(suffix) else {
-                return "kind candidate is not bound to a scanned Docker daemon on \(host.target)"
+                return .failure(Refusal("kind candidate is not bound to a scanned Docker daemon on \(host.target)"))
             }
             let middle = String(candidate.id.dropFirst(prefix.count).dropLast(suffix.count))
             guard let firstSep = middle.firstIndex(of: ":"),
                   let lastSep = middle.lastIndex(of: ":"),
                   firstSep < lastSep
             else {
-                return "kind candidate is missing its scanned Docker context, daemon ID, and node IDs"
+                return .failure(Refusal("kind candidate is missing its scanned Docker context, daemon ID, and node IDs"))
             }
             let scannedCtx = String(middle[..<firstSep])
             let scannedDaemonID = String(middle[middle.index(after: firstSep) ..< lastSep])
             let scannedNodes = String(middle[middle.index(after: lastSep)...])
             guard !scannedCtx.isEmpty, !scannedDaemonID.isEmpty, !scannedNodes.isEmpty else {
-                return "kind candidate is missing its scanned Docker context, daemon ID, or node IDs"
+                return .failure(Refusal("kind candidate is missing its scanned Docker context, daemon ID, or node IDs"))
             }
             let script = """
             if [ -n "${DOCKER_HOST:-}" ]; then
               echo "__HOST__=$DOCKER_HOST"
             fi
-            ctx=$(timeout 8 docker context show 2>/dev/null | head -n 1)
+            ctx=$(_arin_timeout 8 docker context show 2>/dev/null | head -n 1)
             echo "__CTX__=$ctx"
             [ -n "$ctx" ] || exit 1
-            ep=$(timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+            ep=$(_arin_timeout 8 docker context inspect "$ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
             echo "__EP__=$ep"
-            did=$(timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
+            did=$(_arin_timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
             echo "__ID__=$did"
-            nodes=$(timeout 8 docker --context "$ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
+            nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
             echo "__NODES__=$nodes"
             """
             let res = await transport.runScript(script, timeout: 15)
             guard res.ok else {
-                return "couldn't verify local Docker daemon for kind on \(host.target)"
+                return .failure(Refusal("couldn't verify local Docker daemon for kind on \(host.target)"))
             }
             var dockerHost = ""
             var activeCtx = ""
@@ -307,22 +349,33 @@ public struct RemoteExecutor: Sendable {
                 else if line.hasPrefix("__ID__=") { currentDaemonID = String(line.dropFirst("__ID__=".count)) }
                 else if line.hasPrefix("__NODES__=") { currentNodes = String(line.dropFirst("__NODES__=".count)) }
             }
-            guard dockerHost.isEmpty || dockerHost.hasPrefix("unix://") else {
-                return "DOCKER_HOST on \(host.target) points to non-local endpoint \(dockerHost)"
+            guard dockerHost.isEmpty else {
+                return .failure(Refusal("DOCKER_HOST override is set on \(host.target); refusing kind cleanup"))
             }
             guard activeCtx == scannedCtx else {
-                return "active Docker context on \(host.target) changed from \(scannedCtx) to \(activeCtx); rescan first"
+                return .failure(Refusal("active Docker context on \(host.target) changed from \(scannedCtx) to \(activeCtx); rescan first"))
             }
             guard RemoteScanner.isLocalDockerEndpoint(endpoint) else {
-                return "Docker context \(activeCtx) on \(host.target) points to non-local endpoint \(endpoint)"
+                return .failure(Refusal("Docker context \(activeCtx) on \(host.target) points to non-local endpoint \(endpoint)"))
             }
             guard currentDaemonID == scannedDaemonID else {
-                return "Docker daemon for kind on \(host.target) changed since the scan; rescan first"
+                return .failure(Refusal("Docker daemon for kind on \(host.target) changed since the scan; rescan first"))
             }
             guard currentNodes == scannedNodes else {
-                return "kind cluster \(clusterName) on \(host.target) was recreated since the scan; rescan first"
+                return .failure(Refusal("kind cluster \(clusterName) on \(host.target) was recreated since the scan; rescan first"))
             }
-            return nil
+            let inline = """
+            [ -z "${DOCKER_HOST:-}" ] || { echo "DOCKER_HOST override set" >&2; exit 78; }
+            _arin_ctx=$(_arin_timeout 8 docker context show 2>/dev/null | head -n 1)
+            [ "$_arin_ctx" = \(SSHTransport.shellQuote(scannedCtx)) ] || { echo "Docker context changed" >&2; exit 78; }
+            _arin_ep=$(_arin_timeout 8 docker context inspect "$_arin_ctx" --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
+            case "$_arin_ep" in ""|unix://*) ;; *) echo "Docker endpoint changed" >&2; exit 78 ;; esac
+            _arin_did=$(_arin_timeout 8 docker --context "$_arin_ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
+            [ "$_arin_did" = \(SSHTransport.shellQuote(scannedDaemonID)) ] || { echo "Docker daemon changed" >&2; exit 78; }
+            _arin_nodes=$(_arin_timeout 8 docker --context "$_arin_ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
+            [ "$_arin_nodes" = \(SSHTransport.shellQuote(scannedNodes)) ] || { echo "kind cluster recreated" >&2; exit 78; }
+            """
+            return .success(inline)
         }
 
         let resolveExpr: String?
@@ -342,52 +395,54 @@ public struct RemoteExecutor: Sendable {
         default:
             resolveExpr = nil
         }
-        guard let resolveExpr else { return nil }
+        guard let resolveExpr else { return .success("") }
 
         let res = await transport.runScript(resolveExpr, timeout: 15)
         guard res.ok, let target = res.lines.first?.trimmingCharacters(in: .whitespacesAndNewlines), target.hasPrefix("/") else {
-            return "couldn't resolve effective cache directory for \(command.display) on \(host.target)"
+            return .failure(Refusal("couldn't resolve effective cache directory for \(command.display) on \(host.target)"))
         }
         let cleanTarget = (target as NSString).standardizingPath
         let scannedTargets = Set(candidate.paths.map { ($0 as NSString).standardizingPath })
         guard scannedTargets.contains(cleanTarget) else {
-            return "\(command.display) now targets \(cleanTarget) instead of the scanned cache; rescan first"
+            return .failure(Refusal("\(command.display) now targets \(cleanTarget) instead of the scanned cache; rescan first"))
         }
         do {
             try guardrails.check(cleanTarget)
         } catch {
-            return error.description
+            return .failure(Refusal(error.description))
         }
-        if let refusal = await validateRemoteRealPath(cleanTarget, resolveLeaf: true, transport: transport, guardrails: guardrails) {
-            return refusal
+        let resolvedTarget: String
+        switch await resolveAndValidateRemotePath(cleanTarget, resolveLeaf: true, transport: transport, guardrails: guardrails) {
+        case let .failure(reason):
+            return .failure(reason)
+        case let .success(real):
+            resolvedTarget = real ?? cleanTarget
         }
         if command.executable == "go", command.arguments == ["clean", "-modcache"] {
             let check = """
-            p=\(SSHTransport.shellQuote(cleanTarget))
+            p=\(SSHTransport.shellQuote(resolvedTarget))
             [ -d "$p/cache/download" ] && [ ! -e "$p/.git" ] && ! find "$p" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q .
             """
             let dedicated = await transport.runScript(check, timeout: 15)
             guard dedicated.ok else {
-                return "\(cleanTarget) does not look like a dedicated Go module cache on \(host.target)"
+                return .failure(Refusal("\(resolvedTarget) does not look like a dedicated Go module cache on \(host.target)"))
             }
         }
-        if env.systemState.isBusy(cleanTarget) {
-            return "\(cleanTarget) has open files on \(host.target)"
+        if env.systemState.isBusy(cleanTarget) || env.systemState.isBusy(resolvedTarget) {
+            return .failure(Refusal("\(resolvedTarget) has open files on \(host.target)"))
         }
-        if let url = keepListURL, let list = try? KeepList.load(from: url) {
-            if let inside = KeptPaths(list.entries).insideOrAt(cleanTarget) {
-                return "contains \(inside.title)\(KeepList.keptBlockerSuffix)"
-            }
+        if let inside = kept.insideOrAt(cleanTarget) ?? kept.insideOrAt(resolvedTarget) {
+            return .failure(Refusal("contains \(inside.title)\(KeepList.keptBlockerSuffix)"))
         }
-        return nil
+        return .success("")
     }
 
-    func validateRemoteRealPath(
+    func resolveAndValidateRemotePath(
         _ path: String,
         resolveLeaf: Bool,
         transport: SSHTransport,
         guardrails: Guardrails
-    ) async -> String? {
+    ) async -> Result<String?, Refusal> {
         let parent = (path as NSString).deletingLastPathComponent
         let base = (path as NSString).lastPathComponent
         let target = resolveLeaf ? path : parent
@@ -401,16 +456,16 @@ public struct RemoteExecutor: Sendable {
         """
         let res = await transport.runScript(script, timeout: 15)
         guard res.ok, let line = res.lines.first?.trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty else {
-            return "couldn't resolve real path for \(path) on \(host.target)"
+            return .failure(Refusal("couldn't resolve real path for \(path) on \(host.target)"))
         }
-        if line == "__MISSING__" { return nil }
+        if line == "__MISSING__" { return .success(nil) }
         let resolved = resolveLeaf ? line : (line as NSString).appendingPathComponent(base)
         do {
             try guardrails.check(resolved)
         } catch {
-            return error.description
+            return .failure(Refusal(error.description))
         }
-        return nil
+        return .success(resolved)
     }
 
     private func identityGuardScript(expected: String) -> String {
@@ -433,6 +488,17 @@ public struct RemoteExecutor: Sendable {
         env: RemoteEnvironment,
         guardrails: Guardrails
     ) async -> CleanupItemResult {
+        guard env.tools.contains("python3") else {
+            return CleanupItemResult(
+                id: candidate.id,
+                title: candidate.title,
+                status: .skipped,
+                message: "python3 is required on \(host.target) for safe no-follow deletion",
+                estimatedBytes: 0,
+                trashed: false,
+                trashedPaths: nil
+            )
+        }
         let keepLinks = candidate.ruleID == "remote.bun.cache"
         let guardPrefix = identityGuardScript(expected: expectedIdentity ?? env.identity)
         var errors: [String] = []
@@ -443,32 +509,75 @@ public struct RemoteExecutor: Sendable {
                 errors.append(error.description)
                 continue
             }
-            let quoted = SSHTransport.shellQuote(path)
-            let script: String
-            if keepLinks {
-                script = """
-                \(guardPrefix)
-                if [ -d \(quoted) ] && [ ! -L \(quoted) ]; then
-                  for entry in \(quoted)/* \(quoted)/.[!.]* \(quoted)/..?*; do
-                    [ -e "$entry" ] || [ -L "$entry" ] || continue
-                    base=$(basename "$entry")
-                    [ "$base" = "links" ] && continue
-                    chmod -R u+w "$entry" 2>/dev/null || true
-                    rm -rf -- "$entry"
-                  done
-                fi
-                """
-            } else {
-                script = """
-                \(guardPrefix)
-                if [ -L \(quoted) ]; then
-                  rm -f -- \(quoted)
-                elif [ -e \(quoted) ]; then
-                  chmod -R u+w \(quoted) 2>/dev/null || true
-                  rm -rf -- \(quoted)
-                fi
-                """
-            }
+            let script = """
+            \(guardPrefix)
+            python3 - \(SSHTransport.shellQuote(path)) \(keepLinks ? "1" : "0") <<'__ARIN_PY__'
+            import errno, os, stat, sys
+
+            target = sys.argv[1]
+            keep_links = sys.argv[2] == "1"
+
+            def open_nofollow_dir(parent_fd, name):
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                return os.open(name, flags, dir_fd=parent_fd)
+
+            def open_chain(abs_path):
+                parts = [p for p in abs_path.split("/") if p]
+                fd = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    for part in parts[:-1]:
+                        nxt = open_nofollow_dir(fd, part)
+                        os.close(fd)
+                        fd = nxt
+                    return fd, parts[-1]
+                except Exception:
+                    os.close(fd)
+                    raise
+
+            def ensure_writable(fd, st):
+                if st.st_uid == os.getuid() and (st.st_mode & 0o700) != 0o700:
+                    os.fchmod(fd, (st.st_mode & 0o7777) | 0o700)
+
+            def remove_tree(parent_fd, name, root_dev, preserve_names=()):
+                st = os.lstat(name, dir_fd=parent_fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    os.unlink(name, dir_fd=parent_fd)
+                    return
+                if st.st_dev != root_dev:
+                    raise OSError(errno.EXDEV, "refusing to cross mount boundary")
+                dir_fd = open_nofollow_dir(parent_fd, name)
+                try:
+                    dst = os.fstat(dir_fd)
+                    if dst.st_dev != root_dev:
+                        raise OSError(errno.EXDEV, "refusing to cross mount boundary")
+                    ensure_writable(dir_fd, dst)
+                    for child in os.listdir(dir_fd):
+                        if child in preserve_names:
+                            continue
+                        remove_tree(dir_fd, child, root_dev)
+                finally:
+                    os.close(dir_fd)
+                if not preserve_names:
+                    os.rmdir(name, dir_fd=parent_fd)
+
+            try:
+                pfd, leaf = open_chain(target)
+            except FileNotFoundError:
+                sys.exit(0)
+            try:
+                pst = os.fstat(pfd)
+                st = os.lstat(leaf, dir_fd=pfd)
+                if keep_links and stat.S_ISDIR(st.st_mode):
+                    remove_tree(pfd, leaf, st.st_dev, preserve_names=("links",))
+                else:
+                    ensure_writable(pfd, pst)
+                    remove_tree(pfd, leaf, pst.st_dev)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(pfd)
+            __ARIN_PY__
+            """
             let res = await transport.runScript(script, timeout: commandTimeout)
             if !res.ok {
                 let msg = res.stderr.trimmingCharacters(in: .whitespacesAndNewlines)

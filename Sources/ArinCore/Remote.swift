@@ -89,7 +89,7 @@ public struct SSHTransport: Sendable {
     }
 
     public static let pathExport =
-        "export PATH=\"/home/linuxbrew/.linuxbrew/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.nvm/versions/node/current/bin:$PATH\" LC_ALL=C NO_COLOR=1 GIT_TERMINAL_PROMPT=0 HOMEBREW_NO_AUTO_UPDATE=1; unset KIND_EXPERIMENTAL_PROVIDER"
+        "export PATH=\"/home/linuxbrew/.linuxbrew/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.nvm/versions/node/current/bin:$PATH\" LC_ALL=C NO_COLOR=1 GIT_TERMINAL_PROMPT=0 HOMEBREW_NO_AUTO_UPDATE=1; unset KIND_EXPERIMENTAL_PROVIDER\n_arin_timeout() { _t=\"$1\"; shift; if command -v timeout >/dev/null 2>&1; then timeout \"$_t\" \"$@\"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout \"$_t\" \"$@\"; elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' \"$_t\" \"$@\"; else \"$@\"; fi; }"
 
     public func sshArguments(script: String) -> [String] {
         [
@@ -186,13 +186,15 @@ public struct RemoteEnvironment: Sendable {
         if [ -r /proc/mounts ]; then
           awk '{print $2}' /proc/mounts
         else
-          mount | sed -n 's/.* on \\([^ ]*\\) .*/\\1/p'
+          mount | sed -n 's/^.* on \\(.*\\) (.*)$/\\1/p'
         fi
         echo "__ARIN_PS__"
         ps -eo comm= 2>/dev/null || ps -axww -o comm= 2>/dev/null || true
         echo "__ARIN_LSOF__"
         if command -v lsof >/dev/null 2>&1; then
-          timeout 15 lsof -n -P -w -u "$(id -u)" -Fn 2>/dev/null || true
+          if _arin_timeout 15 lsof -n -P -w -u "$(id -u)" -Fn 2>/dev/null; then
+            echo "__ARIN_LSOF_OK__=yes"
+          fi
         fi
         echo "__ARIN_END__"
         """
@@ -218,6 +220,7 @@ public struct RemoteEnvironment: Sendable {
         var sawMountsSection = false
         var processes: [String] = []
         var openPaths: [String] = []
+        var lsofOK = false
 
         for rawLine in output.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(rawLine).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
@@ -231,6 +234,8 @@ public struct RemoteEnvironment: Sendable {
                 home = String(line.dropFirst("__ARIN_HOME__=".count))
             } else if line.hasPrefix("__ARIN_UID__=") {
                 uid = String(line.dropFirst("__ARIN_UID__=".count))
+            } else if line == "__ARIN_LSOF_OK__=yes" {
+                lsofOK = true
             } else if line.hasPrefix("__ARIN_") && line.hasSuffix("__") {
                 section = line
                 if section == "__ARIN_MOUNTS__" { sawMountsSection = true }
@@ -263,7 +268,7 @@ public struct RemoteEnvironment: Sendable {
             throw RemoteProbeError("Remote host \(host.target) did not report a valid $HOME path.")
         }
         let disk = parseDfPkLine(dfLine) ?? .zero
-        let state = SystemState(processPaths: processes, openPaths: openPaths, openFilesKnown: !openPaths.isEmpty)
+        let state = SystemState(processPaths: processes, openPaths: openPaths, openFilesKnown: lsofOK && !openPaths.isEmpty)
         return RemoteEnvironment(
             host: host,
             os: os,
