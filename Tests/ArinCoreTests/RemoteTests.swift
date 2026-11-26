@@ -136,8 +136,8 @@ import Testing
         __DOCKER_DF__
         __DF_TIMEOUT__
         __DOCKER_VOLUMES__
-        buildx_buildkit_oldbuilder0_state
-        postgres-data
+        buildx_buildkit_oldbuilder0_state\t2026-11-01T00:00:00Z
+        postgres-data\t2026-11-02T00:00:00Z
         __DOCKER_EXITED__
         5
         """

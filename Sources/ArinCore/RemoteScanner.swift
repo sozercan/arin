@@ -250,9 +250,15 @@ public struct RemoteScanner: Sendable {
         for spec in Self.cacheSpecs {
             let block: String
             if let expr = spec.resolveExpr, let cmd = spec.nativeCommand, env.tools.contains(cmd.executable) {
+                let dedicatedCheck: String
+                if spec.id == "remote.go.mod-cache" {
+                    dedicatedCheck = "[ -d \"$p/cache/download\" ] && [ ! -e \"$p/.git\" ] && ! find \"$p\" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q ."
+                } else {
+                    dedicatedCheck = "true"
+                }
                 block = """
                 p=$(\(expr) | head -n 1)
-                if [ -n "$p" ] && [ -e "$p" ]; then
+                if [ -n "$p" ] && [ -e "$p" ] && \(dedicatedCheck); then
                   sz=$(timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
                   mt=$(stat -c %Y -- "$p" 2>/dev/null || stat -f %m -- "$p" 2>/dev/null || echo 0)
                   [ -n "$sz" ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$sz" "$mt" "$p"
@@ -359,7 +365,10 @@ public struct RemoteScanner: Sendable {
         echo "__DOCKER_DF__"
         timeout 15 docker --context "$ctx" system df --format '{{json .}}' 2>/dev/null || echo "__DF_TIMEOUT__"
         echo "__DOCKER_VOLUMES__"
-        timeout 10 docker --context "$ctx" volume ls -q --filter dangling=true 2>/dev/null || true
+        vols=$(timeout 10 docker --context "$ctx" volume ls -q --filter dangling=true 2>/dev/null || true)
+        if [ -n "$vols" ]; then
+          printf '%s\n' "$vols" | xargs timeout 10 docker --context "$ctx" volume inspect --format '{{.Name}}	{{.CreatedAt}}' 2>/dev/null || true
+        fi
         echo "__DOCKER_EXITED__"
         timeout 8 docker --context "$ctx" ps -a --filter status=exited --format '{{.Names}}' 2>/dev/null | wc -l
         """
@@ -495,11 +504,15 @@ public struct RemoteScanner: Sendable {
         }
 
         let builders = Set(buildxLsLines)
-        for volume in volumeLines {
+        for line in volumeLines {
+            let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
+            let volume = parts[0].trimmingCharacters(in: .whitespaces)
+            let createdAt = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+            guard !volume.isEmpty, !createdAt.isEmpty else { continue }
             let orphaned = !builders.isEmpty && DockerRule.orphanedBuildxVolume(volume, builders: builders)
             candidates.append(Candidate(
                 ruleID: "remote.docker.volume",
-                key: "\(host.target):\(context):\(daemonID):\(volume)",
+                key: "\(host.target):\(context):\(daemonID):\(createdAt):\(volume)",
                 title: "Docker volume \(volume)",
                 detail: orphaned
                     ? "BuildKit state for a buildx builder that no longer exists on \(host.displayName) (Docker context \(context))."
@@ -553,13 +566,16 @@ public struct RemoteScanner: Sendable {
         did=$(timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
         echo "__KIND_DAEMON_ID__=$did"
         [ -n "$did" ] || exit 0
-        timeout 10 kind get clusters 2>/dev/null || true
+        for name in $(timeout 10 kind get clusters 2>/dev/null || true); do
+          nodes=$(timeout 8 docker --context "$ctx" ps -aq --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null | sort | paste -sd, -)
+          [ -n "$nodes" ] && printf '%s\t%s\n' "$name" "$nodes"
+        done
         """
-        let res = await transport.runScript(script, timeout: 20)
+        let res = await transport.runScript(script, timeout: 25)
         guard res.ok else { return RuleOutput() }
         var ctx = ""
         var daemonID = ""
-        var clusters: [String] = []
+        var clusters: [(name: String, nodes: String)] = []
         for raw in res.lines {
             let line = raw.trimmingCharacters(in: .whitespaces)
             if line.hasPrefix("__KIND_CONTEXT__=") {
@@ -567,22 +583,25 @@ public struct RemoteScanner: Sendable {
             } else if line.hasPrefix("__KIND_DAEMON_ID__=") {
                 daemonID = String(line.dropFirst("__KIND_DAEMON_ID__=".count))
             } else if !line.isEmpty && !line.hasPrefix("No kind clusters") {
-                clusters.append(line)
+                let parts = line.split(separator: "\t", maxSplits: 1).map(String.init)
+                if parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty {
+                    clusters.append((parts[0], parts[1]))
+                }
             }
         }
         guard !ctx.isEmpty, !daemonID.isEmpty else { return RuleOutput() }
-        let candidates = clusters.map { name in
+        let candidates = clusters.map { cluster in
             Candidate(
                 ruleID: "remote.kind.cluster",
-                key: "\(host.target):kind:\(ctx):\(daemonID):\(name)",
-                title: "kind cluster: \(name)",
+                key: "\(host.target):kind:\(ctx):\(daemonID):\(cluster.nodes):\(cluster.name)",
+                title: "kind cluster: \(cluster.name)",
                 detail: "Local Kubernetes cluster running in Docker on \(host.displayName) (Docker context \(ctx)). Removing it deletes its node containers and images inside the node.",
                 category: .containers,
                 level: .deep,
                 risk: .review,
                 bytes: 0,
                 paths: [],
-                action: .commands([CommandSpec("kind", ["delete", "cluster", "--name", name])])
+                action: .commands([CommandSpec("kind", ["delete", "cluster", "--name", cluster.name])])
             )
         }
         return RuleOutput(candidates: candidates)

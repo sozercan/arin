@@ -198,15 +198,40 @@ public struct RemoteExecutor: Sendable {
             guard let colonIdx = rest.lastIndex(of: ":") else {
                 return "docker candidate is missing its scanned daemon ID"
             }
-            let scannedDaemonID = String(rest[..<colonIdx])
+            let head = String(rest[..<colonIdx])
+            let scannedDaemonID: String
+            let scannedCreatedAt: String?
+            if candidate.ruleID == "remote.docker.volume" {
+                guard let firstSep = head.firstIndex(of: ":") else {
+                    return "docker volume candidate is missing its creation timestamp"
+                }
+                scannedDaemonID = String(head[..<firstSep])
+                scannedCreatedAt = String(head[head.index(after: firstSep)...])
+                guard !(scannedCreatedAt ?? "").isEmpty else {
+                    return "docker volume candidate has an empty creation timestamp"
+                }
+            } else {
+                scannedDaemonID = head
+                scannedCreatedAt = nil
+            }
             guard !scannedDaemonID.isEmpty else {
                 return "docker candidate has an empty daemon ID"
+            }
+            let volumeCheck: String
+            if let volumeName = command.arguments.last, candidate.ruleID == "remote.docker.volume" {
+                volumeCheck = """
+                vcreated=$(timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) volume inspect \(SSHTransport.shellQuote(volumeName)) --format '{{.CreatedAt}}' 2>/dev/null | head -n 1)
+                echo "__VCREATED__=$vcreated"
+                """
+            } else {
+                volumeCheck = ""
             }
             let script = """
             ep=$(timeout 8 docker context inspect \(SSHTransport.shellQuote(ctx)) --format '{{.Endpoints.docker.Host}}' 2>/dev/null | head -n 1)
             echo "__EP__=$ep"
             did=$(timeout 8 docker --context \(SSHTransport.shellQuote(ctx)) info --format '{{.ID}}' 2>/dev/null | head -n 1)
             echo "__ID__=$did"
+            \(volumeCheck)
             """
             let res = await transport.runScript(script, timeout: 15)
             guard res.ok else {
@@ -214,15 +239,20 @@ public struct RemoteExecutor: Sendable {
             }
             var endpoint = ""
             var currentDaemonID = ""
+            var currentCreatedAt = ""
             for line in res.lines {
                 if line.hasPrefix("__EP__=") { endpoint = String(line.dropFirst("__EP__=".count)) }
                 else if line.hasPrefix("__ID__=") { currentDaemonID = String(line.dropFirst("__ID__=".count)) }
+                else if line.hasPrefix("__VCREATED__=") { currentCreatedAt = String(line.dropFirst("__VCREATED__=".count)) }
             }
             guard RemoteScanner.isLocalDockerEndpoint(endpoint) else {
                 return "Docker context \(ctx) on \(host.target) points to non-local endpoint \(endpoint)"
             }
             guard currentDaemonID == scannedDaemonID else {
                 return "Docker daemon for context \(ctx) on \(host.target) changed since the scan; rescan first"
+            }
+            if let scannedCreatedAt, currentCreatedAt != scannedCreatedAt {
+                return "Docker volume on \(host.target) was recreated since the scan; rescan first"
             }
             return nil
         }
@@ -235,13 +265,17 @@ public struct RemoteExecutor: Sendable {
                 return "kind candidate is not bound to a scanned Docker daemon on \(host.target)"
             }
             let middle = String(candidate.id.dropFirst(prefix.count).dropLast(suffix.count))
-            guard let sep = middle.firstIndex(of: ":") else {
-                return "kind candidate is missing its scanned Docker context and daemon ID"
+            guard let firstSep = middle.firstIndex(of: ":"),
+                  let lastSep = middle.lastIndex(of: ":"),
+                  firstSep < lastSep
+            else {
+                return "kind candidate is missing its scanned Docker context, daemon ID, and node IDs"
             }
-            let scannedCtx = String(middle[..<sep])
-            let scannedDaemonID = String(middle[middle.index(after: sep)...])
-            guard !scannedCtx.isEmpty, !scannedDaemonID.isEmpty else {
-                return "kind candidate is missing its scanned Docker context or daemon ID"
+            let scannedCtx = String(middle[..<firstSep])
+            let scannedDaemonID = String(middle[middle.index(after: firstSep) ..< lastSep])
+            let scannedNodes = String(middle[middle.index(after: lastSep)...])
+            guard !scannedCtx.isEmpty, !scannedDaemonID.isEmpty, !scannedNodes.isEmpty else {
+                return "kind candidate is missing its scanned Docker context, daemon ID, or node IDs"
             }
             let script = """
             if [ -n "${DOCKER_HOST:-}" ]; then
@@ -254,6 +288,8 @@ public struct RemoteExecutor: Sendable {
             echo "__EP__=$ep"
             did=$(timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
             echo "__ID__=$did"
+            nodes=$(timeout 8 docker --context "$ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
+            echo "__NODES__=$nodes"
             """
             let res = await transport.runScript(script, timeout: 15)
             guard res.ok else {
@@ -263,11 +299,13 @@ public struct RemoteExecutor: Sendable {
             var activeCtx = ""
             var endpoint = ""
             var currentDaemonID = ""
+            var currentNodes = ""
             for line in res.lines {
                 if line.hasPrefix("__HOST__=") { dockerHost = String(line.dropFirst("__HOST__=".count)) }
                 else if line.hasPrefix("__CTX__=") { activeCtx = String(line.dropFirst("__CTX__=".count)) }
                 else if line.hasPrefix("__EP__=") { endpoint = String(line.dropFirst("__EP__=".count)) }
                 else if line.hasPrefix("__ID__=") { currentDaemonID = String(line.dropFirst("__ID__=".count)) }
+                else if line.hasPrefix("__NODES__=") { currentNodes = String(line.dropFirst("__NODES__=".count)) }
             }
             guard dockerHost.isEmpty || dockerHost.hasPrefix("unix://") else {
                 return "DOCKER_HOST on \(host.target) points to non-local endpoint \(dockerHost)"
@@ -280,6 +318,9 @@ public struct RemoteExecutor: Sendable {
             }
             guard currentDaemonID == scannedDaemonID else {
                 return "Docker daemon for kind on \(host.target) changed since the scan; rescan first"
+            }
+            guard currentNodes == scannedNodes else {
+                return "kind cluster \(clusterName) on \(host.target) was recreated since the scan; rescan first"
             }
             return nil
         }
@@ -319,6 +360,16 @@ public struct RemoteExecutor: Sendable {
         }
         if let refusal = await validateRemoteRealPath(cleanTarget, resolveLeaf: true, transport: transport, guardrails: guardrails) {
             return refusal
+        }
+        if command.executable == "go", command.arguments == ["clean", "-modcache"] {
+            let check = """
+            p=\(SSHTransport.shellQuote(cleanTarget))
+            [ -d "$p/cache/download" ] && [ ! -e "$p/.git" ] && ! find "$p" -maxdepth 1 -mindepth 1 \\( ! -type d -o \\( ! -name cache ! -name '*.*' \\) \\) -print -quit 2>/dev/null | grep -q .
+            """
+            let dedicated = await transport.runScript(check, timeout: 15)
+            guard dedicated.ok else {
+                return "\(cleanTarget) does not look like a dedicated Go module cache on \(host.target)"
+            }
         }
         if env.systemState.isBusy(cleanTarget) {
             return "\(cleanTarget) has open files on \(host.target)"
