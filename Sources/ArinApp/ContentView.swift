@@ -15,12 +15,10 @@ struct ContentView: View {
                     HistoryView().statusBar(model)
                 } else if model.sidebar == .apps {
                     AppsView()
-                } else if model.report == nil, case let .inbox(box) = model.sidebar, box != .review {
-                    PendingMailbox(box: box)
                 } else if model.report == nil {
                     WelcomeView()
-                } else if case let .inbox(box) = model.sidebar {
-                    InboxView(box: box).statusBar(model)
+                } else if model.sidebar == .overview || model.sidebar == nil {
+                    OverviewView()
                 } else if model.sidebar == .insights {
                     InsightsView().statusBar(model)
                 } else if model.sidebar == .map {
@@ -70,10 +68,10 @@ private struct Sidebar: View {
                     .padding(.vertical, 6)
                     .selectionDisabled()
             }
-            Section("Inbox") {
-                ForEach(AppModel.Mailbox.allCases, id: \.self) { box in
-                    mailbox(box)
-                }
+            Section {
+                Label("Overview", systemImage: "gauge.with.dots.needle.33percent")
+                    .badge(overviewBadge)
+                    .tag(AppModel.SidebarItem.overview)
             }
             if model.report != nil {
                 Section("Browse") {
@@ -100,24 +98,10 @@ private struct Sidebar: View {
         }
     }
 
-    private func mailbox(_ box: AppModel.Mailbox) -> some View {
-        Label(box.title, systemImage: box.symbol)
-            .badge(badge(for: box))
-            .tag(AppModel.SidebarItem.inbox(box))
-    }
-
-    private func badge(for box: AppModel.Mailbox) -> Text? {
+    private var overviewBadge: Text? {
         guard model.report != nil else { return nil }
-        switch box {
-        case .review:
-            let count = model.unreadCount
-            return count > 0 ? Text("\(count)") : nil
-        case .safe:
-            return Text(model.candidates(in: .safe).dedupedBytes.formattedBytes).monospacedDigit()
-        case .kept:
-            let count = model.candidates(in: .kept).count
-            return count > 0 ? Text("\(count)") : nil
-        }
+        let safe = model.candidates(in: .safe).dedupedBytes
+        return safe > 0 ? Text(safe.formattedBytes).monospacedDigit() : nil
     }
 
     private func row(_ item: AppModel.SidebarItem, _ title: String, _ symbol: String, _ bytes: Int64) -> some View {
@@ -280,7 +264,7 @@ private struct WelcomeView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .card(padding: 0)
         .accessibilityLabel("Step \(number): \(title). \(text)")
     }
 }
@@ -289,27 +273,38 @@ private struct InsightsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        List {
-            if let report = model.report {
-                ForEach(report.insights) { insight in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Label(insight.title, systemImage: "lightbulb").font(.headline)
-                            Spacer()
-                            if let bytes = insight.bytes { Text(bytes.formattedBytes).foregroundStyle(.secondary) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let report = model.report {
+                    ForEach(report.insights) { insight in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Label(insight.title, systemImage: "lightbulb").font(.headline)
+                                Spacer()
+                                if let bytes = insight.bytes {
+                                    Text(bytes.formattedBytes).foregroundStyle(.secondary).monospacedDigit()
+                                }
+                            }
+                            Text(insight.detail)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Text(insight.detail).foregroundStyle(.secondary)
+                        .card()
                     }
-                    .padding(.vertical, 6)
-                }
-                ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(name, systemImage: "exclamationmark.triangle").font(.headline)
-                        Text(error).foregroundStyle(.secondary)
+                    ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(name, systemImage: "exclamationmark.triangle").font(.headline)
+                            Text(error)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .card()
                     }
-                    .padding(.vertical, 6)
                 }
             }
+            .padding(28)
+            .frame(maxWidth: 1080, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Insights")
     }

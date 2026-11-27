@@ -179,20 +179,20 @@ public struct Scanner: Sendable {
 }
 
 public extension Collection<Candidate> {
-    var dedupedBytes: Int64 {
+    var outermost: [Candidate] {
         let paths = Set(flatMap(\.paths))
-        var total: Int64 = 0
         var countedPathless = Set<String>()
-        for candidate in self {
+        return filter { candidate in
             if candidate.paths.isEmpty {
-                if countedPathless.insert(candidate.id).inserted { total += candidate.bytes }
-                continue
+                return countedPathless.insert(candidate.id).inserted
             }
-            let nested = candidate.paths.allSatisfy { path in
+            return !candidate.paths.allSatisfy { path in
                 paths.contains { other in other != path && path.hasPrefix(other + "/") }
             }
-            if !nested { total += candidate.bytes }
         }
-        return total
+    }
+
+    var dedupedBytes: Int64 {
+        outermost.reduce(0) { $0 + $1.bytes }
     }
 }

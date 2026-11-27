@@ -64,22 +64,21 @@ private struct ArinCommands: Commands {
         }
 
         CommandGroup(before: .sidebar) {
-            ForEach(Array(AppModel.Mailbox.allCases.enumerated()), id: \.element) { index, box in
-                Button(box.title) { model.sidebar = .inbox(box) }
-                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")))
-            }
+            Button("Overview") { model.sidebar = .overview }
+                .keyboardShortcut("1")
             Button("All Items") { model.sidebar = .all }
-                .keyboardShortcut("4")
+                .keyboardShortcut("2")
             Button("Space Map") { model.sidebar = .map }
-                .keyboardShortcut("5")
+                .keyboardShortcut("3")
                 .disabled(model.report == nil)
             Button("Insights") { model.sidebar = .insights }
-                .keyboardShortcut("6")
+                .keyboardShortcut("4")
                 .disabled(model.report.map { $0.insights.isEmpty && $0.ruleErrors.isEmpty } ?? true)
             Button("History") { model.sidebar = .history }
-                .keyboardShortcut("7")
+                .keyboardShortcut("5")
             Button("Applications") { model.sidebar = .apps }
-                .keyboardShortcut("8")
+                .keyboardShortcut("6")
+                .disabled(model.target.isRemote)
             Divider()
             Button(model.showingInspector ? "Hide Inspector" : "Show Inspector") { model.showingInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])

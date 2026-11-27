@@ -6,38 +6,48 @@ struct HistoryView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let cleanups = model.cleanupRecords.reversed()
-        List {
-            Section("What grows back") {
+        let cleanups = Array(model.cleanupRecords.reversed())
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("What grows back").font(.headline)
+                    if model.scanRecords.count >= 2 {
+                        let strata = Strata(scans: Array(model.scanRecords.suffix(60)), cleanups: model.cleanupRecords)
+                        StrataChart(strata: strata)
+                            .frame(height: 220)
+                            .padding(.vertical, 6)
+                        RegrowthRows(strata: strata)
+                    } else {
+                        Text("Scan again later to see what grows back between scans.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .card()
                 if model.scanRecords.count >= 2 {
-                    let strata = Strata(scans: Array(model.scanRecords.suffix(60)), cleanups: model.cleanupRecords)
-                    StrataChart(strata: strata)
-                        .frame(height: 220)
-                        .padding(.vertical, 6)
-                    RegrowthRows(strata: strata)
-                } else {
-                    Text("Scan again later to see what grows back between scans.")
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Free space at each scan").font(.headline)
+                        FreeSpaceChart(scans: Array(model.scanRecords.suffix(60)))
+                            .frame(height: 160)
+                            .padding(.vertical, 6)
+                    }
+                    .card()
                 }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Cleanups").font(.headline)
+                    if cleanups.isEmpty {
+                        Text("No cleanups yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach(Array(cleanups.enumerated()), id: \.offset) { index, record in
+                        if index > 0 { Divider() }
+                        CleanupRecordRow(record: record)
+                    }
+                }
+                .card()
             }
-            if model.scanRecords.count >= 2 {
-                Section("Free space at each scan") {
-                    FreeSpaceChart(scans: Array(model.scanRecords.suffix(60)))
-                        .frame(height: 160)
-                        .padding(.vertical, 6)
-                }
-            }
-
-            Section("Cleanups") {
-                if cleanups.isEmpty {
-                    Text("No cleanups yet.").foregroundStyle(.secondary)
-                }
-                ForEach(Array(cleanups.enumerated()), id: \.offset) { _, record in
-                    CleanupRecordRow(record: record)
-                }
-            }
+            .padding(28)
+            .frame(maxWidth: 1080, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
-        .listStyle(.inset)
         .navigationTitle("History")
     }
 }

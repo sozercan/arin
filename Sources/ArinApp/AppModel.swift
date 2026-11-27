@@ -27,28 +27,20 @@ final class AppModel {
         }
     }
 
-    enum Mailbox: String, CaseIterable, Hashable {
+    enum Bucket: String, CaseIterable, Hashable {
         case review, safe, kept
 
         var title: String {
             switch self {
-            case .review: "Needs a Look"
-            case .safe: "Safe to Clean"
+            case .review: "Needs a look"
+            case .safe: "Safe"
             case .kept: "Kept"
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .review: "tray.full"
-            case .safe: "checkmark.seal"
-            case .kept: "lock"
             }
         }
     }
 
     enum SidebarItem: Hashable {
-        case inbox(Mailbox)
+        case overview
         case all
         case map
         case insights
@@ -66,8 +58,7 @@ final class AppModel {
     var candidates: [Candidate] = []
     var selection = Set<String>()
     var phase = Phase.idle
-    var sidebar: SidebarItem? = .inbox(.review)
-    var openedIDs = Set<String>()
+    var sidebar: SidebarItem? = .overview
     var pendingClean: Set<String>?
     var lastCleanup: CleanupReport?
     var lastCleanupTitle: String?
@@ -206,22 +197,18 @@ final class AppModel {
     func candidates(for item: SidebarItem?) -> [Candidate] {
         switch item {
         case .all, nil: candidates
-        case let .inbox(box): candidates(in: box)
+        case .overview: candidates
         case .map, .insights, .history, .apps: []
         }
     }
 
-    func mailbox(of candidate: Candidate) -> Mailbox {
+    func bucket(of candidate: Candidate) -> Bucket {
         if candidate.effectiveRisk == .keep { return .kept }
         return candidate.isDefaultSelected(at: level) ? .safe : .review
     }
 
-    func candidates(in box: Mailbox) -> [Candidate] {
-        candidates.filter { mailbox(of: $0) == box }.sorted { $0.bytes > $1.bytes }
-    }
-
-    var unreadCount: Int {
-        candidates(in: .review).filter { !openedIDs.contains($0.id) }.count
+    func candidates(in bucket: Bucket) -> [Candidate] {
+        candidates.filter { self.bucket(of: $0) == bucket }.sorted { $0.bytes > $1.bytes }
     }
 
     func confirmClean(_ items: [Candidate]) {
@@ -243,7 +230,7 @@ final class AppModel {
     var sidebarTitle: String {
         switch sidebar {
         case .all, nil: "All Items"
-        case let .inbox(box): box.title
+        case .overview: target.displayName
         case .map: "Space Map"
         case .insights: "Insights"
         case .history: "History"
@@ -299,9 +286,8 @@ final class AppModel {
         candidates = []
         selection = []
         lastReview = nil
-        openedIDs = []
         if sidebar == .apps && newTarget.isRemote {
-            sidebar = .inbox(.review)
+            sidebar = .overview
         }
         if newTarget.isRemote {
             disk = .zero
@@ -402,7 +388,6 @@ final class AppModel {
         })
         self.report = report
         lastReview = nil
-        openedIDs = []
         candidates = report.candidates.applying(previous)
         disk = report.disk
         reloadKeepList()
