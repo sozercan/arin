@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public struct RemoteHost: Codable, Sendable, Hashable, Identifiable {
@@ -82,25 +83,96 @@ public enum SSHConfig {
 public struct SSHTransport: Sendable {
     public var host: RemoteHost
     public var connectTimeoutSeconds: Int
+    public var controlPath: String?
 
-    public init(host: RemoteHost, connectTimeoutSeconds: Int = 10) {
+    public init(
+        host: RemoteHost,
+        connectTimeoutSeconds: Int = 10,
+        controlPath: String? = nil
+    ) {
         self.host = host
         self.connectTimeoutSeconds = connectTimeoutSeconds
+        self.controlPath = controlPath ?? SSHTransport.defaultControlPath(for: host.target)
+    }
+
+    public init(
+        host: RemoteHost,
+        connectTimeoutSeconds: Int = 10,
+        multiplexing: Bool
+    ) {
+        self.host = host
+        self.connectTimeoutSeconds = connectTimeoutSeconds
+        self.controlPath = multiplexing ? SSHTransport.defaultControlPath(for: host.target) : nil
+    }
+
+    public static func defaultControlPath(for target: String) -> String? {
+        let tag = targetHashPrefix(target)
+        let candidates: [URL] = [
+            FileManager.default.temporaryDirectory.appendingPathComponent("arin-ssh", isDirectory: true),
+            URL(fileURLWithPath: "/tmp/arin-ssh-\(getuid())", isDirectory: true),
+        ]
+        for dir in candidates {
+            let pattern = dir.appendingPathComponent("m-\(tag)-%C").path
+            guard pattern.utf8.count <= 60 else { continue }
+            guard ensurePrivateSocketDirectory(dir) else { continue }
+            return pattern
+        }
+        return nil
+    }
+
+    static func targetHashPrefix(_ target: String) -> String {
+        let digest = SHA256.hash(data: Data(target.utf8))
+        return digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func ensurePrivateSocketDirectory(_ dir: URL) -> Bool {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dir.path) {
+            do {
+                try fm.createDirectory(
+                    at: dir,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+            } catch {
+                return false
+            }
+        }
+        var st = stat()
+        guard lstat(dir.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFDIR,
+              st.st_uid == getuid()
+        else { return false }
+        if (st.st_mode & 0o777) != 0o700 {
+            guard chmod(dir.path, 0o700) == 0 else { return false }
+        }
+        return true
     }
 
     public static let pathExport =
         "export PATH=\"/home/linuxbrew/.linuxbrew/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.nvm/versions/node/current/bin:$PATH\" LC_ALL=C NO_COLOR=1 GIT_TERMINAL_PROMPT=0 HOMEBREW_NO_AUTO_UPDATE=1; unset KIND_EXPERIMENTAL_PROVIDER\n_arin_timeout() { _t=\"$1\"; shift; if command -v timeout >/dev/null 2>&1; then timeout \"$_t\" \"$@\"; elif command -v gtimeout >/dev/null 2>&1; then gtimeout \"$_t\" \"$@\"; elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' \"$_t\" \"$@\"; else \"$@\"; fi; }"
 
     public func sshArguments(script: String) -> [String] {
-        [
+        var args = [
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=\(connectTimeoutSeconds)",
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=3",
+            "-C",
+        ]
+        if let controlPath, !controlPath.isEmpty {
+            args += [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=120",
+            ]
+        }
+        args += [
             "--",
             host.target,
             "sh -s",
         ]
+        return args
     }
 
     public func runScript(_ script: String, timeout: TimeInterval = 60) async -> ShellResult {
@@ -177,7 +249,7 @@ public struct RemoteEnvironment: Sendable {
         echo "__ARIN_DF__"
         df -Pk "$HOME" 2>/dev/null | tail -n 1
         echo "__ARIN_TOOLS__"
-        for t in docker podman brew cargo go npm pnpm yarn bun pip pip3 uv apt journalctl kind kubectl helm rustup mise ollama git python3 lsof; do
+        for t in docker podman brew cargo go npm pnpm yarn bun pip pip3 uv apt dnf pacman zypper snap flatpak coredumpctl journalctl kind kubectl helm rustup mise ollama git python3 lsof; do
           command -v "$t" >/dev/null 2>&1 && echo "$t"
         done
         echo "__ARIN_SUDO__"

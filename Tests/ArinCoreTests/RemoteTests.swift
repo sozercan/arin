@@ -36,6 +36,26 @@ import Testing
         #expect(SSHTransport.shellQuote("simple") == "'simple'")
         #expect(SSHTransport.shellQuote("a'b") == "'a'\\''b'")
     }
+
+    @Test func buildsMultiplexedSSHArguments() {
+        let withMux = SSHTransport(host: RemoteHost(target: "vm"), controlPath: "/tmp/arin-ssh/m-%C")
+        let args = withMux.sshArguments(script: "true")
+        #expect(args.contains("-C"))
+        #expect(args.contains("ControlMaster=auto"))
+        #expect(args.contains("ControlPath=/tmp/arin-ssh/m-%C"))
+        #expect(args.contains("ControlPersist=120"))
+
+        let withoutMux = SSHTransport(host: RemoteHost(target: "vm"), multiplexing: false)
+        let plainArgs = withoutMux.sshArguments(script: "true")
+        #expect(plainArgs.contains("-C"))
+        #expect(!plainArgs.contains("ControlMaster=auto"))
+
+        let first = SSHTransport.defaultControlPath(for: "vm-a")
+        let second = SSHTransport.defaultControlPath(for: "vm-b")
+        #expect(first != nil)
+        #expect(second != nil)
+        #expect(first != second)
+    }
 }
 
 @Suite struct RemoteGuardrailTests {
@@ -190,6 +210,42 @@ import Testing
         let parsed = RemoteScanner.parseCacheMeasurements(sample)
         #expect(parsed["remote.go.build-cache"]?.first?.bytes == Int64(52_428_800) * 1024)
         #expect(parsed["remote.pip.cache"]?.first?.path == "/home/dev/.cache/pip")
+    }
+
+    @Test func parsesLinuxSystemInsights() {
+        let sample = """
+        __JOURNAL__
+        Archived and active journals take up 1.2G in the file system.
+        __APT__
+        204800
+        __DNF__
+        153600
+        __PACMAN__
+        51200
+        __ZYPPER__
+        120000
+        __SNAP__
+        6
+        911176
+        __COREDUMPS__
+        307200
+        """
+        let insights = RemoteScanner.parseSystemInsights(sample, host: RemoteHost(target: "vm"))
+        let ids = Set(insights.map(\.id))
+        #expect(ids == [
+            "remote-journald",
+            "remote-apt-cache",
+            "remote-dnf-cache",
+            "remote-zypper-cache",
+            "remote-snap-revisions",
+            "remote-coredumps",
+        ])
+        let journal = insights.first { $0.id == "remote-journald" }
+        #expect(journal?.detail.contains("SystemMaxUse=200M") == true)
+        let snap = insights.first { $0.id == "remote-snap-revisions" }
+        #expect(snap?.title.contains("6 disabled Snap revision(s)") == true)
+        #expect(snap?.detail.contains("refresh.retain=2") == true)
+        #expect(snap?.bytes == Int64(911_176) * 1024)
     }
 }
 

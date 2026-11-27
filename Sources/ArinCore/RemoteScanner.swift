@@ -653,15 +653,46 @@ public struct RemoteScanner: Sendable {
         if env.tools.contains("apt") {
             script += "echo \"__APT__\"\ndu -sk /var/cache/apt/archives 2>/dev/null | awk '{print $1}'\n"
         }
+        if env.tools.contains("dnf") {
+            script += "echo \"__DNF__\"\ndu -sk /var/cache/dnf 2>/dev/null | awk '{print $1}'\n"
+        }
+        if env.tools.contains("pacman") {
+            script += "echo \"__PACMAN__\"\ndu -sk /var/cache/pacman/pkg 2>/dev/null | awk '{print $1}'\n"
+        }
+        if env.tools.contains("zypper") {
+            script += "echo \"__ZYPPER__\"\ndu -sk /var/cache/zypp/packages 2>/dev/null | awk '{print $1}'\n"
+        }
+        if env.tools.contains("snap") {
+            script += """
+            echo "__SNAP__"
+            _arin_timeout 10 snap list --all 2>/dev/null | awk '/disabled/{c++} END{print c+0}'
+            du -sk /var/lib/snapd/snaps 2>/dev/null | awk '{print $1}'
+            
+            """
+        }
+        if env.os == "Linux" {
+            script += """
+            echo "__COREDUMPS__"
+            du -sk /var/lib/systemd/coredump /var/crash 2>/dev/null | awk '{s+=$1} END{print s+0}'
+            
+            """
+        }
         guard !script.isEmpty else { return [] }
         let res = await transport.runScript(script, timeout: 15)
         guard res.ok else { return [] }
+        return Self.parseSystemInsights(res.stdout, host: host)
+    }
 
+    static func parseSystemInsights(_ stdout: String, host: RemoteHost) -> [Insight] {
         var insights: [Insight] = []
         var section = ""
-        for raw in res.stdout.split(separator: "\n", omittingEmptySubsequences: false) {
+        var snapLines: [String] = []
+        let headers: Set<String> = [
+            "__JOURNAL__", "__APT__", "__DNF__", "__PACMAN__", "__ZYPPER__", "__SNAP__", "__COREDUMPS__",
+        ]
+        for raw in stdout.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(raw).trimmingCharacters(in: CharacterSet(charactersIn: "\r\n "))
-            if line == "__JOURNAL__" || line == "__APT__" {
+            if headers.contains(line) {
                 section = line
                 continue
             }
@@ -674,7 +705,7 @@ public struct RemoteScanner: Sendable {
                     insights.append(Insight(
                         id: "remote-journald",
                         title: "Systemd journal logs on \(host.displayName)",
-                        detail: "Systemd journals use \(bytes.formattedBytes). Trim them on the host with `sudo journalctl --vacuum-size=200M`.",
+                        detail: "Systemd journals use \(bytes.formattedBytes). Trim them with `sudo journalctl --vacuum-size=200M`, or cap regrowth with `SystemMaxUse=200M` in `/etc/systemd/journald.conf`.",
                         bytes: bytes
                     ))
                 }
@@ -688,9 +719,61 @@ public struct RemoteScanner: Sendable {
                         bytes: bytes
                     ))
                 }
+            case "__DNF__":
+                if let kb = Int64(line), kb * 1024 >= 100 * 1024 * 1024 {
+                    let bytes = kb * 1024
+                    insights.append(Insight(
+                        id: "remote-dnf-cache",
+                        title: "DNF package cache on \(host.displayName)",
+                        detail: "Cached RPM packages in `/var/cache/dnf`. Clear on the host with `sudo dnf clean all`.",
+                        bytes: bytes
+                    ))
+                }
+            case "__PACMAN__":
+                if let kb = Int64(line), kb * 1024 >= 100 * 1024 * 1024 {
+                    let bytes = kb * 1024
+                    insights.append(Insight(
+                        id: "remote-pacman-cache",
+                        title: "Pacman package cache on \(host.displayName)",
+                        detail: "Cached packages in `/var/cache/pacman/pkg`. Trim old versions on the host with `sudo paccache -r`.",
+                        bytes: bytes
+                    ))
+                }
+            case "__ZYPPER__":
+                if let kb = Int64(line), kb * 1024 >= 100 * 1024 * 1024 {
+                    let bytes = kb * 1024
+                    insights.append(Insight(
+                        id: "remote-zypper-cache",
+                        title: "Zypper package cache on \(host.displayName)",
+                        detail: "Cached packages in `/var/cache/zypp/packages`. Clear on the host with `sudo zypper clean --all`.",
+                        bytes: bytes
+                    ))
+                }
+            case "__SNAP__":
+                snapLines.append(line)
+            case "__COREDUMPS__":
+                if let kb = Int64(line), kb * 1024 >= 100 * 1024 * 1024 {
+                    let bytes = kb * 1024
+                    insights.append(Insight(
+                        id: "remote-coredumps",
+                        title: "Crash dumps on \(host.displayName)",
+                        detail: "Crash dumps in `/var/lib/systemd/coredump` and `/var/crash` use \(bytes.formattedBytes). Clear them on the host if no longer needed.",
+                        bytes: bytes
+                    ))
+                }
             default:
                 break
             }
+        }
+        if let disabledCount = snapLines.first.flatMap(Int.init), disabledCount > 0 {
+            let totalBytes = snapLines.dropFirst().first.flatMap(Int64.init).map { $0 * 1024 }
+            let sizeNote = totalBytes.map { " (`/var/lib/snapd/snaps` uses \($0.formattedBytes) total)" } ?? ""
+            insights.append(Insight(
+                id: "remote-snap-revisions",
+                title: "\(disabledCount) disabled Snap revision(s) on \(host.displayName)",
+                detail: "Old Snap revisions kept for rollback\(sizeNote). Remove them on the host with `sudo snap remove <name> --revision=<rev>`, and cap retention with `sudo snap set system refresh.retain=2`.",
+                bytes: totalBytes
+            ))
         }
         return insights
     }
