@@ -138,6 +138,7 @@ struct Strata {
     struct Cut: Identifiable {
         var date: Date
         var bytes: Int64
+        var items: Int
         var id: Date { date }
     }
 
@@ -184,12 +185,22 @@ struct Strata {
                 points.append(Point(date: scan.date, series: Self.otherSeries, bytes: rest))
             }
         }
-        cuts = cleanups
-            .filter { $0.uninstalled == nil && $0.measuredBytes > 0 && $0.date >= first.date && $0.date <= latest.date }
-            .map { Cut(date: $0.date, bytes: $0.measuredBytes) }
+        let removals = cleanups
+            .filter { $0.uninstalled == nil }
+            .compactMap { record -> Cut? in
+                let removed = record.items.filter { $0.status == .cleaned || $0.status == .partial }.count
+                return removed > 0 ? Cut(date: record.date, bytes: record.measuredBytes, items: removed) : nil
+            }
+            .sorted { $0.date < $1.date }
+        cuts = removals.filter { $0.date >= first.date && $0.date <= latest.date }
 
-        let lastCut = cuts.last?.date
-        let baseline = lastCut.flatMap { cut in scans.first { $0.date > cut } } ?? first
+        let baseline: ScanRecord
+        if let lastCut = removals.last?.date {
+            guard let after = scans.first(where: { $0.date > lastCut }) else { return }
+            baseline = after
+        } else {
+            baseline = first
+        }
         let interval = latest.date.timeIntervalSince(baseline.date)
         guard baseline.date < latest.date, interval >= 86_400 else { return }
         since = baseline.date
@@ -233,7 +244,7 @@ private struct StrataChart: View {
                     .foregroundStyle(.primary.opacity(0.55))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .top, alignment: .leading, spacing: 2) {
-                        Text("Cleaned \(cut.bytes.formattedBytes)")
+                        Text(cut.bytes > 0 ? "Cleaned \(cut.bytes.formattedBytes)" : "Cleaned \(cut.items) \(cut.items == 1 ? "item" : "items")")
                             .font(.caption.weight(.semibold))
                     }
             }

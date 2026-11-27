@@ -28,11 +28,12 @@ struct InboxView: View {
         .navigationSubtitle(items.isEmpty ? "Empty" : "\(items.count) \(items.count == 1 ? "item" : "items"), \(items.dedupedBytes.formattedBytes)")
         .onAppear { pickFirst(items) }
         .onChange(of: box) { pickFirst(model.candidates(in: box)) }
-        .onChange(of: items.map(\.id)) { _, ids in
-            if let current, !ids.contains(current) { self.current = ids.first }
-        }
+        .onChange(of: items.map(\.id)) { pickFirst(model.candidates(in: box)) }
         .onChange(of: current) { _, id in
             if let id { model.openedIDs.insert(id) }
+        }
+        .onChange(of: model.report?.finishedAt) {
+            if let current { model.openedIDs.insert(current) }
         }
     }
 
@@ -45,7 +46,7 @@ struct InboxView: View {
     private func advance(from item: Candidate, in items: [Candidate]) {
         guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         let rest = items[(index + 1)...] + items[..<index]
-        current = (rest.first { !model.openedIDs.contains($0.id) } ?? rest.first)?.id
+        current = (rest.first { !model.openedIDs.contains($0.id) } ?? rest.first)?.id ?? item.id
     }
 }
 
@@ -80,12 +81,17 @@ private struct MessageList: View {
         }
         .listStyle(.inset)
         .onKeyPress(.delete) { act { model.confirmClean([$0]) } }
-        .onKeyPress(characters: ["k"]) { _ in act { model.setKept($0.id, title: $0.title, paths: $0.paths, !$0.kept) } }
+        .onKeyPress(characters: ["k"]) { _ in
+            act { item in
+                guard item.kept || item.isActionable else { return }
+                model.setKept(item.id, title: item.title, paths: item.paths, !item.kept)
+            }
+        }
         .onKeyPress(characters: ["n"]) { _ in act(advance) }
     }
 
     private func act(_ action: (Candidate) -> Void) -> KeyPress.Result {
-        guard let item = items.first(where: { $0.id == current }), item.isActionable else { return .ignored }
+        guard let item = items.first(where: { $0.id == current }) else { return .ignored }
         action(item)
         return .handled
     }
