@@ -27,9 +27,21 @@ final class AppModel {
         }
     }
 
+    enum Bucket: String, CaseIterable, Hashable {
+        case review, safe, kept
+
+        var title: String {
+            switch self {
+            case .review: "Needs a look"
+            case .safe: "Safe"
+            case .kept: "Kept"
+            }
+        }
+    }
+
     enum SidebarItem: Hashable {
+        case overview
         case all
-        case category(CleanupCategory)
         case map
         case insights
         case history
@@ -46,7 +58,8 @@ final class AppModel {
     var candidates: [Candidate] = []
     var selection = Set<String>()
     var phase = Phase.idle
-    var sidebar: SidebarItem? = .all
+    var sidebar: SidebarItem? = .overview
+    var pendingClean: Set<String>?
     var lastCleanup: CleanupReport?
     var lastCleanupTitle: String?
     var showingConfirm = false
@@ -184,9 +197,30 @@ final class AppModel {
     func candidates(for item: SidebarItem?) -> [Candidate] {
         switch item {
         case .all, nil: candidates
-        case let .category(category): candidates.filter { $0.category == category }
+        case .overview: candidates
         case .map, .insights, .history, .apps: []
         }
+    }
+
+    func bucket(of candidate: Candidate) -> Bucket {
+        if candidate.effectiveRisk == .keep { return .kept }
+        return candidate.isDefaultSelected(at: level) ? .safe : .review
+    }
+
+    func candidates(in bucket: Bucket) -> [Candidate] {
+        candidates.filter { self.bucket(of: $0) == bucket }.sorted { $0.bytes > $1.bytes }
+    }
+
+    func confirmClean(_ items: [Candidate]) {
+        let ids = Set(items.filter { $0.isActionable && !$0.kept }.map(\.id))
+        guard !ids.isEmpty, !phase.isBusy else { return }
+        pendingClean = ids
+        showingConfirm = true
+    }
+
+    var itemsToClean: [Candidate] {
+        guard let ids = pendingClean else { return selectedCandidates }
+        return candidates.filter { ids.contains($0.id) }
     }
 
     func bytes(for category: CleanupCategory) -> Int64 {
@@ -196,7 +230,7 @@ final class AppModel {
     var sidebarTitle: String {
         switch sidebar {
         case .all, nil: "All Items"
-        case let .category(category): category.label
+        case .overview: target.displayName
         case .map: "Space Map"
         case .insights: "Insights"
         case .history: "History"
@@ -253,7 +287,7 @@ final class AppModel {
         selection = []
         lastReview = nil
         if sidebar == .apps && newTarget.isRemote {
-            sidebar = .all
+            sidebar = .overview
         }
         if newTarget.isRemote {
             disk = .zero
@@ -418,8 +452,8 @@ final class AppModel {
         setAll(items.filter { $0.isDefaultSelected(at: .deep) }, selected: true)
     }
 
-    func clean() async {
-        await clean(selectedCandidates, auto: false)
+    func clean(_ items: [Candidate]) async {
+        await clean(items, auto: false)
     }
 
     private func clean(_ items: [Candidate], auto: Bool) async {
@@ -620,12 +654,6 @@ final class AppModel {
     }
     var cleanupRecords: [CleanupRecord] {
         History.cleanups(historyEntries).filter { $0.remoteHost == target.storageKey }
-    }
-
-    var growthSinceLastScan: (since: Date, items: [Growth])? {
-        let scans = scanRecords
-        guard scans.count >= 2 else { return nil }
-        return (scans[scans.count - 2].date, History.growth(from: scans[scans.count - 2], to: scans[scans.count - 1]))
     }
 
     func putBack(_ item: TrashedPath) {

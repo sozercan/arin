@@ -1,5 +1,6 @@
 import AppKit
 import ArinCore
+import Charts
 import SwiftUI
 
 struct AppsView: View {
@@ -175,7 +176,11 @@ struct UninstallSheet: View {
             }
 
             if let files = model.uninstallFiles {
-                list(files)
+                HStack(alignment: .top, spacing: 18) {
+                    AppFootprint(app: app, files: files, picked: model.uninstallSelection)
+                        .frame(width: 210)
+                    list(files)
+                }
                 footer(files)
             } else {
                 ProgressView("Finding \(app.name)'s files…")
@@ -195,7 +200,7 @@ struct UninstallSheet: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 560, idealWidth: 640, minHeight: 420, idealHeight: 560)
+        .frame(minWidth: 720, idealWidth: 800, minHeight: 440, idealHeight: 580)
         .presentationSizing(.fitted)
     }
 
@@ -211,6 +216,11 @@ struct UninstallSheet: View {
                 ))
                     .toggleStyle(.checkbox)
                     .labelsHidden()
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(file.kind.color)
+                    .frame(width: 10, height: 10)
+                    .padding(.top, 3)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.kind == .app ? "\(app.name) app" : file.kind.label)
                     Text((file.path as NSString).abbreviatingWithTildeInPath)
@@ -249,5 +259,74 @@ struct UninstallSheet: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct AppFootprint: View {
+    var app: InstalledApp
+    var files: [AppFile]
+    var picked: Set<String>
+
+    var body: some View {
+        let total = files.reduce(0) { $0 + max($1.bytes, 0) }
+        let bundle = files.filter { $0.kind == .app }.reduce(0) { $0 + max($1.bytes, 0) }
+        let chosen = files.filter { picked.contains($0.id) }.reduce(0) { $0 + max($1.bytes, 0) }
+        VStack(spacing: 14) {
+            Chart(files) { file in
+                SectorMark(
+                    angle: .value("Size", max(file.bytes, 0)),
+                    innerRadius: .ratio(0.62),
+                    angularInset: 1
+                )
+                .cornerRadius(3)
+                .foregroundStyle(file.kind.color)
+                .opacity(picked.contains(file.id) ? 1 : 0.25)
+            }
+            .chartLegend(.hidden)
+            .chartBackground { proxy in
+                GeometryReader { geometry in
+                    if let anchor = proxy.plotFrame {
+                        let frame = geometry[anchor]
+                        VStack(spacing: 0) {
+                            Text(chosen.formattedBytes)
+                                .font(.title2.weight(.bold))
+                                .monospacedDigit()
+                                .contentTransition(.numericText(value: Double(chosen)))
+                            Text("to the Trash")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .position(x: frame.midX, y: frame.midY)
+                    }
+                }
+            }
+            .frame(height: 200)
+            .animation(.smooth, value: picked)
+            VStack(alignment: .leading, spacing: 4) {
+                LabeledContent("The app", value: bundle.formattedBytes)
+                LabeledContent("Left around your Mac", value: (total - bundle).formattedBytes)
+            }
+            .font(.callout)
+            .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(app.name) uses \(total.formattedBytes): the app is \(bundle.formattedBytes) and its files elsewhere are \((total - bundle).formattedBytes). \(chosen.formattedBytes) is checked.")
+    }
+}
+
+extension AppFile.Kind {
+    var color: Color {
+        switch self {
+        case .app: .blue
+        case .containers: .orange
+        case .groupContainers: .teal
+        case .applicationSupport: .pink
+        case .applicationScripts: .mint
+        case .caches: .purple
+        case .preferences: .brown
+        case .launchAgents: .red
+        case .savedState, .httpStorage, .webKit, .cookies: .indigo
+        case .logs, .crashReports: .gray
+        }
     }
 }

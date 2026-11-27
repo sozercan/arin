@@ -7,7 +7,7 @@ struct ConfirmSheet: View {
 
     var body: some View {
         @Bindable var model = model
-        let items = model.selectedCandidates
+        let items = model.itemsToClean
         let review = items.filter { $0.effectiveRisk != .safe || !$0.blockers.isEmpty }
 
         VStack(alignment: .leading, spacing: 16) {
@@ -61,7 +61,7 @@ struct ConfirmSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button(!model.target.isRemote && model.trashInsteadOfDelete ? "Move to Trash" : "Clean", role: .destructive) {
                     dismiss()
-                    Task { await model.clean() }
+                    Task { await model.clean(items) }
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)

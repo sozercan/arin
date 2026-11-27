@@ -17,6 +17,8 @@ struct ContentView: View {
                     AppsView()
                 } else if model.report == nil {
                     WelcomeView()
+                } else if model.sidebar == .overview || model.sidebar == nil {
+                    OverviewView()
                 } else if model.sidebar == .insights {
                     InsightsView().statusBar(model)
                 } else if model.sidebar == .map {
@@ -27,7 +29,7 @@ struct ContentView: View {
             }
         }
         .toolbar { Toolbar() }
-        .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
+        .sheet(isPresented: $model.showingConfirm, onDismiss: { model.pendingClean = nil }) { ConfirmSheet() }
         .sheet(isPresented: $model.showingResult) { ResultSheet() }
         .sheet(item: $model.uninstallApp) { app in UninstallSheet(app: app) }
         .alert("Something went wrong", isPresented: Binding(
@@ -66,19 +68,16 @@ private struct Sidebar: View {
                     .padding(.vertical, 6)
                     .selectionDisabled()
             }
-            if model.report == nil {
-                Section {
-                    Label("All Items", systemImage: "square.grid.2x2")
-                        .tag(AppModel.SidebarItem.all)
-                }
-            } else {
-                Section("Found") {
+            Section {
+                Label("Overview", systemImage: "gauge.with.dots.needle.33percent")
+                    .badge(overviewBadge)
+                    .tag(AppModel.SidebarItem.overview)
+            }
+            if model.report != nil {
+                Section("Browse") {
                     row(.all, "All Items", "square.grid.2x2", model.candidates.dedupedBytes)
                     Label("Space Map", systemImage: "square.grid.3x1.below.line.grid.1x2")
                         .tag(AppModel.SidebarItem.map)
-                    ForEach(model.categoriesWithResults, id: \.self) { category in
-                        row(.category(category), category.label, category.symbol, model.bytes(for: category))
-                    }
                 }
                 if let report = model.report, !report.insights.isEmpty || !report.ruleErrors.isEmpty {
                     Section {
@@ -97,6 +96,12 @@ private struct Sidebar: View {
                 }
             }
         }
+    }
+
+    private var overviewBadge: Text? {
+        guard model.report != nil else { return nil }
+        let safe = model.candidates(in: .safe).dedupedBytes
+        return safe > 0 ? Text(safe.formattedBytes).monospacedDigit() : nil
     }
 
     private func row(_ item: AppModel.SidebarItem, _ title: String, _ symbol: String, _ bytes: Int64) -> some View {
@@ -259,7 +264,7 @@ private struct WelcomeView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .card(padding: 0)
         .accessibilityLabel("Step \(number): \(title). \(text)")
     }
 }
@@ -268,27 +273,38 @@ private struct InsightsView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        List {
-            if let report = model.report {
-                ForEach(report.insights) { insight in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Label(insight.title, systemImage: "lightbulb").font(.headline)
-                            Spacer()
-                            if let bytes = insight.bytes { Text(bytes.formattedBytes).foregroundStyle(.secondary) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let report = model.report {
+                    ForEach(report.insights) { insight in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Label(insight.title, systemImage: "lightbulb").font(.headline)
+                                Spacer()
+                                if let bytes = insight.bytes {
+                                    Text(bytes.formattedBytes).foregroundStyle(.secondary).monospacedDigit()
+                                }
+                            }
+                            Text(insight.detail)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Text(insight.detail).foregroundStyle(.secondary)
+                        .card()
                     }
-                    .padding(.vertical, 6)
-                }
-                ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(name, systemImage: "exclamationmark.triangle").font(.headline)
-                        Text(error).foregroundStyle(.secondary)
+                    ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(name, systemImage: "exclamationmark.triangle").font(.headline)
+                            Text(error)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .card()
                     }
-                    .padding(.vertical, 6)
                 }
             }
+            .padding(28)
+            .frame(maxWidth: 1080, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         .navigationTitle("Insights")
     }
