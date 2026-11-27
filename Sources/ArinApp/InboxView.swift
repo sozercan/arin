@@ -80,7 +80,7 @@ private struct MessageList: View {
             }
         }
         .listStyle(.inset)
-        .onKeyPress(.delete) { act { model.confirmClean([$0]) } }
+        .onDeleteCommand { _ = act { model.confirmClean([$0]) } }
         .onKeyPress(characters: ["k"]) { _ in
             act { item in
                 guard item.kept || item.isActionable else { return }

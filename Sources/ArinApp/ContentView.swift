@@ -100,17 +100,23 @@ private struct Sidebar: View {
         }
     }
 
-    @ViewBuilder
     private func mailbox(_ box: AppModel.Mailbox) -> some View {
-        let label = Label(box.title, systemImage: box.symbol).tag(AppModel.SidebarItem.inbox(box))
-        if model.report == nil {
-            label
-        } else {
-            switch box {
-            case .review: label.badge(model.unreadCount)
-            case .safe: label.badge(Text(model.candidates(in: .safe).dedupedBytes.formattedBytes).monospacedDigit())
-            case .kept: label.badge(model.candidates(in: .kept).count)
-            }
+        Label(box.title, systemImage: box.symbol)
+            .badge(badge(for: box))
+            .tag(AppModel.SidebarItem.inbox(box))
+    }
+
+    private func badge(for box: AppModel.Mailbox) -> Text? {
+        guard model.report != nil else { return nil }
+        switch box {
+        case .review:
+            let count = model.unreadCount
+            return count > 0 ? Text("\(count)") : nil
+        case .safe:
+            return Text(model.candidates(in: .safe).dedupedBytes.formattedBytes).monospacedDigit()
+        case .kept:
+            let count = model.candidates(in: .kept).count
+            return count > 0 ? Text("\(count)") : nil
         }
     }
 
