@@ -319,6 +319,35 @@ private struct Reader: View {
     }
 }
 
+struct PendingMailbox: View {
+    @Environment(AppModel.self) private var model
+    var box: AppModel.Mailbox
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(box.title, systemImage: box.symbol)
+        } description: {
+            switch box {
+            case .review: Text("Items the rules can't settle show up here after a scan.")
+            case .safe: Text("Items that are safe to clean at this level show up here after a scan.")
+            case .kept: Text("Items you always keep, and items your agent says to keep, show up here after a scan.")
+            }
+        } actions: {
+            if model.phase.isBusy {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(model.phase.label).lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
+            } else {
+                Button(model.target.isRemote ? "Scan \(model.target.displayName)" : "Scan this Mac") { model.startScan() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .navigationTitle(box.title)
+    }
+}
+
 private struct EmptyMailbox: View {
     @Environment(AppModel.self) private var model
     var box: AppModel.Mailbox

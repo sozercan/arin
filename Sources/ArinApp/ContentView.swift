@@ -15,6 +15,8 @@ struct ContentView: View {
                     HistoryView().statusBar(model)
                 } else if model.sidebar == .apps {
                     AppsView()
+                } else if model.report == nil, case let .inbox(box) = model.sidebar, box != .review {
+                    PendingMailbox(box: box)
                 } else if model.report == nil {
                     WelcomeView()
                 } else if case let .inbox(box) = model.sidebar {
