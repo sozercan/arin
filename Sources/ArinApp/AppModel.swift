@@ -504,7 +504,7 @@ final class AppModel {
     }
 
     func prepareUninstall(_ app: InstalledApp) {
-        guard !phase.isBusy else { return }
+        guard !target.isRemote, !phase.isBusy else { return }
         uninstallApp = app
         uninstallFiles = nil
         uninstallSelection = []
@@ -528,6 +528,7 @@ final class AppModel {
 
     @discardableResult
     func prepareUninstall(url: URL) -> Bool {
+        guard !target.isRemote else { return false }
         let path = (url.path as NSString).standardizingPath
         let app = apps.first { ($0.path as NSString).standardizingPath == path }
             ?? (Guardrails().applicationRoots.contains { path.lowercased().hasPrefix($0.lowercased() + "/") } ? AppCatalog.app(at: path) : nil)
@@ -540,7 +541,7 @@ final class AppModel {
     }
 
     func uninstall(_ app: InstalledApp) {
-        guard uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
+        guard !target.isRemote, uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
         let picked = files.filter { uninstallSelection.contains($0.id) }
         uninstallApp = nil
         guard !picked.isEmpty else { return }

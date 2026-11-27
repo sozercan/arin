@@ -264,6 +264,31 @@ public struct RemoteScanner: Sendable {
                   [ -n "$sz" ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$sz" "$mt" "$p"
                 fi
                 """
+            } else if !spec.keepNames.isEmpty {
+                var checks: [String] = []
+                for rel in spec.relativePaths {
+                    let abs = "\(env.home)/\(rel)"
+                    checks.append("[ -d \(SSHTransport.shellQuote(abs)) ] && [ ! -L \(SSHTransport.shellQuote(abs)) ] && printf '%s\\n' \(SSHTransport.shellQuote(abs))")
+                }
+                let skipList = spec.keepNames.map { "\"$base\" = \(SSHTransport.shellQuote($0))" }.joined(separator: " -o ")
+                block = """
+                { \(checks.joined(separator: "; ")); } | awk '!seen[$0]++' | while IFS= read -r p; do
+                  total=0
+                  mt=0
+                  found=0
+                  for entry in "$p"/* "$p"/.[!.]* "$p"/..?*; do
+                    [ -e "$entry" ] || [ -L "$entry" ] || continue
+                    base=$(basename "$entry")
+                    if [ \(skipList) ]; then continue; fi
+                    found=1
+                    sz=$(_arin_timeout 12 du -sk -- "$entry" 2>/dev/null | awk '{print $1}')
+                    [ -n "$sz" ] && total=$((total + sz))
+                    em=$(stat -c %Y -- "$entry" 2>/dev/null || stat -f %m -- "$entry" 2>/dev/null || echo 0)
+                    [ "$em" -gt "$mt" ] 2>/dev/null && mt="$em"
+                  done
+                  [ "$found" -eq 1 ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$total" "$mt" "$p"
+                done
+                """
             } else {
                 var checks: [String] = []
                 for rel in spec.relativePaths {
@@ -571,7 +596,7 @@ public struct RemoteScanner: Sendable {
         echo "__KIND_DAEMON_ID__=$did"
         [ -n "$did" ] || exit 0
         for name in $(_arin_timeout 10 kind get clusters 2>/dev/null || true); do
-          nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null | sort | paste -sd, -)
+          nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter "label=io.x-k8s.kind.cluster=$name" 2>/dev/null | sort | paste -sd+ -)
           [ -n "$nodes" ] && printf '%s\t%s\n' "$name" "$nodes"
         done
         """

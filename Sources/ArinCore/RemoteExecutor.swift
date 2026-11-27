@@ -334,7 +334,7 @@ public struct RemoteExecutor: Sendable {
             echo "__EP__=$ep"
             did=$(_arin_timeout 8 docker --context "$ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
             echo "__ID__=$did"
-            nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
+            nodes=$(_arin_timeout 8 docker --context "$ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd+ -)
             echo "__NODES__=$nodes"
             """
             let res = await transport.runScript(script, timeout: 15)
@@ -376,7 +376,7 @@ public struct RemoteExecutor: Sendable {
             case "$_arin_ep" in ""|unix://*) ;; *) echo "Docker endpoint changed" >&2; exit 78 ;; esac
             _arin_did=$(_arin_timeout 8 docker --context "$_arin_ctx" info --format '{{.ID}}' 2>/dev/null | head -n 1)
             [ "$_arin_did" = \(SSHTransport.shellQuote(scannedDaemonID)) ] || { echo "Docker daemon changed" >&2; exit 78; }
-            _arin_nodes=$(_arin_timeout 8 docker --context "$_arin_ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd, -)
+            _arin_nodes=$(_arin_timeout 8 docker --context "$_arin_ctx" ps -aq --filter \(SSHTransport.shellQuote("label=io.x-k8s.kind.cluster=\(clusterName)")) 2>/dev/null | sort | paste -sd+ -)
             [ "$_arin_nodes" = \(SSHTransport.shellQuote(scannedNodes)) ] || { echo "kind cluster recreated" >&2; exit 78; }
             """
             return .success(inline)
