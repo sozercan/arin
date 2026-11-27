@@ -139,10 +139,10 @@ struct OverviewView: View {
                 .font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 300), spacing: 12)], alignment: .leading, spacing: 12) {
                 ForEach(report.insights) { insight in
-                    InsightCard(symbol: "lightbulb.fill", color: .yellow, title: insight.title, detail: insight.detail, bytes: insight.bytes)
+                    InsightCard(symbol: "lightbulb.fill", color: .yellow, title: insight.title, detail: Text(ruleText: insight.detail), bytes: insight.bytes)
                 }
                 ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
-                    InsightCard(symbol: "exclamationmark.triangle.fill", color: .orange, title: name, detail: error, bytes: nil)
+                    InsightCard(symbol: "exclamationmark.triangle.fill", color: .orange, title: name, detail: Text(error), bytes: nil)
                 }
             }
         }
@@ -197,7 +197,7 @@ private struct InsightCard: View {
     var symbol: String
     var color: Color
     var title: String
-    var detail: String
+    var detail: Text
     var bytes: Int64?
 
     var body: some View {
@@ -216,7 +216,7 @@ private struct InsightCard: View {
                         Chip(text: bytes.formattedBytes)
                     }
                 }
-                Text(detail)
+                detail
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

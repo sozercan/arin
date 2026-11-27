@@ -149,7 +149,7 @@ struct CandidateRow: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(candidate.detail)
+            Text(ruleText: candidate.detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

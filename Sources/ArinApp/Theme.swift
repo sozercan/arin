@@ -178,3 +178,12 @@ struct Chip: View {
             .background(color.opacity(0.12), in: Capsule())
     }
 }
+
+extension Text {
+    /// Rule-written text marks commands with `backticks`; show those as code. Only for text from rules,
+    /// never for error messages or agent output.
+    init(ruleText: String) {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        self.init((try? AttributedString(markdown: ruleText, options: options)) ?? AttributedString(ruleText))
+    }
+}
