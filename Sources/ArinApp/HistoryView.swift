@@ -159,10 +159,18 @@ struct Strata {
 
     init(scans: [ScanRecord], cleanups: [CleanupRecord], minimum: Int64 = 256 * 1024 * 1024) {
         guard let first = scans.first, let latest = scans.last else { return }
-        let top = latest.bytesByRule.filter { $0.value > 0 }.sorted { $0.value > $1.value }.prefix(6).map(\.key)
+        var peaks: [String: Int64] = [:]
+        var labels: [String: String] = [:]
+        for scan in scans {
+            for (rule, bytes) in scan.bytesByRule where bytes > 0 {
+                peaks[rule] = max(peaks[rule] ?? 0, bytes)
+                labels[rule] = scan.labels[rule] ?? labels[rule]
+            }
+        }
+        let top = peaks.sorted { $0.value > $1.value }.prefix(6).map(\.key)
         var names: [String: String] = [:]
         for rule in top {
-            let label = latest.labels[rule] ?? rule
+            let label = labels[rule] ?? rule
             names[rule] = names.values.contains(label) ? "\(label) (\(rule))" : label
         }
         let hasOther = scans.contains { scan in scan.bytesByRule.contains { !top.contains($0.key) && $0.value > 0 } }
