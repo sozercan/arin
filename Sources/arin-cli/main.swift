@@ -19,6 +19,7 @@ commands:
                        only when it's lower, and always exit 0 (for an agent's session hook)
 
 options:
+  --host TARGET                 Run against a remote SSH host (e.g. vm, user@host)
   --level quick|standard|deep   Cleanup depth (default: standard)
   --agent claude|codex|copilot  Agent for review (default: first installed)
   --limit N                     Max candidates sent to the agent (default: 150)
@@ -41,6 +42,7 @@ options:
 
 struct Args {
     var command = ""
+    var host: String?
     var level = Level.standard
     var agent: AgentProvider?
     var limit = 150
@@ -70,6 +72,10 @@ struct Args {
         }
         while let arg = it.next() {
             switch arg {
+            case "--host":
+                let v = try value(arg)
+                guard RemoteHost.isValidTarget(v) else { throw CLIError("invalid --host \(v)") }
+                host = v
             case "--level":
                 let v = try value(arg)
                 guard let l = Level(name: v) else { throw CLIError("unknown level \(v)") }
@@ -143,6 +149,16 @@ func printTable(_ candidates: [Candidate], level: Level) {
 }
 
 func scan(_ args: Args) async -> ScanReport {
+    if let target = args.host {
+        let scanner = RemoteScanner(host: RemoteHost(target: target))
+        if !args.json { eprint("Scanning remote host \(target)…") }
+        let report = await scanner.scan { event in
+            if args.json { return }
+            if case let .ruleFinished(name, found) = event, found > 0 { eprint("  \(name): \(found)") }
+        }
+        record(.scan(ScanRecord(report, ruleNames: Catalog.ruleNames)))
+        return report
+    }
     let options = ScanOptions(projectRoots: args.roots, checkPullRequests: args.checkPRs, fetchRemotes: args.fetch)
     let scanner = Scanner(options: options)
     if !args.json { eprint("Scanning \(scanner.rules.count) rule groups…") }
@@ -168,10 +184,10 @@ func chosen(_ report: ScanReport, _ args: Args) -> [Candidate]? {
     return picked
 }
 
-func printHistory(json: Bool) {
+func printHistory(json: Bool, remoteHost: String? = nil) {
     let entries = History().load()
-    let scans = History.scans(entries)
-    let cleanups = History.cleanups(entries)
+    let scans = History.scans(entries).filter { $0.remoteHost == remoteHost }
+    let cleanups = History.cleanups(entries).filter { $0.remoteHost == remoteHost }
     let growth = scans.count >= 2 ? History.growth(from: scans[scans.count - 2], to: scans[scans.count - 1]) : []
     if json {
         struct Output: Encodable {
@@ -213,7 +229,8 @@ func runKeep(_ args: Args) -> Int32 {
         try KeepList.update { list in
             for id in args.positional {
                 let key = id.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
-                if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : []) }
+                let inferredHost = args.host ?? (id.hasPrefix("remote.") ? key.split(separator: ":", maxSplits: 1).first.map(String.init) : nil)
+                if args.remove { list.remove(id: id) } else { list.add(id: id, title: id, paths: key.hasPrefix("/") ? [key] : [], remoteHost: inferredHost) }
             }
         }
     } catch {
@@ -307,7 +324,8 @@ func runUninstall(_ args: Args) async -> Int32 {
 
 func summarize(_ report: ScanReport, level: Level) {
     let disk = report.disk
-    print("Disk: \(disk.freeBytes.formattedBytes) free of \(disk.totalBytes.formattedBytes) (\(Int(disk.usedFraction * 100))% used)")
+    let prefix = report.remoteHost.map { "Disk (\($0)): " } ?? "Disk: "
+    print("\(prefix)\(disk.freeBytes.formattedBytes) free of \(disk.totalBytes.formattedBytes) (\(Int(disk.usedFraction * 100))% used)")
     printTable(report.candidates, level: level)
     let selected = report.candidates.filter { $0.isDefaultSelected(at: level) }
     print("\nPre-selected at \(level.label): \(selected.count) items, \(selected.dedupedBytes.formattedBytes) (estimate)")
@@ -320,7 +338,7 @@ func summarize(_ report: ScanReport, level: Level) {
     print(String(format: "\nScan took %.0fs. Nothing was changed.", report.finishedAt.timeIntervalSince(report.startedAt)))
 }
 
-func runDisk(_ args: Args) -> Int32 {
+func runDisk(_ args: Args) async -> Int32 {
     let hook = args.warnBelow != nil
     var threshold: Int64?
     if let raw = args.warnBelow {
@@ -330,14 +348,22 @@ func runDisk(_ args: Args) -> Int32 {
         }
         threshold = parsed
     }
-    let status = Disk.status()
+    let status: DiskStatus
+    if let target = args.host {
+        let transport = SSHTransport(host: RemoteHost(target: target))
+        status = await RemoteEnvironment.diskStatus(transport: transport, home: ".")
+    } else {
+        status = Disk.status()
+    }
+    let whereText = args.host.map { "on \($0)" } ?? "on the volume that holds your home folder"
     guard status.totalBytes > 0 else {
-        eprint("arin disk: couldn't read free space on your home folder's volume")
+        eprint("arin disk: couldn't read free space \(whereText)")
         return hook ? 0 : 1
     }
     if let threshold {
         if status.freeBytes < threshold {
-            print("Low disk space: \(status.freeBytes.formattedBytes) free on the volume that holds your home folder, below \(threshold.formattedBytes). Run `arin scan` to see what can be reclaimed safely.")
+            let scanCmd = args.host.map { "arin scan --host \($0)" } ?? "arin scan"
+            print("Low disk space: \(status.freeBytes.formattedBytes) free \(whereText), below \(threshold.formattedBytes). Run `\(scanCmd)` to see what can be reclaimed safely.")
         }
         return 0
     }
@@ -357,6 +383,14 @@ func main() async -> Int32 {
     }
     if args.command != "keep", let extra = args.positional.dropFirst(args.command == "uninstall" ? 1 : 0).first {
         eprint("unknown argument \(extra)\n\n\(usage)")
+        return 2
+    }
+    if args.host != nil, !["scan", "plan", "clean", "disk", "history", "keep"].contains(args.command) {
+        eprint("--host is only supported for scan, plan, clean, disk, history, and keep.")
+        return 2
+    }
+    if args.host != nil, args.trash {
+        eprint("--trash is not supported with --host (remote hosts have no macOS Trash).")
         return 2
     }
     switch args.command {
@@ -399,11 +433,12 @@ func main() async -> Int32 {
             return 2
         }
         do {
-            let data = try CleanupPlan(items).encoded()
+            let data = try CleanupPlan(items, remoteHost: args.host, remoteIdentity: report.remoteIdentity).encoded()
             if let out = args.out {
                 try data.write(to: URL(fileURLWithPath: out), options: .atomic)
                 print("Saved a plan of \(items.count) items (\(items.dedupedBytes.formattedBytes) estimate) to \(out).")
-                print("Run it with: arin clean --plan \(out) --yes")
+                let hostFlag = args.host.map { " --host \($0)" } ?? ""
+                print("Run it with: arin clean\(hostFlag) --plan \(out) --yes")
             } else {
                 print(String(decoding: data, as: UTF8.self))
             }
@@ -417,7 +452,7 @@ func main() async -> Int32 {
         return runKeep(args)
 
     case "history":
-        printHistory(json: args.json)
+        printHistory(json: args.json, remoteHost: args.host)
         return 0
 
     case "skill":
@@ -425,7 +460,7 @@ func main() async -> Int32 {
         return 0
 
     case "disk":
-        return runDisk(args)
+        return await runDisk(args)
 
     case "apps":
         let apps = await installedApps()
@@ -450,8 +485,18 @@ func main() async -> Int32 {
                 eprint("Could not read the plan: \(error)")
                 return 1
             }
+            if plan?.remoteHost != args.host {
+                let expected = plan?.remoteHost ?? "local Mac"
+                let actual = args.host ?? "local Mac"
+                eprint("Plan was created for \(expected), not \(actual). Pass matching --host or make a new plan.")
+                return 2
+            }
         }
         let report = await scan(args)
+        if let plan, plan.remoteIdentity != report.remoteIdentity {
+            eprint("Plan destination identity (\(plan.remoteIdentity ?? "none")) does not match \(report.remoteIdentity ?? "none"); make a new plan.")
+            return 2
+        }
         var picked: [Candidate]
         if let plan {
             let resolved = plan.resolve(against: report.candidates)
@@ -486,17 +531,27 @@ func main() async -> Int32 {
             return 0
         }
         guard args.yes else {
-            print("Dry run. Would clean \(picked.count) items (\(picked.dedupedBytes.formattedBytes) estimate):")
+            let targetLabel = args.host.map { " on \($0)" } ?? ""
+            print("Dry run. Would clean \(picked.count) items\(targetLabel) (\(picked.dedupedBytes.formattedBytes) estimate):")
             for c in picked { print("  \(pad(c.bytes.formattedBytes, 10)) \(c.title)\n             \(c.action.summary)") }
             print("\nRe-run with --yes to clean.")
             return 0
         }
-        let executor = Executor(trashInsteadOfDelete: args.trash)
-        let result = await executor.run(picked) { event in
-            guard !args.json, case let .finished(item) = event else { return }
-            eprint("  \(item.status.rawValue): \(item.title) — \(item.message)")
+        let result: CleanupReport
+        if let target = args.host {
+            let executor = RemoteExecutor(host: RemoteHost(target: target), expectedIdentity: report.remoteIdentity)
+            result = await executor.run(picked) { event in
+                guard !args.json, case let .finished(item) = event else { return }
+                eprint("  \(item.status.rawValue): \(item.title) — \(item.message)")
+            }
+        } else {
+            let executor = Executor(trashInsteadOfDelete: args.trash)
+            result = await executor.run(picked) { event in
+                guard !args.json, case let .finished(item) = event else { return }
+                eprint("  \(item.status.rawValue): \(item.title) — \(item.message)")
+            }
         }
-        record(.cleanup(CleanupRecord(result, auto: false)))
+        record(.cleanup(CleanupRecord(result, auto: false, remoteHost: args.host)))
         if args.json {
             printJSON(result)
         } else {

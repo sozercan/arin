@@ -38,6 +38,10 @@ final class AppModel {
 
 
     var disk = Disk.status()
+    var target: CleanupTarget = .local
+    var remoteHosts: [RemoteHost] = [] {
+        didSet { saveRemoteHosts() }
+    }
     var report: ScanReport?
     var candidates: [Candidate] = []
     var selection = Set<String>()
@@ -142,6 +146,10 @@ final class AppModel {
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
         extraProjectRoots = defaults.stringArray(forKey: "extraProjectRoots") ?? []
+        if let data = defaults.data(forKey: "remoteHosts"),
+           let saved = try? JSONDecoder().decode([RemoteHost].self, from: data) {
+            remoteHosts = saved
+        }
         var models = defaults.dictionary(forKey: "reviewModels") as? [String: String] ?? [:]
         var efforts = defaults.dictionary(forKey: "reviewEfforts") as? [String: String] ?? [:]
         for provider in AgentProvider.allCases {
@@ -202,7 +210,7 @@ final class AppModel {
         }
     }
 
-    var canReview: Bool { agent != nil && !phase.isBusy && !itemsNeedingReview.isEmpty }
+    var canReview: Bool { !target.isRemote && agent != nil && !phase.isBusy && !itemsNeedingReview.isEmpty }
     var canClean: Bool { !phase.isBusy && !selection.isEmpty }
 
     var categoriesWithResults: [CleanupCategory] {
@@ -220,8 +228,63 @@ final class AppModel {
     }
 
 
+    private func saveRemoteHosts() {
+        if let data = try? JSONEncoder().encode(remoteHosts) {
+            defaults.set(data, forKey: "remoteHosts")
+        }
+    }
+
+    var allTargets: [CleanupTarget] {
+        [.local] + remoteHosts.map { .remote($0) }
+    }
+
+    func selectTarget(_ newTarget: CleanupTarget) {
+        guard newTarget != target, !phase.isBusy else { return }
+        target = newTarget
+        report = nil
+        candidates = []
+        selection = []
+        lastReview = nil
+        if sidebar == .apps && newTarget.isRemote {
+            sidebar = .all
+        }
+        if newTarget.isRemote {
+            disk = .zero
+            if let host = newTarget.remoteHost {
+                Task {
+                    let status = await RemoteEnvironment.diskStatus(transport: SSHTransport(host: host), home: ".")
+                    if target == newTarget { disk = status }
+                }
+            }
+        } else {
+            refreshDisk()
+        }
+    }
+
+    func addRemoteHost(target raw: String, label: String? = nil) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard RemoteHost.isValidTarget(trimmed), !remoteHosts.contains(where: { $0.target == trimmed }) else { return }
+        let host = RemoteHost(target: trimmed, label: label)
+        remoteHosts.append(host)
+    }
+
+    func removeRemoteHost(_ host: RemoteHost) {
+        guard !phase.isBusy || target != .remote(host) else { return }
+        remoteHosts.removeAll { $0.target == host.target }
+        if target == .remote(host) {
+            selectTarget(.local)
+        }
+    }
+
     func refreshDisk() {
-        disk = Disk.status()
+        if case let .remote(host) = target {
+            Task {
+                let status = await RemoteEnvironment.diskStatus(transport: SSHTransport(host: host), home: ".")
+                if target == .remote(host) { disk = status }
+            }
+        } else {
+            disk = Disk.status()
+        }
     }
 
     var isScanning: Bool {
@@ -255,12 +318,24 @@ final class AppModel {
 
     func scan() async {
         guard !phase.isBusy else { return }
-        phase = .scanning("starting")
-        let scanner = Scanner(options: scanOptions)
-        let report = await scanner.scan { [weak self] event in
-            guard case let .ruleFinished(name, _) = event else { return }
-            Task { @MainActor in
-                if case .scanning = self?.phase { self?.phase = .scanning(name) }
+        let activeTarget = target
+        phase = .scanning(activeTarget.isRemote ? "connecting to \(activeTarget.displayName)" : "starting")
+        let report: ScanReport
+        if case let .remote(host) = activeTarget {
+            let scanner = RemoteScanner(host: host)
+            report = await scanner.scan { [weak self] event in
+                guard case let .ruleFinished(name, _) = event else { return }
+                Task { @MainActor in
+                    if case .scanning = self?.phase { self?.phase = .scanning(name) }
+                }
+            }
+        } else {
+            let scanner = Scanner(options: scanOptions)
+            report = await scanner.scan { [weak self] event in
+                guard case let .ruleFinished(name, _) = event else { return }
+                Task { @MainActor in
+                    if case .scanning = self?.phase { self?.phase = .scanning(name) }
+                }
             }
         }
         guard !Task.isCancelled else {
@@ -285,7 +360,7 @@ final class AppModel {
     }
 
     func review() async {
-        guard let agent, !phase.isBusy else { return }
+        guard !target.isRemote, let agent, !phase.isBusy else { return }
         let items = itemsNeedingReview
         guard !items.isEmpty else { return }
         editedDuringReview = []
@@ -343,15 +418,25 @@ final class AppModel {
     private func clean(_ items: [Candidate], auto: Bool) async {
         guard !items.isEmpty, !phase.isBusy else { return }
         let total = items.count
+        let activeTarget = target
         phase = .cleaning(done: 0, total: total, current: items[0].title)
-        let executor = Executor(trashInsteadOfDelete: trashInsteadOfDelete)
-        let result = await executor.run(items) { [weak self] event in
-            guard case let .item(index, title) = event else { return }
-            Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
+        let result: CleanupReport
+        if case let .remote(host) = activeTarget {
+            let executor = RemoteExecutor(host: host, expectedIdentity: report?.remoteIdentity)
+            result = await executor.run(items) { [weak self] event in
+                guard case let .item(index, title) = event else { return }
+                Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
+            }
+        } else {
+            let executor = Executor(trashInsteadOfDelete: trashInsteadOfDelete)
+            result = await executor.run(items) { [weak self] event in
+                guard case let .item(index, title) = event else { return }
+                Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
+            }
         }
         lastCleanup = result
         lastCleanupTitle = nil
-        appendHistory(.cleanup(CleanupRecord(result, auto: auto)))
+        appendHistory(.cleanup(CleanupRecord(result, auto: auto, remoteHost: activeTarget.storageKey)))
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
         selection.subtract(cleanedIDs)
@@ -419,7 +504,7 @@ final class AppModel {
     }
 
     func prepareUninstall(_ app: InstalledApp) {
-        guard !phase.isBusy else { return }
+        guard !target.isRemote, !phase.isBusy else { return }
         uninstallApp = app
         uninstallFiles = nil
         uninstallSelection = []
@@ -443,6 +528,7 @@ final class AppModel {
 
     @discardableResult
     func prepareUninstall(url: URL) -> Bool {
+        guard !target.isRemote else { return false }
         let path = (url.path as NSString).standardizingPath
         let app = apps.first { ($0.path as NSString).standardizingPath == path }
             ?? (Guardrails().applicationRoots.contains { path.lowercased().hasPrefix($0.lowercased() + "/") } ? AppCatalog.app(at: path) : nil)
@@ -455,7 +541,7 @@ final class AppModel {
     }
 
     func uninstall(_ app: InstalledApp) {
-        guard uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
+        guard !target.isRemote, uninstallApp?.path == app.path, let files = uninstallFiles, uninstallRefusal == nil, !phase.isBusy else { return }
         let picked = files.filter { uninstallSelection.contains($0.id) }
         uninstallApp = nil
         guard !picked.isEmpty else { return }
@@ -477,7 +563,7 @@ final class AppModel {
 
 
     func reloadKeepList() {
-        apply(KeepList.load(recording: report?.keptPaths ?? [:]))
+        apply(KeepList.load(recording: report?.keptPaths ?? [:], remoteHost: target.storageKey))
     }
 
     private func apply(_ result: Result<KeepList, any Error>) {
@@ -489,7 +575,7 @@ final class AppModel {
             keepList = nil
             keepListError = "\(error)"
         }
-        candidates = candidates.applying(keep: result)
+        candidates = candidates.applying(keep: result, remoteHost: target.storageKey)
         if keepList == nil {
             selection = []
         } else {
@@ -502,8 +588,9 @@ final class AppModel {
 
     func setKept(_ id: String, title: String, paths: [String] = [], _ kept: Bool) {
         do {
+            let hostKey = target.storageKey
             try KeepList.update { list in
-                if kept { list.add(id: id, title: title, paths: paths) } else { list.remove(id: id) }
+                if kept { list.add(id: id, title: title, paths: paths, remoteHost: hostKey) } else { list.remove(id: id) }
             }
             reloadKeepList()
         } catch {
@@ -521,8 +608,12 @@ final class AppModel {
         historyEntries = history.load()
     }
 
-    var scanRecords: [ScanRecord] { History.scans(historyEntries) }
-    var cleanupRecords: [CleanupRecord] { History.cleanups(historyEntries) }
+    var scanRecords: [ScanRecord] {
+        History.scans(historyEntries).filter { $0.remoteHost == target.storageKey }
+    }
+    var cleanupRecords: [CleanupRecord] {
+        History.cleanups(historyEntries).filter { $0.remoteHost == target.storageKey }
+    }
 
     var growthSinceLastScan: (since: Date, items: [Growth])? {
         let scans = scanRecords
@@ -571,6 +662,7 @@ final class AppModel {
     }
 
     private func tick() async {
+        guard !target.isRemote else { return }
         refreshDisk()
         let alert = LowSpacePolicy.evaluate(free: disk.freeBytes, threshold: lowSpaceThreshold, alerted: notifiedLowSpace)
         guard isLowOnSpace else {

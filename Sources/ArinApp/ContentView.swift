@@ -48,6 +48,20 @@ private struct Sidebar: View {
         @Bindable var model = model
         List(selection: $model.sidebar) {
             Section {
+                if !model.remoteHosts.isEmpty {
+                    Picker("Target", selection: Binding(
+                        get: { model.target },
+                        set: { model.selectTarget($0) }
+                    )) {
+                        Label("This Mac", systemImage: "laptopcomputer").tag(CleanupTarget.local)
+                        ForEach(model.remoteHosts) { host in
+                            Label(host.displayName, systemImage: "server.rack").tag(CleanupTarget.remote(host))
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(model.phase.isBusy)
+                    .selectionDisabled()
+                }
                 DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold)
                     .padding(.vertical, 6)
                     .selectionDisabled()
@@ -77,8 +91,10 @@ private struct Sidebar: View {
             Section {
                 Label("History", systemImage: "clock")
                     .tag(AppModel.SidebarItem.history)
-                Label("Applications", systemImage: "xmark.app")
-                    .tag(AppModel.SidebarItem.apps)
+                if !model.target.isRemote {
+                    Label("Applications", systemImage: "xmark.app")
+                        .tag(AppModel.SidebarItem.apps)
+                }
             }
         }
     }
@@ -209,7 +225,7 @@ private struct WelcomeView: View {
                     Button {
                         model.startScan()
                     } label: {
-                        Label("Scan this Mac", systemImage: "magnifyingglass")
+                        Label(model.target.isRemote ? "Scan \(model.target.displayName)" : "Scan this Mac", systemImage: "magnifyingglass")
                             .padding(.horizontal, 12)
                     }
                     .buttonStyle(.borderedProminent)
