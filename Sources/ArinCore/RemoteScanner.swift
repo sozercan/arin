@@ -553,7 +553,7 @@ public struct RemoteScanner: Sendable {
             let orphaned = buildxLsOK && !builders.isEmpty && DockerRule.orphanedBuildxVolume(volume, builders: builders)
             candidates.append(Candidate(
                 ruleID: "remote.docker.volume",
-                key: "\(host.target):\(context):\(daemonID):\(createdAt):\(volume)",
+                key: "\(host.target):\(context):\(daemonID)|\(createdAt):\(volume)",
                 title: "Docker volume \(volume)",
                 detail: orphaned
                     ? "BuildKit state for a buildx builder that no longer exists on \(host.displayName) (Docker context \(context))."

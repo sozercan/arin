@@ -236,11 +236,11 @@ public struct RemoteExecutor: Sendable {
             let scannedDaemonID: String
             let scannedCreatedAt: String?
             if candidate.ruleID == "remote.docker.volume" {
-                guard let firstSep = head.firstIndex(of: ":") else {
+                guard let sep = head.firstIndex(of: "|") else {
                     return .failure(Refusal("docker volume candidate is missing its creation timestamp"))
                 }
-                scannedDaemonID = String(head[..<firstSep])
-                scannedCreatedAt = String(head[head.index(after: firstSep)...])
+                scannedDaemonID = String(head[..<sep])
+                scannedCreatedAt = String(head[head.index(after: sep)...])
                 guard !(scannedCreatedAt ?? "").isEmpty else {
                     return .failure(Refusal("docker volume candidate has an empty creation timestamp"))
                 }
@@ -595,17 +595,30 @@ public struct RemoteExecutor: Sendable {
                     if dst.st_dev != root_dev:
                         raise OSError(errno.EXDEV, "refusing to cross mount boundary")
                     ensure_writable(dir_fd, dst)
-                    for child in os.listdir(dir_fd):
-                        if child in preserve_names:
-                            continue
+                    for attempt in range(3):
+                        for child in os.listdir(dir_fd):
+                            if child in preserve_names:
+                                continue
+                            try:
+                                remove_tree(dir_fd, child, root_dev)
+                            except FileNotFoundError:
+                                continue
+                        if preserve_names:
+                            return
+                        cur = os.lstat(name, dir_fd=parent_fd)
+                        if cur.st_dev != dst.st_dev or cur.st_ino != dst.st_ino:
+                            raise OSError(errno.EBUSY, "directory replaced during cleanup")
                         try:
-                            remove_tree(dir_fd, child, root_dev)
+                            os.rmdir(name, dir_fd=parent_fd)
+                            return
                         except FileNotFoundError:
-                            continue
+                            return
+                        except OSError as exc:
+                            if exc.errno in (errno.ENOTEMPTY, errno.EEXIST) and attempt < 2:
+                                continue
+                            raise
                 finally:
                     os.close(dir_fd)
-                if not preserve_names:
-                    os.rmdir(name, dir_fd=parent_fd)
 
             try:
                 pfd, leaf = open_chain(target)

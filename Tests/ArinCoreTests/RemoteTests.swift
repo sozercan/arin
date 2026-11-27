@@ -403,7 +403,7 @@ import Testing
                 bytes: 100, paths: ["/home/dev/go/pkg/mod"], action: .commands([CommandSpec("go", ["clean", "-modcache"])])
             )
             let dockerVol = Candidate(
-                ruleID: "remote.docker.volume", key: "vm:remote-ctx:daemon-1:2026-11-01T00:00:00Z:v1",
+                ruleID: "remote.docker.volume", key: "vm:remote-ctx:daemon-1|2026-11-01T00:00:00Z:v1",
                 title: "Docker volume v1", detail: "", category: .containers, level: .standard, risk: .review,
                 bytes: 0, paths: [], action: .commands([CommandSpec("docker", ["--context", "remote-ctx", "volume", "rm", "v1"])])
             )
@@ -461,5 +461,69 @@ import Testing
         }
         #expect(report.items.count == 1)
         #expect(report.items[0].status == .skipped)
+    }
+
+    @Test func acceptsColonBearingDockerDaemonIDAndTimestampForVolumeRemoval() async {
+        let daemonID = "ABCD:1234:EFGH:5678"
+        let createdAt = "2026-11-01T12:34:56Z"
+        let probeOutput = """
+        __ARIN_OS__=Linux
+        __ARIN_HOST__=vm
+        __ARIN_HOME__=/home/dev
+        __ARIN_UID__=1000
+        __ARIN_DF__
+        /dev/sdb1 1000000 500000 500000 50% /
+        __ARIN_TOOLS__
+        docker
+        __ARIN_SUDO__
+        no
+        __ARIN_MOUNTS__
+        /
+        __ARIN_PS__
+        sshd
+        __ARIN_LSOF__
+        n/home/dev/.bashrc
+        __ARIN_LSOF_OK__=yes
+        __ARIN_END__
+        """
+        let runner = StubRunner { _, _, input in
+            guard let input else { return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false) }
+            if input.contains("__ARIN_OS__") {
+                return ShellResult(status: 0, stdout: probeOutput, stderr: "", timedOut: false)
+            }
+            if input.contains("__EP__=") && input.contains("__VCREATED__=") {
+                return ShellResult(
+                    status: 0,
+                    stdout: "__EP__=unix:///var/run/docker.sock\n__ID__=\(daemonID)\n__VCREATED__=\(createdAt)\n",
+                    stderr: "",
+                    timedOut: false
+                )
+            }
+            if input.contains("volume' 'rm'") {
+                return ShellResult(status: 0, stdout: "buildx_buildkit_old0_state\n", stderr: "", timedOut: false)
+            }
+            if input.contains("df -Pk") {
+                return ShellResult(status: 0, stdout: "/dev/sdb1 1000000 500000 500000 50% /\n", stderr: "", timedOut: false)
+            }
+            return ShellResult(status: 0, stdout: "", stderr: "", timedOut: false)
+        }
+        let report = await Shell.$runner.withValue(runner) {
+            let executor = RemoteExecutor(host: RemoteHost(target: "vm"), keepListURL: nil)
+            let volume = Candidate(
+                ruleID: "remote.docker.volume",
+                key: "vm:default:\(daemonID)|\(createdAt):buildx_buildkit_old0_state",
+                title: "Docker volume buildx_buildkit_old0_state",
+                detail: "",
+                category: .containers,
+                level: .standard,
+                risk: .safe,
+                bytes: 0,
+                paths: [],
+                action: .commands([CommandSpec("docker", ["--context", "default", "volume", "rm", "buildx_buildkit_old0_state"])])
+            )
+            return await executor.run([volume])
+        }
+        #expect(report.items.count == 1)
+        #expect(report.items[0].status == .cleaned)
     }
 }
