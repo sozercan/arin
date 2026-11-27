@@ -271,22 +271,31 @@ public struct RemoteScanner: Sendable {
                     checks.append("[ -d \(SSHTransport.shellQuote(abs)) ] && [ ! -L \(SSHTransport.shellQuote(abs)) ] && printf '%s\\n' \(SSHTransport.shellQuote(abs))")
                 }
                 let skipList = spec.keepNames.map { "\"$base\" = \(SSHTransport.shellQuote($0))" }.joined(separator: " -o ")
+                let subtractKeep = spec.keepNames.map { name in
+                    let q = SSHTransport.shellQuote(name)
+                    return """
+                    if [ -e "$p"/\(q) ]; then
+                      ks=$(_arin_timeout 12 du -sk -- "$p"/\(q) 2>/dev/null | awk '{print $1}')
+                      [ -n "$ks" ] && total=$((total > ks ? total - ks : 0))
+                    fi
+                    """
+                }.joined(separator: "\n  ")
                 block = """
                 { \(checks.joined(separator: "; ")); } | awk '!seen[$0]++' | while IFS= read -r p; do
-                  total=0
-                  mt=0
                   found=0
                   for entry in "$p"/* "$p"/.[!.]* "$p"/..?*; do
                     [ -e "$entry" ] || [ -L "$entry" ] || continue
-                    base=$(basename "$entry")
+                    base="${entry##*/}"
                     if [ \(skipList) ]; then continue; fi
                     found=1
-                    sz=$(_arin_timeout 12 du -sk -- "$entry" 2>/dev/null | awk '{print $1}')
-                    [ -n "$sz" ] && total=$((total + sz))
-                    em=$(stat -c %Y -- "$entry" 2>/dev/null || stat -f %m -- "$entry" 2>/dev/null || echo 0)
-                    [ "$em" -gt "$mt" ] 2>/dev/null && mt="$em"
+                    break
                   done
-                  [ "$found" -eq 1 ] && printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$total" "$mt" "$p"
+                  [ "$found" -eq 1 ] || continue
+                  total=$(_arin_timeout 12 du -sk -- "$p" 2>/dev/null | awk '{print $1}')
+                  [ -n "$total" ] || continue
+                  \(subtractKeep)
+                  mt=$(stat -c %Y -- "$p" 2>/dev/null || stat -f %m -- "$p" 2>/dev/null || echo 0)
+                  printf '%s\\t%s\\t%s\\t%s\\n' \(SSHTransport.shellQuote(spec.id)) "$total" "$mt" "$p"
                 done
                 """
             } else {
