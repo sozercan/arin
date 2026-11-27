@@ -110,11 +110,12 @@ struct ResultSheet: View {
     var body: some View {
         if let report = model.lastCleanup {
             let problems = report.items.filter { $0.status != .cleaned }
+            let outcome = outcome(cleaned: report.cleanedCount, problems: problems.count)
             VStack(alignment: .leading, spacing: 18) {
                 HStack(alignment: .center, spacing: 16) {
-                    Image(systemName: problems.isEmpty ? "checkmark.circle.fill" : "checkmark.circle.badge.questionmark.fill")
+                    Image(systemName: outcome.symbol)
                         .font(.system(size: 44))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(outcome.color)
                         .symbolEffect(.bounce, value: celebrate)
                     VStack(alignment: .leading, spacing: 0) {
                         if report.measuredBytes > 0 {
@@ -123,7 +124,7 @@ struct ResultSheet: View {
                                 .foregroundStyle(.secondary)
                             SizeText(bytes: shownBytes, size: 44, weight: .bold)
                         } else {
-                            Text("Cleanup finished")
+                            Text(outcome.title)
                                 .font(.title.weight(.semibold))
                         }
                     }
@@ -188,10 +189,17 @@ struct ResultSheet: View {
             .tint(Theme.signature)
             .onAppear {
                 showItems = !problems.isEmpty
-                celebrate.toggle()
+                if report.cleanedCount > 0 { celebrate.toggle() }
                 withAnimation(.smooth(duration: 0.9)) { shownBytes = max(report.measuredBytes, 0) }
             }
         }
+    }
+
+    /// The header icon and title: a failure must not look like a success.
+    private func outcome(cleaned: Int, problems: Int) -> (symbol: String, color: Color, title: String) {
+        if cleaned == 0 { return ("xmark.circle.fill", .red, "Nothing was cleaned") }
+        if problems > 0 { return ("exclamationmark.circle.fill", .orange, "Cleaned with problems") }
+        return ("checkmark.circle.fill", .green, "Cleanup finished")
     }
 
     /// The disk after cleaning, with what was freed highlighted.
