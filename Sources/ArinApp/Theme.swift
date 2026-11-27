@@ -3,10 +3,10 @@ import ArinCore
 import SwiftUI
 
 enum Theme {
-    /// Arin's signature color: a deep teal, lifted in dark mode so it keeps its contrast.
+    /// Arin's signature color: a deep teal, a little brighter in dark mode, still dark enough for white text.
     static let signature = Color(nsColor: NSColor(name: "ArinSignature") { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.24, green: 0.74, blue: 0.72, alpha: 1)
+            ? NSColor(srgbRed: 0.10, green: 0.56, blue: 0.55, alpha: 1)
             : NSColor(srgbRed: 0.00, green: 0.47, blue: 0.49, alpha: 1)
     })
 

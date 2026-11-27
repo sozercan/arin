@@ -85,7 +85,17 @@ struct OverviewView: View {
     private var legend: some View {
         HStack(spacing: 16) {
             legendItem(Theme.usedSpace, "Other used space")
-            legendItem(Theme.signature, "Arin's findings")
+            HStack(spacing: 5) {
+                // The findings use their category colors, so the key shows those colors too.
+                HStack(spacing: 0) {
+                    ForEach(model.findingsByCategory.prefix(4), id: \.category) { finding in
+                        Rectangle().fill(finding.category.color)
+                    }
+                }
+                .frame(width: 14, height: 7)
+                .clipShape(Capsule())
+                Text("Arin's findings")
+            }
             legendItem(Color.secondary.opacity(0.3), "\(model.disk.freeBytes.formattedBytes) free of \(model.disk.totalBytes.formattedBytes)")
         }
         .font(.caption.monospacedDigit())
