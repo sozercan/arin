@@ -12,6 +12,7 @@ public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public var estimatedBytes: Int64
     public var trashed: Bool
     public var trashedPaths: [TrashedPath]?
+    public var stoppedRun: Bool? = nil
 }
 
 public struct CleanupReport: Codable, Sendable {
@@ -58,8 +59,15 @@ public struct Executor: Sendable {
         progress?(.started(total: candidates.count))
 
         var results: [CleanupItemResult] = []
+        var stoppedBy: String?
         for (index, candidate) in candidates.enumerated() {
             progress?(.item(index: index, title: candidate.title))
+            if let stoppedBy {
+                let result = Self.skipped(candidate, "stopped after an unexpected result in \(stoppedBy)")
+                results.append(result)
+                progress?(.finished(result))
+                continue
+            }
             let state = await SystemState.capture()
             let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
                 ?? .success(KeepList())
@@ -79,6 +87,7 @@ public struct Executor: Sendable {
                     result = await clean(candidate, state: state)
                 }
             }
+            if result.stoppedRun == true { stoppedBy = candidate.title }
             results.append(result)
             progress?(.finished(result))
         }
@@ -362,14 +371,14 @@ public struct Executor: Sendable {
             if filesLeft > 0 { return ("\(target): \(filesLeft) of its files still there after codex delete", nil) }
             return (nil, nil)
         case "claude":
+            guard let entryLeft = ClaudeOrphanProjectsRule.configHasEntry(target, home: guardrails.home) else {
+                return ("couldn't read ~/.claude.json after purging \(target)", "couldn't read ~/.claude.json after a purge")
+            }
             if item.restoreTo.map({ FileInfo.exists($0) || FileInfo.isSymlink($0) }) == true {
                 return ("\(target): its folder is still there after claude purge", nil)
             }
-            switch ClaudeOrphanProjectsRule.configHasEntry(target, home: guardrails.home) {
-            case false?: return (nil, nil)
-            case true?: return ("\(target): its ~/.claude.json entry is still there after claude purge", nil)
-            case nil: return ("couldn't read ~/.claude.json after purging \(target)", "couldn't read ~/.claude.json after a purge")
-            }
+            if entryLeft { return ("\(target): its ~/.claude.json entry is still there after claude purge", nil) }
+            return (nil, nil)
         default:
             return ("refusing to run \(command.display)", nil)
         }
@@ -468,7 +477,8 @@ public struct Executor: Sendable {
         }
         var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned,
                                      message: parts.joined(separator: "; "), estimatedBytes: candidate.bytes,
-                                     trashed: copied > 0, trashedPaths: backups.isEmpty ? nil : backups)
+                                     trashed: copied > 0, trashedPaths: backups.isEmpty ? nil : backups,
+                                     stoppedRun: stopped == nil ? nil : true)
         if done == commands.count { return item }
         if done == 0 || stopped != nil {
             item.status = failures.isEmpty && stopped == nil ? .skipped : .failed

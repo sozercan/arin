@@ -16,6 +16,9 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
     var failDelete = false
     var leaveFiles = false
     var leaveConfigEntry = false
+    var leaveFolder = false
+    var corruptConfig = false
+    var openFiles = ""
     var extraPlanLine: String?
 
     var calls: [(executable: String, arguments: [String], environment: [String: String])] { lock.withLock { recorded } }
@@ -30,6 +33,8 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
         switch (executable, arguments.first) {
         case ("codex", "--version"):
             return ok(codexVersion)
+        case ("lsof", _):
+            return ok(openFiles)
         case ("codex", "delete"):
             guard let home = environment["CODEX_HOME"], let id = arguments.last else { return ok() }
             let condition = deleteEveryThread ? "" : " WHERE id IN ('\(id)', '\(alsoDelete ?? id)')"
@@ -47,8 +52,9 @@ private final class RecordingRunner: CommandRunner, @unchecked Sendable {
                 let lines = ["  dir:    \(folder)", "           project transcripts"] + entry + (extraPlanLine.map { [$0] } ?? [])
                 return ok("Purge plan for \(dir):\n\n" + lines.joined(separator: "\n") + "\nDry run: \(lines.count - 1) item(s) would be deleted.\n")
             }
-            try? FileManager.default.removeItem(atPath: folder)
+            if !leaveFolder { try? FileManager.default.removeItem(atPath: folder) }
             if !leaveConfigEntry { try? FileManager.default.removeItem(atPath: "\(home)/.claude.json") }
+            if corruptConfig { try? Data("{".utf8).write(to: URL(fileURLWithPath: "\(home)/.claude.json")) }
             return ok()
         default:
             break
@@ -436,6 +442,34 @@ extension ClaudeProjectTests {
         #expect(runner.calls.contains { $0.arguments.starts(with: ["purge", "--yes"]) })
         #expect(result.status == .failed, "\(result.message)")
         #expect(result.message.contains("its ~/.claude.json entry is still there after claude purge"))
+    }
+
+    @Test func anUnreadableConfigStopsEveryLaterItemEvenWhenTheFolderIsLeft() async throws {
+        let box = try Sandbox()
+        defer { box.cleanup() }
+        let first = "\(box.root)/.t3/worktrees/app/t3-1"
+        let second = "\(box.root)/.t3/worktrees/app/t3-2"
+        let folders = [try project(box, cwd: first), try project(box, cwd: second)]
+        let candidates = zip(["Claude A", "Claude B"], zip([first, second], folders)).map { title, pair in
+            Candidate(
+                ruleID: ClaudeOrphanProjectsRule.ruleID, key: title, title: title, detail: "",
+                category: .agentData, level: .deep, risk: .safe, bytes: 100, paths: [pair.1],
+                action: .commands([ClaudeOrphanProjectsRule.purgeCommand(pair.0)])
+            )
+        }
+        var executor = Executor(guardrails: box.guardrails, keepListURL: nil)
+        executor.backupDirectory = try box.mkdir("backups")
+        let runner = RecordingRunner()
+        runner.leaveFolder = true
+        runner.corruptConfig = true
+        runner.openFiles = "n/dev/null\n"
+        let report = await Shell.$runner.withValue(runner) { await executor.run(candidates) }
+        #expect(runner.calls.filter { $0.arguments.starts(with: ["purge", "--yes"]) }.count == 1, "\(report.items.map(\.message))")
+        #expect(report.items[0].status == .failed && report.items[0].stoppedRun == true, "\(report.items[0].message)")
+        #expect(report.items[0].message.contains("couldn't read ~/.claude.json after purging"))
+        #expect(report.items[1].status == .skipped)
+        #expect(report.items[1].message.contains("stopped after an unexpected result in Claude A"))
+        #expect(FileInfo.exists(folders[1]))
     }
 
     @Test func aSymlinkedProjectsFolderIsRefused() async throws {
