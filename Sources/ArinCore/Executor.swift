@@ -12,6 +12,7 @@ public struct CleanupItemResult: Codable, Sendable, Identifiable, Hashable {
     public var estimatedBytes: Int64
     public var trashed: Bool
     public var trashedPaths: [TrashedPath]?
+    public var stoppedRun: Bool? = nil
 }
 
 public struct CleanupReport: Codable, Sendable {
@@ -37,6 +38,9 @@ public struct Executor: Sendable {
     public var trashInsteadOfDelete: Bool
     public var commandTimeout: TimeInterval
     public var keepListURL: URL?
+    var stateMaxAge: TimeInterval = 5
+    var backupDirectory: String?
+    var afterBackup: (@Sendable () -> Void)?
 
     public init(
         guardrails: Guardrails = Guardrails(),
@@ -55,8 +59,15 @@ public struct Executor: Sendable {
         progress?(.started(total: candidates.count))
 
         var results: [CleanupItemResult] = []
+        var stoppedBy: String?
         for (index, candidate) in candidates.enumerated() {
             progress?(.item(index: index, title: candidate.title))
+            if let stoppedBy {
+                let result = Self.skipped(candidate, "stopped after an unexpected result in \(stoppedBy)")
+                results.append(result)
+                progress?(.finished(result))
+                continue
+            }
             let state = await SystemState.capture()
             let keep: Result<KeepList, any Error> = keepListURL.map { url in Result { try KeepList.load(from: url) } }
                 ?? .success(KeepList())
@@ -76,6 +87,7 @@ public struct Executor: Sendable {
                     result = await clean(candidate, state: state)
                 }
             }
+            if result.stoppedRun == true { stoppedBy = candidate.title }
             results.append(result)
             progress?(.finished(result))
         }
@@ -185,13 +197,18 @@ public struct Executor: Sendable {
         if !state.openFilesKnown, !candidate.paths.isEmpty {
             return result(.skipped, "couldn't check for open files (lsof returned nothing); try again")
         }
+        let perItem: [CommandSpec]? = {
+            guard case let .commands(commands) = candidate.action, !commands.isEmpty,
+                  commands.allSatisfy(Self.isPerItem) else { return nil }
+            return commands
+        }()
         let live = state.blockers(
-            paths: candidate.paths,
+            paths: perItem == nil ? candidate.paths : [],
             processes: candidate.blockingProcesses,
-            minIdle: candidate.minIdleSeconds
+            minIdle: perItem == nil ? candidate.minIdleSeconds : nil
         )
         if !live.isEmpty { return result(.skipped, live.joined(separator: "; ")) }
-        if let idle = candidate.minIdleSeconds {
+        if perItem == nil, let idle = candidate.minIdleSeconds {
             for path in candidate.paths where await FileInfo.hasRecentWrites(path, within: idle) {
                 return result(.skipped, "\((path as NSString).abbreviatingWithTildeInPath) was written recently (may be in use)")
             }
@@ -211,6 +228,9 @@ public struct Executor: Sendable {
 
         case let .trash(paths):
             return await trashResult(paths)
+
+        case let .commands(commands) where perItem != nil:
+            return await runPerItem(candidate, commands, state: state)
 
         case let .commands(commands):
             var warnings: [String] = []
@@ -238,6 +258,240 @@ public struct Executor: Sendable {
         case let .removeWorktree(repo, path, head):
             return await removeWorktree(candidate, repo: repo, path: path, head: head, result: result)
         }
+    }
+
+    static func isPerItem(_ command: CommandSpec) -> Bool {
+        switch (command.executable, command.arguments.first) {
+        case ("codex", "delete"), ("claude", "purge"): true
+        default: false
+        }
+    }
+
+    struct PerItem {
+        var backup: [String]
+        var backupName: String
+        var restoreTo: String?
+        var otherThreads: Set<String> = []
+        var tree: Set<String> = []
+    }
+
+    enum PerItemCheck {
+        case refused(String)
+        case ready(PerItem)
+    }
+
+    func pathRefusal(_ paths: [String], scanned: [String]) -> String? {
+        let reviewed = Set(scanned.map { Guardrails.canonical(($0 as NSString).standardizingPath) })
+        for path in paths {
+            do { try guardrails.checkTarget(path) } catch { return error.description }
+            guard reviewed.contains(Guardrails.canonical((path as NSString).standardizingPath)) else {
+                return "it now covers files that weren't in the scan"
+            }
+        }
+        return nil
+    }
+
+    func prepare(_ command: CommandSpec, state: SystemState, scanned: [String]) async -> PerItemCheck {
+        guard Guardrails.allows(command), let target = command.arguments.last else { return .refused("refusing to run \(command.display)") }
+        switch command.executable {
+        case "codex":
+            let codexHome = "\(guardrails.home)/.codex"
+            if let reason = await CodexSessionsRule.recheck(target, codexHome: codexHome, state: state, now: Date()) { return .refused(reason) }
+            guard let session = await CodexSessionsRule.sessions(codexHome: codexHome, only: target)?.first,
+                  let before = await CodexSessionsRule.threadIDs(codexHome: codexHome)
+            else { return .refused("couldn't read Codex's session database") }
+            if let reason = pathRefusal(session.files, scanned: scanned) { return .refused(reason) }
+            return .ready(PerItem(backup: session.files, backupName: "Codex session \(target)", restoreTo: nil,
+                                  otherThreads: before.subtracting(session.threadIDs), tree: Set(session.threadIDs)))
+        case "claude":
+            if let reason = await ClaudeOrphanProjectsRule.recheck(target, home: guardrails.home, state: state) { return .refused(reason) }
+            if let reason = await ClaudeOrphanProjectsRule.dryRunRefusal(target, home: guardrails.home) { return .refused(reason) }
+            let folder = "\(guardrails.home)/.claude/projects/\(ClaudeProjects.folderName(for: target))"
+            if let reason = pathRefusal([folder], scanned: scanned) { return .refused(reason) }
+            guard !FileInfo.isSymlink(folder),
+                  Guardrails.canonical(URL(fileURLWithPath: folder).resolvingSymlinksInPath().path) == Guardrails.canonical(folder)
+            else { return .refused("its folder is reached through a symlink") }
+            return .ready(PerItem(backup: [folder], backupName: ClaudeProjects.folderName(for: target), restoreTo: folder))
+        default:
+            return .refused("refusing to run \(command.display)")
+        }
+    }
+
+    enum BackedUp {
+        case done(TrashedPath?)
+        case failed(String)
+    }
+
+    func backUp(_ item: PerItem) -> BackedUp {
+        let fm = FileManager.default
+        let staging = (NSTemporaryDirectory() as NSString).appendingPathComponent("arin-backup-\(UUID().uuidString)")
+        let copy = (staging as NSString).appendingPathComponent(item.backupName)
+        defer { try? fm.removeItem(atPath: staging) }
+        do {
+            if let original = item.restoreTo {
+                try fm.createDirectory(atPath: staging, withIntermediateDirectories: true)
+                try fm.copyItem(atPath: original, toPath: copy)
+            } else {
+                try fm.createDirectory(atPath: copy, withIntermediateDirectories: true)
+                for file in item.backup {
+                    try fm.copyItem(atPath: file, toPath: (copy as NSString).appendingPathComponent((file as NSString).lastPathComponent))
+                }
+            }
+            if let backupDirectory {
+                let destination = (backupDirectory as NSString).appendingPathComponent("\(item.backupName)-\(UUID().uuidString)")
+                try fm.moveItem(atPath: copy, toPath: destination)
+                return .done(item.restoreTo.map { TrashedPath(original: $0, location: destination) })
+            }
+            var location: NSURL?
+            try fm.trashItem(at: URL(fileURLWithPath: copy), resultingItemURL: &location)
+            guard let path = location?.path else { return .failed("couldn't copy it to the Trash first") }
+            return .done(item.restoreTo.map { TrashedPath(original: $0, location: path) })
+        } catch {
+            return .failed("couldn't copy it to the Trash first")
+        }
+    }
+
+    func verify(_ command: CommandSpec, _ item: PerItem) async -> (failure: String?, stop: String?) {
+        guard let target = command.arguments.last else { return ("refusing to run \(command.display)", nil) }
+        switch command.executable {
+        case "codex":
+            let codexHome = "\(guardrails.home)/.codex"
+            guard let after = await CodexSessionsRule.threadIDs(codexHome: codexHome) else {
+                let reason = "couldn't read Codex's session database after deleting \(target)"
+                return (reason, reason)
+            }
+            let lost = item.otherThreads.subtracting(after)
+            if !lost.isEmpty {
+                let reason = "codex delete for \(target) also removed \(lost.count) other thread\(lost.count == 1 ? "" : "s")"
+                return (reason, reason)
+            }
+            let threadsLeft = item.tree.intersection(after).count
+            if threadsLeft > 0 { return ("\(target): \(threadsLeft) of its threads still listed after codex delete", nil) }
+            let filesLeft = item.backup.filter { FileInfo.exists($0) || FileInfo.isSymlink($0) }.count
+            if filesLeft > 0 { return ("\(target): \(filesLeft) of its files still there after codex delete", nil) }
+            return (nil, nil)
+        case "claude":
+            guard let entryLeft = ClaudeOrphanProjectsRule.configHasEntry(target, home: guardrails.home) else {
+                return ("couldn't read ~/.claude.json after purging \(target)", "couldn't read ~/.claude.json after a purge")
+            }
+            if item.restoreTo.map({ FileInfo.exists($0) || FileInfo.isSymlink($0) }) == true {
+                return ("\(target): its folder is still there after claude purge", nil)
+            }
+            if entryLeft { return ("\(target): its ~/.claude.json entry is still there after claude purge", nil) }
+            return (nil, nil)
+        default:
+            return ("refusing to run \(command.display)", nil)
+        }
+    }
+
+    func runPerItem(_ candidate: Candidate, _ commands: [CommandSpec], state: SystemState) async -> CleanupItemResult {
+        var done = 0
+        var skipped: [String: Int] = [:]
+        var failures: [String] = []
+        var backups: [TrashedPath] = []
+        var copied = 0
+        var stopped: String?
+        var state = state
+        var captured = Date()
+        let codexSupported = commands.first?.executable == "codex"
+            ? await CodexSessionsRule.installedVersionSupported(codexHome: "\(guardrails.home)/.codex") : true
+        for command in commands {
+            if Task.isCancelled {
+                skipped["cancelled", default: 0] += 1
+                continue
+            }
+            if stopped != nil {
+                skipped["stopped after an unexpected result", default: 0] += 1
+                continue
+            }
+            if !codexSupported {
+                skipped["this Codex version hasn't been checked with Arin", default: 0] += 1
+                continue
+            }
+            if Date().timeIntervalSince(captured) >= stateMaxAge {
+                state = await SystemState.capture()
+                captured = Date()
+            }
+            if !state.openFilesKnown {
+                skipped["couldn't check for open files", default: 0] += 1
+                continue
+            }
+            let planned: PerItem
+            switch await prepare(command, state: state, scanned: candidate.paths) {
+            case let .refused(reason):
+                skipped[reason, default: 0] += 1
+                continue
+            case let .ready(ready):
+                planned = ready
+            }
+            let trashed: TrashedPath?
+            switch backUp(planned) {
+            case let .failed(reason):
+                skipped[reason, default: 0] += 1
+                continue
+            case let .done(copy):
+                trashed = copy
+            }
+            afterBackup?()
+            if Date().timeIntervalSince(captured) >= stateMaxAge {
+                state = await SystemState.capture()
+                captured = Date()
+            }
+            let item: PerItem
+            switch state.openFilesKnown ? await prepare(command, state: state, scanned: candidate.paths) : .refused("couldn't check for open files") {
+            case let .refused(reason):
+                skipped["\(reason) (its copy is in the Trash)", default: 0] += 1
+                continue
+            case let .ready(ready) where Set(ready.backup) == Set(planned.backup):
+                item = ready
+            case .ready:
+                skipped["its files changed while it was copied (its copy is in the Trash)", default: 0] += 1
+                continue
+            }
+            if let trashed { backups.append(trashed) }
+            copied += 1
+            let environment = command.executable == "codex" ? ["CODEX_HOME": "\(guardrails.home)/.codex"] : ["HOME": guardrails.home]
+            let output = await Shell.run(command.executable, command.arguments, cwd: command.cwd,
+                                         environment: environment, timeout: min(commandTimeout, 300))
+            let check = await verify(command, item)
+            if let stop = check.stop { stopped = stop }
+            if !output.ok {
+                let tail = (output.timedOut ? "timed out" : (output.stderr.isEmpty ? output.stdout : output.stderr))
+                    .trimmingCharacters(in: .whitespacesAndNewlines).suffix(200)
+                failures.append(check.stop ?? "\(command.arguments.last ?? command.display): \(tail)")
+            } else if let failure = check.failure {
+                failures.append(failure)
+            } else {
+                done += 1
+            }
+        }
+        let noun = commands.first?.executable == "codex" ? "sessions" : "projects"
+        var parts = ["removed \(done) of \(commands.count) \(noun)"]
+        if copied > 0 { parts.append("copies are in the Trash") }
+        if let stopped { parts.append(stopped == failures.first ? "stopped" : "stopped: \(stopped)") }
+        if !skipped.isEmpty {
+            parts.append("skipped " + skipped.sorted { $0.value > $1.value }.map { "\($0.value) (\($0.key))" }.joined(separator: ", "))
+        }
+        if let first = failures.first {
+            parts.append("\(failures.count) failed, first: \(first)")
+        }
+        var item = CleanupItemResult(id: candidate.id, title: candidate.title, status: .cleaned,
+                                     message: parts.joined(separator: "; "), estimatedBytes: candidate.bytes,
+                                     trashed: copied > 0, trashedPaths: backups.isEmpty ? nil : backups,
+                                     stoppedRun: stopped == nil ? nil : true)
+        if done == commands.count { return item }
+        if done == 0 || stopped != nil {
+            item.status = failures.isEmpty && stopped == nil ? .skipped : .failed
+            if done == 0 {
+                item.estimatedBytes = 0
+                return item
+            }
+        } else {
+            item.status = .partial
+        }
+        let left = await Size.total(candidate.paths)
+        item.estimatedBytes = max(0, candidate.bytes - left)
+        return item
     }
 
     static func targetsMostlyGone(_ candidate: Candidate) async -> Bool {

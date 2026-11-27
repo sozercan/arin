@@ -65,6 +65,15 @@ struct SettingsView: View {
 
             Section("Cleaning") {
                 Toggle("Move to Trash instead of deleting", isOn: $model.trashInsteadOfDelete)
+                Picker("Agent sessions", selection: $model.agentHistoryDays) {
+                    Text("Default").tag(0)
+                    ForEach(ScanOptions.agentHistoryDayChoices, id: \.self) { days in
+                        Text("Older than \(days) days").tag(days)
+                    }
+                }
+                Text("Codex sessions and Claude Code data for deleted folders are offered only once untouched this long. By default Codex sessions need 30 days, and Claude Code data for deleted folders one day. Takes effect on the next scan.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Always kept") {

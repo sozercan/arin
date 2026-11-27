@@ -7,6 +7,7 @@ public enum Catalog {
             CodeSignCloneRule(),
             CodexReleasesRule(),
             ClaudeVersionsRule(),
+            CopilotPackagesRule(),
             RustToolchainRule(),
             MiseRule(),
             OllamaModelRule(),
@@ -16,6 +17,8 @@ public enum Catalog {
             WorktreeRule(),
             DockerRule(),
             SQLiteFreePagesRule(),
+            CodexSessionsRule(),
+            ClaudeOrphanProjectsRule(),
             UnclassifiedRule(),
         ]
     }
@@ -181,6 +184,16 @@ public enum Catalog {
             titleForPath: { "Codex runtime install: \(($0 as NSString).lastPathComponent)" }
         ),
         KnownPathRule(
+            id: "copilot.package-downloads",
+            name: "Leftover Copilot CLI downloads",
+            detail: "Unpacked update downloads the Copilot CLI never finished installing.",
+            category: .toolVersions,
+            paths: [".copilot/pkg/tmp/*"],
+            minIdleSeconds: 3600,
+            perPath: true,
+            titleForPath: { "Copilot CLI download: \(($0 as NSString).lastPathComponent)" }
+        ),
+        KnownPathRule(
             id: "podman.vm-cache",
             name: "Podman VM image caches",
             detail: "Downloaded machine images. Podman re-downloads them when you create a machine.",
@@ -258,6 +271,17 @@ public enum Catalog {
             blockingProcesses: ["Microsoft Edge"]
         ),
         ElectronCacheRule(),
+        KnownPathRule(
+            id: "copilot.staged-update",
+            name: "Staged GitHub Copilot app update",
+            detail: "An update the GitHub Copilot app downloaded and hasn't installed yet. It downloads the update again when it next checks.",
+            category: .appCaches,
+            level: .standard,
+            risk: .review,
+            paths: [".copilot/updater/staged-update-*.bin", ".copilot/updater/staged-manifest.json"],
+            blockingProcesses: ["GitHub Copilot"],
+            minIdleSeconds: 3600
+        ),
     ]
 
     static let xcodeRules: [any Rule] = [

@@ -51,7 +51,8 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 | **Git worktrees** | Worktrees whose branch was merged, including squash merges |
 | **Containers & VMs** | Docker build cache and orphaned volumes, Lima and Colima downloads |
 | **Local AI models** | Ollama and LM Studio |
-| **Tool versions** | Old Codex and Claude releases, unused mise versions, extra Rust toolchains |
+| **Tool versions** | Old Codex, Claude and Copilot CLI releases, unused mise versions, extra Rust toolchains |
+| **Agent data** | Codex sessions idle for 30 days (removed with `codex delete`), Claude Code data for folders that no longer exist (`claude purge`), bloated agent databases |
 | **System** | Stale temp folders (Go caches and DerivedData copies start as Safe; anything else as Review), Time Machine local snapshots |
 | **Everything else** | A size overview of your home folder surfaces other large folders (agent output, logs, app data) under *Unclassified* |
 
@@ -61,7 +62,7 @@ Download the DMG from the [latest release](https://github.com/sozercan/arin/rele
 |---|---|
 | **Quick** | Caches that refill on their own: package caches, idle DerivedData and DerivedData for deleted projects, unavailable simulators, stale temp caches, old tool versions |
 | **Standard** | Adds build output (`node_modules`, `.build`, venvs, `bin/`), merged worktrees, Docker build cache, app caches |
-| **Deep** | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, unrecognized app data |
+| **Deep** | Adds simulator data, old runtimes, extra toolchains, archives, local AI models, Time Machine local snapshots, agent history, unrecognized app data |
 
 Only items marked **Safe** at or below the chosen level are pre-selected. Build output in a project you changed, or ran a Claude Code session in, during the last 7 days is listed but not pre-selected.
 
@@ -94,6 +95,7 @@ The same engine runs headless. Everything is read-only or a dry run until you pa
 arin scan --level standard                 # find candidates
 arin review --agent claude                 # scan, then ask your agent
 arin clean --level quick                   # dry run: show what would go
+arin clean --level deep --older-than 90    # dry run: agent sessions untouched for 90+ days
 arin clean --level quick --yes             # clean the pre-selected items
 arin clean --ids 'go.build-cache:go.build-cache' --yes
 arin plan --level quick --out plan.json    # save what clean would pick
@@ -106,7 +108,7 @@ arin uninstall Slack --yes                 # move them to the Trash
 arin disk --warn-below 20GiB               # print a warning only when free space is low
 ```
 
-A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. Run `arin --help` for every option.
+A saved plan is re-checked when it runs: any item that's gone, changed (a worktree with a new commit, a new snapshot, a moved npm cache), became more cautious, or was kept since is refused. `clean --plan` rescans with the `--older-than` you pass it, so pass the value that made the plan. If a different age changes which agent sessions qualify, that item is refused as changed. If it picks the same sessions, they meet both ages and the item runs. Run `arin --help` for every option.
 
 ### From your agent
 

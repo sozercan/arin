@@ -26,6 +26,8 @@ options:
   --model NAME                  Review model (default: sonnet for claude, CLI default for codex and copilot; "" = CLI default)
   --effort low|medium|high|xhigh  Review effort (default: low; "" = CLI default)
   --roots a,b                   Project roots to search (default: ~/projects, ~/go/src, …)
+  --older-than DAYS             Agent session data: only offer Codex sessions and Claude Code data for
+                                deleted folders untouched this long (30 to 3650; default: 30 for Codex)
   --ids a,b                     clean/plan: exactly these candidate ids instead of the pre-selection;
                                 with --plan, only these items from the plan
   --plan FILE                   clean: run a saved plan; items that changed since are refused
@@ -54,6 +56,7 @@ struct Args {
     var out: String?
     var remove = false
     var warnBelow: String?
+    var olderThan: Int?
     var positional: [String] = []
     var checkPRs = true
     var fetch = false
@@ -88,6 +91,13 @@ struct Args {
                 let v = try value(arg)
                 guard let n = Int(v), n > 0 else { throw CLIError("--limit needs a positive integer, got \(v)") }
                 limit = n
+            case "--older-than":
+                let v = try value(arg)
+                let digits = v.hasSuffix("d") ? String(v.dropLast()) : v
+                guard let n = Int(digits), (ScanOptions.minimumAgentHistoryDays ... ScanOptions.maximumAgentHistoryDays).contains(n) else {
+                    throw CLIError("--older-than needs a number of days from \(ScanOptions.minimumAgentHistoryDays) to \(ScanOptions.maximumAgentHistoryDays), got \(v)")
+                }
+                olderThan = n
             case "--model": model = try value(arg)
             case "--effort": effort = try value(arg)
             case "--roots": roots = try value(arg).split(separator: ",").map { (String($0) as NSString).expandingTildeInPath }
@@ -159,7 +169,8 @@ func scan(_ args: Args) async -> ScanReport {
         record(.scan(ScanRecord(report, ruleNames: Catalog.ruleNames)))
         return report
     }
-    let options = ScanOptions(projectRoots: args.roots, checkPullRequests: args.checkPRs, fetchRemotes: args.fetch)
+    let options = ScanOptions(projectRoots: args.roots, checkPullRequests: args.checkPRs, fetchRemotes: args.fetch,
+                              agentHistoryDays: args.olderThan)
     let scanner = Scanner(options: options)
     if !args.json { eprint("Scanning \(scanner.rules.count) rule groups…") }
     let report = await scanner.scan { event in

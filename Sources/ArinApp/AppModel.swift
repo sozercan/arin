@@ -110,6 +110,10 @@ final class AppModel {
         didSet { defaults.set(fetchRemotes, forKey: "fetchRemotes") }
     }
 
+    var agentHistoryDays: Int {
+        didSet { defaults.set(agentHistoryDays, forKey: "agentHistoryDays") }
+    }
+
     var extraProjectRoots: [String] {
         didSet { defaults.set(extraProjectRoots, forKey: "extraProjectRoots") }
     }
@@ -145,6 +149,8 @@ final class AppModel {
         trashInsteadOfDelete = defaults.bool(forKey: "trashInsteadOfDelete")
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
+        let savedDays = defaults.integer(forKey: "agentHistoryDays")
+        agentHistoryDays = ScanOptions.agentHistoryDayChoices.contains(savedDays) ? savedDays : 0
         extraProjectRoots = defaults.stringArray(forKey: "extraProjectRoots") ?? []
         if let data = defaults.data(forKey: "remoteHosts"),
            let saved = try? JSONDecoder().decode([RemoteHost].self, from: data) {
@@ -223,7 +229,8 @@ final class AppModel {
         return ScanOptions(
             projectRoots: defaultsRoots + extra,
             checkPullRequests: checkPullRequests,
-            fetchRemotes: fetchRemotes
+            fetchRemotes: fetchRemotes,
+            agentHistoryDays: agentHistoryDays > 0 ? agentHistoryDays : nil
         )
     }
 

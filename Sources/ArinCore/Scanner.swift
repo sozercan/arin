@@ -9,6 +9,11 @@ public struct ScanOptions: Sendable {
     public var fetchRemotes: Bool
     public var minimumBytes: Int64
     public var keepListURL: URL?
+    public var agentHistoryDays: Int?
+
+    public static let minimumAgentHistoryDays = CodexSessionsRule.idleDays
+    public static let maximumAgentHistoryDays = 3650
+    public static let agentHistoryDayChoices = [30, 60, 90, 180, 365]
 
     public init(
         home: String = NSHomeDirectory(),
@@ -17,7 +22,8 @@ public struct ScanOptions: Sendable {
         checkPullRequests: Bool = true,
         fetchRemotes: Bool = false,
         minimumBytes: Int64 = 20 * 1024 * 1024,
-        keepListURL: URL? = KeepList.defaultURL
+        keepListURL: URL? = KeepList.defaultURL,
+        agentHistoryDays: Int? = nil
     ) {
         self.home = home
         self.tmpDir = (tmpDir as NSString).standardizingPath
@@ -26,6 +32,7 @@ public struct ScanOptions: Sendable {
         self.fetchRemotes = fetchRemotes
         self.minimumBytes = minimumBytes
         self.keepListURL = keepListURL
+        self.agentHistoryDays = agentHistoryDays.map { min(max($0, Self.minimumAgentHistoryDays), Self.maximumAgentHistoryDays) }
     }
 
     public static func defaultProjectRoots(home: String) -> [String] {

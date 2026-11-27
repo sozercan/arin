@@ -84,7 +84,7 @@ public enum FileInfo {
 
     public static func hasRecentWrites(_ path: String, within window: TimeInterval) async -> Bool {
         guard exists(path) || isSymlink(path) else { return false }
-        let minutes = String(max(Int(window / 60), 1))
+        let minutes = String(window.isNaN ? 1 : Int(min(max(window / 60, 1), 100 * 365 * 24 * 60)))
         let result = await Shell.run("find", [path, "-mmin", "-\(minutes)", "-print", "-quit"], timeout: 120)
         return !result.ok || !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
