@@ -21,7 +21,11 @@ struct ArinApp: App {
             MenuBarView()
                 .environment(model)
         } label: {
-            Label(model.disk.freeBytes.compactBytes, systemImage: model.isLowOnSpace ? "internaldrive.fill" : "internaldrive")
+            Label {
+                Text(model.disk.freeBytes.compactBytes)
+            } icon: {
+                Image(nsImage: TankIcon.image(free: model.disk.freeBytes, threshold: model.lowSpaceThreshold, total: model.disk.totalBytes))
+            }
         }
         .menuBarExtraStyle(.window)
 
@@ -60,18 +64,22 @@ private struct ArinCommands: Commands {
         }
 
         CommandGroup(before: .sidebar) {
+            ForEach(Array(AppModel.Mailbox.allCases.enumerated()), id: \.element) { index, box in
+                Button(box.title) { model.sidebar = .inbox(box) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")))
+            }
             Button("All Items") { model.sidebar = .all }
-                .keyboardShortcut("1")
+                .keyboardShortcut("4")
             Button("Space Map") { model.sidebar = .map }
-                .keyboardShortcut("2")
+                .keyboardShortcut("5")
                 .disabled(model.report == nil)
             Button("Insights") { model.sidebar = .insights }
-                .keyboardShortcut("3")
+                .keyboardShortcut("6")
                 .disabled(model.report.map { $0.insights.isEmpty && $0.ruleErrors.isEmpty } ?? true)
             Button("History") { model.sidebar = .history }
-                .keyboardShortcut("4")
+                .keyboardShortcut("7")
             Button("Applications") { model.sidebar = .apps }
-                .keyboardShortcut("5")
+                .keyboardShortcut("8")
             Divider()
             Button(model.showingInspector ? "Hide Inspector" : "Show Inspector") { model.showingInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])

@@ -8,27 +8,18 @@ struct HistoryView: View {
     var body: some View {
         let cleanups = model.cleanupRecords.reversed()
         List {
-            Section("Since the previous scan") {
-                if let growth = model.growthSinceLastScan {
-                    if growth.items.isEmpty {
-                        Text("Nothing grew by more than 256 MB since \(growth.since.formatted(.relative(presentation: .named))).")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(growth.items.prefix(12), id: \.ruleID) { item in
-                        HStack {
-                            Text(item.label)
-                            Spacer()
-                            Text("+\(item.bytes.formattedBytes)")
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+            Section("What grows back") {
+                if model.scanRecords.count >= 2 {
+                    let strata = Strata(scans: Array(model.scanRecords.suffix(60)), cleanups: model.cleanupRecords)
+                    StrataChart(strata: strata)
+                        .frame(height: 220)
+                        .padding(.vertical, 6)
+                    RegrowthRows(strata: strata)
                 } else {
                     Text("Scan again later to see what grows back between scans.")
                         .foregroundStyle(.secondary)
                 }
             }
-
             if model.scanRecords.count >= 2 {
                 Section("Free space at each scan") {
                     FreeSpaceChart(scans: Array(model.scanRecords.suffix(60)))
@@ -131,6 +122,159 @@ private struct CleanupRecordRow: View {
                 Spacer()
                 Text(record.measuredBytes > 0 ? "Freed \(record.measuredBytes.formattedBytes)" : "No measured gain")
                     .monospacedDigit()
+            }
+        }
+    }
+}
+
+struct Strata {
+    struct Point: Identifiable {
+        var date: Date
+        var series: String
+        var bytes: Int64
+        var id: String { "\(series)|\(date.timeIntervalSince1970)" }
+    }
+
+    struct Cut: Identifiable {
+        var date: Date
+        var bytes: Int64
+        var id: Date { date }
+    }
+
+    struct Regrowth: Identifiable {
+        var ruleID: String
+        var label: String
+        var bytes: Int64
+        var perWeek: Int64
+        var id: String { ruleID }
+    }
+
+    static let otherSeries = "Everything else"
+
+    var points: [Point] = []
+    var series: [String] = []
+    var cuts: [Cut] = []
+    var regrowth: [Regrowth] = []
+    var since: Date?
+
+    init(scans: [ScanRecord], cleanups: [CleanupRecord], minimum: Int64 = 256 * 1024 * 1024) {
+        guard let first = scans.first, let latest = scans.last else { return }
+        let top = latest.bytesByRule.filter { $0.value > 0 }.sorted { $0.value > $1.value }.prefix(6).map(\.key)
+        var names: [String: String] = [:]
+        for rule in top {
+            let label = latest.labels[rule] ?? rule
+            names[rule] = names.values.contains(label) ? "\(label) (\(rule))" : label
+        }
+        let hasOther = scans.contains { scan in scan.bytesByRule.contains { !top.contains($0.key) && $0.value > 0 } }
+        series = top.compactMap { names[$0] } + (hasOther ? [Self.otherSeries] : [])
+        for scan in scans {
+            for rule in top {
+                points.append(Point(date: scan.date, series: names[rule] ?? rule, bytes: scan.bytesByRule[rule] ?? 0))
+            }
+            if hasOther {
+                let rest = scan.bytesByRule.filter { !top.contains($0.key) }.values.reduce(0, +)
+                points.append(Point(date: scan.date, series: Self.otherSeries, bytes: rest))
+            }
+        }
+        cuts = cleanups
+            .filter { $0.uninstalled == nil && $0.measuredBytes > 0 && $0.date >= first.date && $0.date <= latest.date }
+            .map { Cut(date: $0.date, bytes: $0.measuredBytes) }
+
+        let lastCut = cuts.last?.date
+        let baseline = lastCut.flatMap { cut in scans.first { $0.date > cut } } ?? first
+        let interval = latest.date.timeIntervalSince(baseline.date)
+        guard baseline.date < latest.date, interval >= 86_400 else { return }
+        since = baseline.date
+        regrowth = latest.bytesByRule.compactMap { rule, bytes in
+            let delta = bytes - (baseline.bytesByRule[rule] ?? 0)
+            guard delta >= minimum else { return nil }
+            return Regrowth(ruleID: rule, label: latest.labels[rule] ?? rule, bytes: delta, perWeek: Int64(Double(delta) * 604_800 / interval))
+        }
+        .sorted { $0.perWeek > $1.perWeek }
+        .prefix(4)
+        .map { $0 }
+    }
+}
+
+private struct StrataChart: View {
+    var strata: Strata
+
+    private static let palette: [Color] = [
+        Color(red: 0.26, green: 0.38, blue: 0.56),
+        Color(red: 0.37, green: 0.57, blue: 0.56),
+        Color(red: 0.50, green: 0.66, blue: 0.74),
+        Color(red: 0.78, green: 0.70, blue: 0.49),
+        Color(red: 0.62, green: 0.68, blue: 0.48),
+        Color(red: 0.55, green: 0.50, blue: 0.66),
+        Color(red: 0.62, green: 0.64, blue: 0.66),
+    ]
+
+    var body: some View {
+        Chart {
+            ForEach(strata.points) { point in
+                AreaMark(
+                    x: .value("Scanned", point.date),
+                    y: .value("GB", Double(point.bytes) / 1e9),
+                    stacking: .standard
+                )
+                .foregroundStyle(by: .value("Item", point.series))
+                .interpolationMethod(.monotone)
+            }
+            ForEach(strata.cuts) { cut in
+                RuleMark(x: .value("Cleaned", cut.date))
+                    .foregroundStyle(.primary.opacity(0.55))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .leading, spacing: 2) {
+                        Text("Cleaned \(cut.bytes.formattedBytes)")
+                            .font(.caption.weight(.semibold))
+                    }
+            }
+        }
+        .chartForegroundStyleScale(domain: strata.series, range: Array(Self.palette.prefix(strata.series.count)))
+        .chartYAxisLabel("GB Arin could clean")
+        .chartLegend(position: .trailing, alignment: .top, spacing: 16)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+            }
+        }
+        .accessibilityLabel("What Arin found at each scan, stacked by item")
+    }
+}
+
+private struct RegrowthRows: View {
+    @Environment(AppModel.self) private var model
+    var strata: Strata
+
+    var body: some View {
+        if let since = strata.since {
+            if strata.regrowth.isEmpty {
+                Text("Nothing grew back by more than 256 MB since \(since.formatted(date: .abbreviated, time: .omitted)).")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(strata.regrowth) { item in
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.label)
+                        Text("+\(item.bytes.formattedBytes) since \(since.formatted(date: .abbreviated, time: .omitted))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text("+\(item.perWeek.formattedBytes) a week")
+                        .font(.body.weight(.semibold))
+                        .monospacedDigit()
+                }
+            }
+            if !strata.regrowth.isEmpty, !model.autoMode, !model.target.isRemote {
+                HStack {
+                    Text("Auto mode cleans quick caches on its own when you run low on space.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    SettingsLink { Text("Settings…") }
+                }
             }
         }
     }

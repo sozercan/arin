@@ -1,3 +1,4 @@
+import AppKit
 import ArinCore
 import SwiftUI
 
@@ -52,5 +53,35 @@ struct MenuBarView: View {
         .padding(14)
         .frame(width: 300)
         .onAppear { model.refreshDisk() }
+    }
+}
+
+enum TankIcon {
+    static func level(free: Int64, threshold: Int64, total: Int64) -> (fill: Double, alert: Double) {
+        let window = Double(max(min(100_000_000_000, total), threshold * 4, 1))
+        let fill = 1 - min(max(Double(free) / window, 0), 1)
+        let alert = 1 - min(Double(threshold) / window, 1)
+        return (fill, alert)
+    }
+
+    static func image(free: Int64, threshold: Int64, total: Int64) -> NSImage {
+        let (fill, alert) = level(free: free, threshold: threshold, total: total)
+        let image = NSImage(size: NSSize(width: 13, height: 16), flipped: false) { _ in
+            let body = NSRect(x: 2, y: 0.75, width: 9, height: 14.5)
+            let outline = NSBezierPath(roundedRect: body, xRadius: 2.6, yRadius: 2.6)
+            outline.lineWidth = 1.3
+            NSColor.black.set()
+            outline.stroke()
+            let inner = body.insetBy(dx: 1.9, dy: 1.9)
+            let water = NSRect(x: inner.minX, y: inner.minY, width: inner.width, height: inner.height * fill)
+            NSBezierPath(roundedRect: water, xRadius: 1, yRadius: 1).fill()
+            let y = inner.minY + inner.height * alert
+            NSBezierPath(rect: NSRect(x: 0, y: y - 0.5, width: 1.6, height: 1)).fill()
+            NSBezierPath(rect: NSRect(x: 11.4, y: y - 0.5, width: 1.6, height: 1)).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "Disk"
+        return image
     }
 }

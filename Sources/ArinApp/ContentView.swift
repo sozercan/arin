@@ -17,6 +17,8 @@ struct ContentView: View {
                     AppsView()
                 } else if model.report == nil {
                     WelcomeView()
+                } else if case let .inbox(box) = model.sidebar {
+                    InboxView(box: box).statusBar(model)
                 } else if model.sidebar == .insights {
                     InsightsView().statusBar(model)
                 } else if model.sidebar == .map {
@@ -27,7 +29,7 @@ struct ContentView: View {
             }
         }
         .toolbar { Toolbar() }
-        .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
+        .sheet(isPresented: $model.showingConfirm, onDismiss: { model.pendingClean = nil }) { ConfirmSheet() }
         .sheet(isPresented: $model.showingResult) { ResultSheet() }
         .sheet(item: $model.uninstallApp) { app in UninstallSheet(app: app) }
         .alert("Something went wrong", isPresented: Binding(
@@ -66,19 +68,16 @@ private struct Sidebar: View {
                     .padding(.vertical, 6)
                     .selectionDisabled()
             }
-            if model.report == nil {
-                Section {
-                    Label("All Items", systemImage: "square.grid.2x2")
-                        .tag(AppModel.SidebarItem.all)
+            Section("Inbox") {
+                ForEach(AppModel.Mailbox.allCases, id: \.self) { box in
+                    mailbox(box)
                 }
-            } else {
-                Section("Found") {
+            }
+            if model.report != nil {
+                Section("Browse") {
                     row(.all, "All Items", "square.grid.2x2", model.candidates.dedupedBytes)
                     Label("Space Map", systemImage: "square.grid.3x1.below.line.grid.1x2")
                         .tag(AppModel.SidebarItem.map)
-                    ForEach(model.categoriesWithResults, id: \.self) { category in
-                        row(.category(category), category.label, category.symbol, model.bytes(for: category))
-                    }
                 }
                 if let report = model.report, !report.insights.isEmpty || !report.ruleErrors.isEmpty {
                     Section {
@@ -95,6 +94,20 @@ private struct Sidebar: View {
                     Label("Applications", systemImage: "xmark.app")
                         .tag(AppModel.SidebarItem.apps)
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func mailbox(_ box: AppModel.Mailbox) -> some View {
+        let label = Label(box.title, systemImage: box.symbol).tag(AppModel.SidebarItem.inbox(box))
+        if model.report == nil {
+            label
+        } else {
+            switch box {
+            case .review: label.badge(model.unreadCount)
+            case .safe: label.badge(Text(model.candidates(in: .safe).dedupedBytes.formattedBytes).monospacedDigit())
+            case .kept: label.badge(model.candidates(in: .kept).count)
             }
         }
     }
