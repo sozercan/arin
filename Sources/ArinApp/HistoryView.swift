@@ -269,7 +269,7 @@ private struct StrataChart: View {
             }
         }
         .chartForegroundStyleScale(domain: strata.series, range: Array(Self.palette.prefix(strata.series.count)))
-        .chartYAxisLabel("GB Arin could clean")
+        .chartYAxisLabel("GB found")
         .chartLegend(position: .trailing, alignment: .top, spacing: 16)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in

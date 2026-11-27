@@ -226,8 +226,12 @@ private struct LaneTrack: View {
         let restBytes = rest.reduce(0) { $0 + $1.bytes }
         HStack(spacing: 3) {
             ForEach(big) { item in
-                Bar(candidate: item, state: ItemState(item, bucket: model.bucket(of: item)), color: lane.category.color, width: CGFloat(item.bytes) * unit - 3, focused: focus == item.id)
-                    .onTapGesture { open(item.id) }
+                Button {
+                    open(item.id)
+                } label: {
+                    Bar(candidate: item, state: ItemState(item, bucket: model.bucket(of: item)), color: lane.category.color, width: CGFloat(item.bytes) * unit - 3, focused: focus == item.id)
+                }
+                .buttonStyle(.plain)
             }
             if !rest.isEmpty {
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -267,7 +271,6 @@ private struct Bar: View {
             .help("\(candidate.title) · \(candidate.bytes.formattedBytes) · \(state.title)")
             .accessibilityElement()
             .accessibilityLabel("\(candidate.title), \(candidate.bytes.formattedBytes), \(state.title)")
-            .accessibilityAddTraits(.isButton)
     }
 }
 
