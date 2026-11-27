@@ -1,38 +1,40 @@
 import ArinCore
 import SwiftUI
 
+/// Free space as a large number over a bar of the whole disk. With findings, the bar shows them by category.
 struct DiskGauge: View {
     var disk: DiskStatus
     var threshold: Int64
+    var findings: [(category: CleanupCategory, bytes: Int64)] = []
     var compact = false
 
-    private var tint: Color {
-        if disk.freeBytes < threshold { return .red }
-        if disk.usedFraction > 0.85 { return .orange }
-        return .accentColor
-    }
+    private var isLow: Bool { disk.freeBytes < threshold }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+        VStack(alignment: .leading, spacing: compact ? 6 : 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(disk.freeBytes.formattedBytes)
-                    .font(compact ? .headline : .title2.weight(.semibold))
-                    .monospacedDigit()
+                SizeText(bytes: disk.freeBytes, size: compact ? 22 : 26)
                 Text("free")
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(Int((disk.usedFraction * 100).rounded()))% used")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                if isLow {
+                    Chip(text: "Low", color: .red)
+                }
             }
-            ProgressView(value: disk.usedFraction)
-                .tint(tint)
-            Text("of \(disk.totalBytes.formattedBytes)")
-                .font(.caption)
+            SpaceBar(total: disk.totalBytes, segments: segments, height: compact ? 8 : 10)
+            Text("\(Int((disk.usedFraction * 100).rounded()))% used of \(disk.totalBytes.formattedBytes)")
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(disk.freeBytes.formattedBytes) free of \(disk.totalBytes.formattedBytes)\(isLow ? ", below your alert threshold" : "")")
+    }
+
+    private var segments: [SpaceBar.Segment] {
+        let used = disk.totalBytes - disk.freeBytes
+        let found = min(findings.reduce(0) { $0 + $1.bytes }, used)
+        let other = SpaceBar.Segment(id: "used", bytes: used - found, color: isLow ? .red.opacity(0.55) : Theme.usedSpace)
+        return [other] + findings.map { SpaceBar.Segment(id: $0.category.rawValue, bytes: $0.bytes, color: $0.category.color) }
     }
 }
 

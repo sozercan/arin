@@ -25,9 +25,9 @@ final class AppModel {
     }
 
     enum SidebarItem: Hashable {
+        case overview
         case all
         case category(CleanupCategory)
-        case insights
     }
 
     // MARK: State
@@ -37,7 +37,7 @@ final class AppModel {
     var candidates: [Candidate] = []
     var selection = Set<String>()
     var phase = Phase.idle
-    var sidebar: SidebarItem? = .all
+    var sidebar: SidebarItem? = .overview
     var lastCleanup: CleanupReport?
     var showingConfirm = false
     var showingResult = false
@@ -89,6 +89,11 @@ final class AppModel {
         didSet { defaults.set(extraProjectRoots, forKey: "extraProjectRoots") }
     }
 
+    /// Measured free-space gain across every cleanup, manual and automatic.
+    var lifetimeFreedBytes: Int64 {
+        didSet { defaults.set(lifetimeFreedBytes, forKey: "lifetimeFreedBytes") }
+    }
+
     /// Per agent; an empty model means the CLI's own default.
     var reviewModels: [String: String] {
         didSet { defaults.set(reviewModels, forKey: "reviewModels") }
@@ -118,6 +123,7 @@ final class AppModel {
         checkPullRequests = defaults.object(forKey: "checkPullRequests") as? Bool ?? true
         fetchRemotes = defaults.bool(forKey: "fetchRemotes")
         extraProjectRoots = defaults.stringArray(forKey: "extraProjectRoots") ?? []
+        lifetimeFreedBytes = (defaults.object(forKey: "lifetimeFreedBytes") as? NSNumber)?.int64Value ?? 0
         var models = defaults.dictionary(forKey: "reviewModels") as? [String: String] ?? [:]
         var efforts = defaults.dictionary(forKey: "reviewEfforts") as? [String: String] ?? [:]
         for provider in AgentProvider.allCases {
@@ -144,9 +150,8 @@ final class AppModel {
 
     func candidates(for item: SidebarItem?) -> [Candidate] {
         switch item {
-        case .all, nil: candidates
+        case .overview, .all, nil: candidates
         case let .category(category): candidates.filter { $0.category == category }
-        case .insights: []
         }
     }
 
@@ -157,6 +162,14 @@ final class AppModel {
     var categoriesWithResults: [CleanupCategory] {
         CleanupCategory.allCases.filter { c in candidates.contains { $0.category == c } }
     }
+
+    /// Findings per category, largest first, for the disk bar and the overview.
+    var findingsByCategory: [(category: CleanupCategory, bytes: Int64)] {
+        categoriesWithResults.map { ($0, bytes(for: $0)) }.sorted { $0.bytes > $1.bytes }
+    }
+
+    /// What the current level would pre-select.
+    var safeBytes: Int64 { candidates.filter { $0.isDefaultSelected(at: level) }.dedupedBytes }
 
     var scanOptions: ScanOptions {
         let defaultsRoots = ScanOptions.defaultProjectRoots(home: NSHomeDirectory())
@@ -299,6 +312,7 @@ final class AppModel {
             Task { @MainActor in self?.phase = .cleaning(done: index, total: total, current: title) }
         }
         lastCleanup = result
+        lifetimeFreedBytes += max(result.measuredBytes, 0)
         let cleanedIDs = Set(result.items.filter { $0.status == .cleaned }.map(\.id))
         candidates.removeAll { cleanedIDs.contains($0.id) }
         selection.subtract(cleanedIDs)

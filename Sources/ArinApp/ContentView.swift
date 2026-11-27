@@ -8,20 +8,25 @@ struct ContentView: View {
         @Bindable var model = model
         NavigationSplitView {
             Sidebar()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250)
+                .navigationSplitViewColumnWidth(min: 230, ideal: 260)
         } detail: {
             Group {
                 if model.report == nil {
                     WelcomeView()
-                } else if model.sidebar == .insights {
-                    InsightsView()
                 } else {
-                    CandidateList(items: model.candidates(for: model.sidebar))
+                    switch model.sidebar {
+                    case .overview, nil: OverviewView()
+                    case let item?: CandidateList(items: model.candidates(for: item))
+                    }
                 }
             }
-            .safeAreaInset(edge: .bottom) { StatusBar() }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Before the first scan finishes, the welcome screen shows progress and its own Stop button.
+                if model.report != nil { ActionBar() }
+            }
         }
         .toolbar { Toolbar() }
+        .tint(Theme.signature)
         .sheet(isPresented: $model.showingConfirm) { ConfirmSheet() }
         .sheet(isPresented: $model.showingResult) { ResultSheet() }
         .alert("Something went wrong", isPresented: Binding(
@@ -42,39 +47,37 @@ private struct Sidebar: View {
         @Bindable var model = model
         List(selection: $model.sidebar) {
             Section {
-                DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold)
-                    .padding(.vertical, 6)
+                DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold, findings: model.findingsByCategory)
+                    .padding(.vertical, 8)
                     .selectionDisabled()
             }
-            if model.report != nil {
-                Section("Found") {
-                    row(.all, "All", "square.grid.2x2", model.candidates.dedupedBytes)
-                    ForEach(model.categoriesWithResults, id: \.self) { category in
-                        row(.category(category), category.label, category.symbol, model.bytes(for: category))
-                    }
+            if let report = model.report {
+                Section {
+                    Label("Overview", systemImage: "circle.grid.2x2")
+                        .badge(report.insights.count + report.ruleErrors.count)
+                        .tag(AppModel.SidebarItem.overview)
                 }
-                if let report = model.report, !report.insights.isEmpty || !report.ruleErrors.isEmpty {
-                    Section {
-                        Label("Insights", systemImage: "lightbulb")
-                            .badge(report.insights.count + report.ruleErrors.count)
-                            .tag(AppModel.SidebarItem.insights)
+                Section("Found") {
+                    row(.all, "All items", Image(systemName: "square.stack"), color: .secondary, model.candidates.dedupedBytes)
+                    ForEach(model.categoriesWithResults, id: \.self) { category in
+                        row(.category(category), category.label, Image(systemName: category.symbol), color: category.color, model.bytes(for: category))
                     }
                 }
             }
         }
     }
 
-    private func row(_ item: AppModel.SidebarItem, _ title: String, _ symbol: String, _ bytes: Int64) -> some View {
+    private func row(_ item: AppModel.SidebarItem, _ title: String, _ icon: Image, color: Color, _ bytes: Int64) -> some View {
         Label {
             HStack {
                 Text(title)
                 Spacer()
                 Text(bytes.formattedBytes)
+                    .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .monospacedDigit()
             }
         } icon: {
-            Image(systemName: symbol)
+            icon.foregroundStyle(color)
         }
         .tag(item)
     }
@@ -92,64 +95,107 @@ private struct Toolbar: ToolbarContent {
             .pickerStyle(.segmented)
             .help("Quick: caches that refill on their own. Standard: adds build output and merged worktrees. Deep: simulator data, toolchains, app data.")
         }
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                model.showingConfirm = true
-            } label: {
-                Text(model.selection.isEmpty ? "Clean" : "Clean \(model.selectedBytes.formattedBytes)")
+        if model.report != nil {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if model.agent != nil {
+                    Button {
+                        model.startReview()
+                    } label: {
+                        Label(model.lastReview == nil ? "Review" : "Review Again", systemImage: "sparkles")
+                    }
+                    .disabled(model.phase.isBusy || model.itemsNeedingReview.isEmpty)
+                    .help("Ask your agent to check the items the rules couldn't settle")
+                }
+                if model.canStop {
+                    Button {
+                        model.stop()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .help("Stop and keep the previous results")
+                } else {
+                    Button {
+                        model.startScan()
+                    } label: {
+                        Label("Rescan", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.phase.isBusy)
+                    .help("Scan again")
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.phase.isBusy || model.selection.isEmpty)
         }
     }
 }
 
-private struct StatusBar: View {
+/// The selection and the Clean button, or progress while Arin is busy.
+private struct ActionBar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        // Before the first scan finishes, the welcome screen shows progress and its own Stop button.
-        if model.report != nil {
-            HStack(spacing: 10) {
-                if model.phase.isBusy {
-                    ProgressView().controlSize(.small)
-                    Text(model.phase.label).lineLimit(1).truncationMode(.middle)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    if model.canStop {
-                        Button("Stop") { model.stop() }
-                            .help("Keeps the previous results")
-                    }
-                } else {
-                    Text("\(model.selection.count) selected · \(model.selectedBytes.formattedBytes) estimated")
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    if let report = model.report {
-                        Text(summary(report))
-                            .lineLimit(1)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Rescan") { model.startScan() }
-                    if model.agent != nil, !model.itemsNeedingReview.isEmpty {
-                        Button(model.lastReview == nil ? "Review" : "Review again") { model.startReview() }
-                            .help("Ask your agent to check the items the rules couldn't settle")
-                    }
+        HStack(spacing: 12) {
+            if model.phase.isBusy {
+                ProgressView().controlSize(.small)
+                Text(model.phase.label)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if model.canStop {
+                    Button("Stop") { model.stop() }
+                        .help("Keeps the previous results")
                 }
+            } else {
+                selectionIcons
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.selection.isEmpty ? "Nothing selected" : "\(model.selection.count) \(model.selection.count == 1 ? "item" : "items") selected")
+                        .font(.callout.weight(.medium))
+                    Text(model.selection.isEmpty ? "Tick items to clean them" : "About \(model.selectedBytes.formattedBytes) by folder size")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                if !model.selection.isEmpty {
+                    Button("Clear") { model.setAll(model.selectedCandidates, selected: false) }
+                        .buttonStyle(.link)
+                        .font(.callout)
+                }
+                Spacer(minLength: 8)
+                Button {
+                    model.showingConfirm = true
+                } label: {
+                    Text(model.selection.isEmpty ? "Clean" : "Clean \(model.selectedBytes.formattedBytes)")
+                        .monospacedDigit()
+                        .contentTransition(.numericText(value: Double(model.selectedBytes)))
+                        .padding(.horizontal, 10)
+                }
+                .buttonStyle(.glassProminent)
+                .controlSize(.large)
+                .disabled(model.selection.isEmpty)
+                .animation(.smooth, value: model.selectedBytes)
             }
-            .buttonStyle(.link)
-            .font(.callout)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.bar)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .glassEffect(.regular, in: .rect(cornerRadius: 18))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 12)
     }
 
-    private func summary(_ report: ScanReport) -> String {
-        var text = "Scanned \(report.finishedAt.formatted(.relative(presentation: .named)))"
-        if let review = model.lastReview {
-            text += " · checked by \(review.agent)"
+    /// Up to four category icons for what's selected.
+    private var selectionIcons: some View {
+        let categories = CleanupCategory.allCases.filter { c in model.selectedCandidates.contains { $0.category == c } }
+        return HStack(spacing: -6) {
+            if categories.isEmpty {
+                Image(systemName: "checklist")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+            ForEach(categories.prefix(4), id: \.self) { category in
+                CategoryIcon(category: category, size: 28)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
         }
-        return text
+        .accessibilityHidden(true)
     }
 }
 
@@ -157,100 +203,98 @@ private struct WelcomeView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(spacing: 28) {
-            VStack(spacing: 8) {
-                Image(systemName: "internaldrive")
-                    .font(.system(size: 44, weight: .light))
-                    .foregroundStyle(.tint)
-                Text("Find what's safe to delete")
-                    .font(.largeTitle.weight(.semibold))
-                Text("Arin knows where developer Macs hide space, checks each item before touching it, and lets your own coding agent weigh in.")
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 520)
-            }
-            HStack(alignment: .top, spacing: 18) {
-                step("1", "magnifyingglass", "Scan", "Caches, build output, merged worktrees, simulators, stale temp files. Read-only.")
-                step("2", "sparkles", "Review", "Then Claude Code or Codex checks what the rules can't settle, read-only, and marks it safe, review, or keep.")
-                step("3", "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
-            }
-            .frame(maxWidth: 720)
-            Group {
-                if model.isScanning {
-                    Button(role: .cancel) {
-                        model.stop()
-                    } label: {
-                        Label("Stop Scan", systemImage: "stop.fill")
-                            .padding(.horizontal, 12)
+        ScrollView {
+            VStack(spacing: 30) {
+                VStack(spacing: 18) {
+                    Image(systemName: "internaldrive.fill")
+                        .font(.system(size: 34, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(width: 76, height: 76)
+                        .background(Theme.signature.gradient, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        .shadow(color: Theme.signature.opacity(0.35), radius: 14, y: 6)
+                        .symbolEffect(.pulse, isActive: model.isScanning)
+                    VStack(spacing: 8) {
+                        Text("Find what's safe to delete")
+                            .font(.largeTitle.weight(.semibold))
+                        Text("Arin knows where developer Macs hide space, checks each item before touching it, and lets your own coding agent weigh in.")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 520)
                     }
-                    .buttonStyle(.bordered)
-                } else {
-                    Button {
-                        model.startScan()
-                    } label: {
-                        Label("Scan this Mac", systemImage: "magnifyingglass")
-                            .padding(.horizontal, 12)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.phase.isBusy)
                 }
-            }
-            .controlSize(.extraLarge)
 
-            if model.phase.isBusy {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(model.phase.label).lineLimit(1)
+                DiskGauge(disk: model.disk, threshold: model.lowSpaceThreshold)
+                    .frame(maxWidth: 420)
+                    .card(padding: 18)
+                    .frame(maxWidth: 420)
+
+                HStack(alignment: .top, spacing: 14) {
+                    step(1, "magnifyingglass", "Scan", "Caches, build output, merged worktrees, simulators, stale temp files. Read-only.")
+                    step(2, "sparkles", "Review", "Claude Code or Codex checks what the rules can't settle, read-only, and marks it safe, review, or keep.")
+                    step(3, "checkmark.circle", "You choose", "Only what you tick is removed. Arin re-checks open files and running apps first.")
                 }
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                .frame(maxWidth: 760)
+
+                VStack(spacing: 12) {
+                    if model.isScanning {
+                        Button(role: .cancel) {
+                            model.stop()
+                        } label: {
+                            Label("Stop Scan", systemImage: "stop.fill")
+                                .padding(.horizontal, 14)
+                        }
+                        .buttonStyle(.glass)
+                    } else {
+                        Button {
+                            model.startScan()
+                        } label: {
+                            Label("Scan this Mac", systemImage: "magnifyingglass")
+                                .padding(.horizontal, 14)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .disabled(model.phase.isBusy)
+                    }
+                    if model.phase.isBusy {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(model.phase.label).lineLimit(1)
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .controlSize(.extraLarge)
             }
+            .padding(40)
+            .frame(maxWidth: .infinity)
         }
-        .padding(40)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(alignment: .top) {
+            Theme.heroWash
+                .frame(height: 360)
+                .mask(LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom))
+                .ignoresSafeArea()
+        }
     }
 
-    private func step(_ number: String, _ symbol: String, _ title: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(title, systemImage: symbol)
-                .font(.headline)
+    private func step(_ number: Int, _ symbol: String, _ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text("\(number)")
+                    .font(.callout.weight(.bold).monospacedDigit())
+                    .foregroundStyle(Theme.signature)
+                    .frame(width: 26, height: 26)
+                    .background(Theme.signature.opacity(0.14), in: Circle())
+                Label(title, systemImage: symbol)
+                    .font(.headline)
+            }
             Text(text)
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+        .frame(minHeight: 110, alignment: .topLeading)
+        .card(padding: 16)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel("Step \(number): \(title). \(text)")
-    }
-}
-
-private struct InsightsView: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        List {
-            if let report = model.report {
-                ForEach(report.insights) { insight in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Label(insight.title, systemImage: "lightbulb").font(.headline)
-                            Spacer()
-                            if let bytes = insight.bytes { Text(bytes.formattedBytes).foregroundStyle(.secondary) }
-                        }
-                        Text(insight.detail).foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 6)
-                }
-                ForEach(report.ruleErrors.sorted(by: { $0.key < $1.key }), id: \.key) { name, error in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(name, systemImage: "exclamationmark.triangle").font(.headline)
-                        Text(error).foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 6)
-                }
-            }
-        }
     }
 }

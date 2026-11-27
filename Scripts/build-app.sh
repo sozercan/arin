@@ -53,6 +53,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources"
 install_product ArinApp "$APP/Contents/MacOS/Arin"
 install_product arin "$APP/Contents/Helpers/arin"
 rm -rf "$STAGE"
+# Regenerate with: swift Scripts/make-icon.swift
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -63,6 +65,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Arin</string>
   <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleExecutable</key><string>Arin</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${MARKETING_VERSION}</string>
   <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
