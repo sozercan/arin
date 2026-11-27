@@ -140,6 +140,7 @@ struct Strata {
         var bytes: Int64
         var items: Int
         var uninstalled: String?
+        var removedApp = false
         var id: Date { date }
     }
 
@@ -189,7 +190,8 @@ struct Strata {
         let removals = cleanups
             .compactMap { record -> Cut? in
                 let removed = record.items.filter { $0.status == .cleaned || $0.status == .partial }.count
-                return removed > 0 ? Cut(date: record.date, bytes: record.measuredBytes, items: removed, uninstalled: record.uninstalled) : nil
+                let removedApp = record.items.contains { $0.id.hasSuffix(".app") && $0.status == .cleaned }
+                return removed > 0 ? Cut(date: record.date, bytes: record.measuredBytes, items: removed, uninstalled: record.uninstalled, removedApp: removedApp) : nil
             }
             .sorted { $0.date < $1.date }
         cuts = removals.filter { $0.date >= first.date && $0.date <= latest.date }
@@ -217,7 +219,7 @@ struct Strata {
 
 extension Strata.Cut {
     var label: String {
-        if let uninstalled { return "Uninstalled \(uninstalled)" }
+        if let uninstalled { return removedApp ? "Uninstalled \(uninstalled)" : "Removed \(uninstalled) files" }
         return bytes > 0 ? "Cleaned \(bytes.formattedBytes)" : "Cleaned \(items) \(items == 1 ? "item" : "items")"
     }
 }
