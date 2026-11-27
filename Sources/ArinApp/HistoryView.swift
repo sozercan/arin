@@ -139,6 +139,7 @@ struct Strata {
         var date: Date
         var bytes: Int64
         var items: Int
+        var uninstalled: String?
         var id: Date { date }
     }
 
@@ -186,10 +187,9 @@ struct Strata {
             }
         }
         let removals = cleanups
-            .filter { $0.uninstalled == nil }
             .compactMap { record -> Cut? in
                 let removed = record.items.filter { $0.status == .cleaned || $0.status == .partial }.count
-                return removed > 0 ? Cut(date: record.date, bytes: record.measuredBytes, items: removed) : nil
+                return removed > 0 ? Cut(date: record.date, bytes: record.measuredBytes, items: removed, uninstalled: record.uninstalled) : nil
             }
             .sorted { $0.date < $1.date }
         cuts = removals.filter { $0.date >= first.date && $0.date <= latest.date }
@@ -212,6 +212,13 @@ struct Strata {
         .sorted { $0.perWeek > $1.perWeek }
         .prefix(4)
         .map { $0 }
+    }
+}
+
+extension Strata.Cut {
+    var label: String {
+        if let uninstalled { return "Uninstalled \(uninstalled)" }
+        return bytes > 0 ? "Cleaned \(bytes.formattedBytes)" : "Cleaned \(items) \(items == 1 ? "item" : "items")"
     }
 }
 
@@ -244,7 +251,7 @@ private struct StrataChart: View {
                     .foregroundStyle(.primary.opacity(0.55))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .top, alignment: .leading, spacing: 2) {
-                        Text(cut.bytes > 0 ? "Cleaned \(cut.bytes.formattedBytes)" : "Cleaned \(cut.items) \(cut.items == 1 ? "item" : "items")")
+                        Text(cut.label)
                             .font(.caption.weight(.semibold))
                     }
             }
