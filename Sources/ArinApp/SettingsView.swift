@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var choosingFolder = false
+    @State private var newHostTarget = ""
+    @State private var sshConfigHosts: [String] = []
 
     var body: some View {
         @Bindable var model = model
@@ -116,6 +118,44 @@ struct SettingsView: View {
                 }
                 Button("Add Folder…") { choosingFolder = true }
             }
+
+            Section("Remote hosts (SSH)") {
+                ForEach(model.remoteHosts) { host in
+                    HStack {
+                        Label(host.displayName, systemImage: "server.rack")
+                        Spacer()
+                        Button(role: .destructive) {
+                            model.removeRemoteHost(host)
+                        } label: { Image(systemName: "minus.circle") }
+                            .buttonStyle(.borderless)
+                            .disabled(model.phase.isBusy && model.target == .remote(host))
+                            .help("Remove host")
+                            .accessibilityLabel("Remove \(host.displayName)")
+                    }
+                }
+                HStack {
+                    TextField("SSH host or user@host", text: $newHostTarget, prompt: Text("e.g. vm"))
+                        .onSubmit { addRemoteHost() }
+                    Button("Add") { addRemoteHost() }
+                        .disabled(!RemoteHost.isValidTarget(newHostTarget) || model.remoteHosts.contains { $0.target == newHostTarget.trimmingCharacters(in: .whitespacesAndNewlines) })
+                }
+                let suggestions = sshConfigHosts.filter { alias in !model.remoteHosts.contains { $0.target == alias } }
+                if !suggestions.isEmpty {
+                    HStack {
+                        Text("From ~/.ssh/config:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(suggestions.prefix(6), id: \.self) { alias in
+                            Button(alias) { model.addRemoteHost(target: alias) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        }
+                    }
+                }
+                Text("Uses your existing SSH config and keys (`ssh -o BatchMode=yes`). Switch hosts from the sidebar.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .frame(minWidth: 480, idealWidth: 520, minHeight: 480, idealHeight: 640)
@@ -126,7 +166,15 @@ struct SettingsView: View {
         .onAppear {
             model.reloadKeepList()
             model.refreshLaunchAtLogin()
+            sshConfigHosts = SSHConfig.hosts()
         }
+    }
+
+    private func addRemoteHost() {
+        let trimmed = newHostTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard RemoteHost.isValidTarget(trimmed) else { return }
+        model.addRemoteHost(target: trimmed)
+        newHostTarget = ""
     }
 
     private func add(_ url: URL) {

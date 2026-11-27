@@ -61,6 +61,7 @@ public struct KeepList: Codable, Sendable, Equatable {
         public var title: String
         public var added: Date
         public var paths: [String]?
+        public var remoteHost: String?
     }
 
     public var entries: [Entry]
@@ -73,15 +74,19 @@ public struct KeepList: Codable, Sendable, Equatable {
 
     public func contains(_ id: String) -> Bool { entries.contains { $0.id == id } }
 
-    public func keptEntry(insideOrAt target: String) -> Entry? {
-        KeptPaths(entries).insideOrAt(target)
+    public func keptEntry(insideOrAt target: String, remoteHost: String? = nil) -> Entry? {
+        KeptPaths(entries, remoteHost: remoteHost).insideOrAt(target)
     }
 
     @discardableResult
-    public mutating func recordPaths(_ found: [String: [String]]) -> Bool {
+    public mutating func recordPaths(_ found: [String: [String]], remoteHost: String? = nil) -> Bool {
         var changed = false
         for index in entries.indices {
             guard let paths = found[entries[index].id] else { continue }
+            if let remoteHost, entries[index].remoteHost == nil {
+                entries[index].remoteHost = remoteHost
+                changed = true
+            }
             let known = entries[index].paths ?? []
             let added = paths.filter { !known.contains($0) }
             guard !added.isEmpty else { continue }
@@ -105,9 +110,9 @@ public struct KeepList: Codable, Sendable, Equatable {
         return path
     }
 
-    public mutating func add(id: String, title: String, paths: [String] = [], now: Date = Date()) {
+    public mutating func add(id: String, title: String, paths: [String] = [], remoteHost: String? = nil, now: Date = Date()) {
         guard !contains(id) else { return }
-        entries.append(Entry(id: id, title: title, added: now, paths: paths.isEmpty ? nil : paths))
+        entries.append(Entry(id: id, title: title, added: now, paths: paths.isEmpty ? nil : paths, remoteHost: remoteHost))
     }
 
     public mutating func remove(id: String) {
@@ -125,12 +130,12 @@ public struct KeepList: Codable, Sendable, Equatable {
         }
     }
 
-    public static func load(from url: URL = defaultURL, recording found: [String: [String]]) -> Result<KeepList, any Error> {
+    public static func load(from url: URL = defaultURL, recording found: [String: [String]], remoteHost: String? = nil) -> Result<KeepList, any Error> {
         Result {
             var list = try load(from: url)
-            guard list.recordPaths(found) else { return list }
+            guard list.recordPaths(found, remoteHost: remoteHost) else { return list }
             do {
-                return try update(at: url) { $0.recordPaths(found) }
+                return try update(at: url) { $0.recordPaths(found, remoteHost: remoteHost) }
             } catch {
                 throw StoreError("the folders that kept items cover couldn't be saved to the keep list (\(error)); nothing can be cleaned until it can be")
             }
@@ -157,19 +162,32 @@ public struct KeepList: Codable, Sendable, Equatable {
 
 struct KeptPaths {
     private let items: [(path: String, entry: KeepList.Entry)]
+    private let isRemote: Bool
 
-    init(_ entries: [KeepList.Entry]) {
-        items = entries.flatMap { entry in (entry.paths ?? []).map { (KeepList.canonical($0), entry) } }
+    init(_ entries: [KeepList.Entry], remoteHost: String? = nil, extraRemotePaths: [String: [String]] = [:]) {
+        isRemote = remoteHost != nil
+        let matching = entries.filter { $0.remoteHost == remoteHost }
+        items = matching.flatMap { entry in
+            let allPaths = (entry.paths ?? []) + (extraRemotePaths[entry.id] ?? [])
+            return allPaths.map { path in
+                let normalized = remoteHost != nil ? (path as NSString).standardizingPath : KeepList.canonical(path)
+                return (normalized, entry)
+            }
+        }
+    }
+
+    private func normalize(_ target: String) -> String {
+        isRemote ? (target as NSString).standardizingPath : KeepList.canonical(target)
     }
 
     func insideOrAt(_ target: String) -> KeepList.Entry? {
-        let target = KeepList.canonical(target)
+        let target = normalize(target)
         let prefix = target.hasSuffix("/") ? target : target + "/"
         return items.first { $0.path == target || $0.path.hasPrefix(prefix) }?.entry
     }
 
     func around(_ target: String) -> KeepList.Entry? {
-        let target = KeepList.canonical(target)
+        let target = normalize(target)
         return items.first { target.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }?.entry
     }
 }
@@ -181,8 +199,8 @@ extension Candidate {
 }
 
 public extension [Candidate] {
-    func applying(keep: Result<KeepList, any Error>) -> [Candidate] {
-        let kept = (try? keep.get()).map { KeptPaths($0.entries) }
+    func applying(keep: Result<KeepList, any Error>, remoteHost: String? = nil) -> [Candidate] {
+        let kept = (try? keep.get()).map { KeptPaths($0.entries, remoteHost: remoteHost) }
         return map { candidate in
             var copy = candidate
             let previous = copy.keepBlockers
@@ -245,11 +263,13 @@ public struct ScanRecord: Codable, Sendable, Hashable {
     public var totalBytes: Int64
     public var bytesByRule: [String: Int64]
     public var labels: [String: String]
+    public var remoteHost: String?
 
     public init(_ report: ScanReport, ruleNames: [String: String] = [:]) {
         date = report.finishedAt
         freeBytes = report.disk.freeBytes
         totalBytes = report.disk.totalBytes
+        remoteHost = report.remoteHost
         var bytes: [String: Int64] = [:]
         var titles: [String: [String]] = [:]
         for candidate in report.candidates {
@@ -272,13 +292,15 @@ public struct CleanupRecord: Codable, Sendable, Hashable {
     public var estimatedBytes: Int64
     public var items: [CleanupItemResult]
     public var uninstalled: String?
+    public var remoteHost: String?
 
     public var measuredBytes: Int64 { freeAfter - freeBefore }
 
-    public init(_ report: CleanupReport, auto: Bool, uninstalled: String? = nil, date: Date = Date()) {
+    public init(_ report: CleanupReport, auto: Bool, uninstalled: String? = nil, remoteHost: String? = nil, date: Date = Date()) {
         self.date = date
         self.auto = auto
         self.uninstalled = uninstalled
+        self.remoteHost = remoteHost
         freeBefore = report.freeBefore
         freeAfter = report.freeAfter
         estimatedBytes = report.estimatedBytes
@@ -385,11 +407,15 @@ public struct CleanupPlan: Codable, Sendable {
 
     public var version: Int
     public var createdAt: Date
+    public var remoteHost: String?
+    public var remoteIdentity: String?
     public var items: [Item]
 
-    public init(_ candidates: [Candidate], now: Date = Date()) {
+    public init(_ candidates: [Candidate], remoteHost: String? = nil, remoteIdentity: String? = nil, now: Date = Date()) {
         version = 1
         createdAt = now
+        self.remoteHost = remoteHost
+        self.remoteIdentity = remoteIdentity
         items = candidates.map {
             Item(id: $0.id, title: $0.title, bytes: $0.bytes, risk: $0.effectiveRisk, action: $0.action, paths: $0.paths)
         }

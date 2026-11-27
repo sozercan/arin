@@ -247,6 +247,8 @@ public struct ScanReport: Codable, Sendable {
     public var insights: [Insight]
     public var ruleErrors: [String: String]
     public var keptPaths: [String: [String]] = [:]
+    public var remoteHost: String?
+    public var remoteIdentity: String?
 
     public var totalBytes: Int64 { candidates.reduce(0) { $0 + $1.bytes } }
 }

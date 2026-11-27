@@ -12,9 +12,11 @@ struct ConfirmSheet: View {
 
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Clean \(items.count) items?")
+                Text("Clean \(items.count) items\(model.target.isRemote ? " on \(model.target.displayName)" : "")?")
                     .font(.title2.weight(.semibold))
-                Text("About \(items.dedupedBytes.formattedBytes) by folder size. The real gain is measured afterward and is often smaller, because APFS shares blocks between copies.")
+                Text(model.target.isRemote
+                     ? "About \(items.dedupedBytes.formattedBytes) estimated on \(model.target.displayName). The real gain is measured afterward via df."
+                     : "About \(items.dedupedBytes.formattedBytes) by folder size. The real gain is measured afterward and is often smaller, because APFS shares blocks between copies.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -46,16 +48,18 @@ struct ConfirmSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            Toggle("Move to Trash instead of deleting", isOn: $model.trashInsteadOfDelete)
-            Text("Trash is reversible, but frees nothing until you empty it. Tool commands (go clean, git worktree remove, simctl) always run directly.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if !model.target.isRemote {
+                Toggle("Move to Trash instead of deleting", isOn: $model.trashInsteadOfDelete)
+                Text("Trash is reversible, but frees nothing until you empty it. Tool commands (go clean, git worktree remove, simctl) always run directly.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(model.trashInsteadOfDelete ? "Move to Trash" : "Clean", role: .destructive) {
+                Button(!model.target.isRemote && model.trashInsteadOfDelete ? "Move to Trash" : "Clean", role: .destructive) {
                     dismiss()
                     Task { await model.clean() }
                 }

@@ -140,7 +140,9 @@ struct CandidateList: View {
             Divider()
         }
         if picked.contains(where: { !$0.paths.isEmpty }) {
-            Button("Reveal in Finder") { reveal(picked) }
+            if !model.target.isRemote {
+                Button("Reveal in Finder") { reveal(picked) }
+            }
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(picked.flatMap(\.paths).joined(separator: "\n"), forType: .string)
@@ -149,6 +151,7 @@ struct CandidateList: View {
     }
 
     private func reveal(_ items: [Candidate]) {
+        guard !model.target.isRemote else { return }
         let urls = items.compactMap(\.paths.first).map { URL(fileURLWithPath: $0) }
         if !urls.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(urls) }
     }
@@ -293,14 +296,16 @@ private struct CandidateInspector: View {
                                 .truncationMode(.middle)
                                 .textSelection(.enabled)
                             Spacer()
-                            Button {
-                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-                            } label: {
-                                Image(systemName: "arrow.forward.circle")
+                            if !model.target.isRemote {
+                                Button {
+                                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                                } label: {
+                                    Image(systemName: "arrow.forward.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Reveal in Finder")
+                                .accessibilityLabel("Reveal \(path) in Finder")
                             }
-                            .buttonStyle(.borderless)
-                            .help("Reveal in Finder")
-                            .accessibilityLabel("Reveal \(path) in Finder")
                         }
                     }
                     if item.paths.count > 50 {
